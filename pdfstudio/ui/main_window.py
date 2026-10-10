@@ -242,7 +242,7 @@ class MainWindow(QMainWindow):
         w.setFixedHeight(T.MODEBAR_H)
         h = QHBoxLayout(w)
         h.setContentsMargins(10, 0, 10, 0)
-        self.btn_sidebar = IconButton("sidebar-simple" if False else "layout", tr("shell.view.sidebar"),
+        self.btn_sidebar = IconButton("layout", tr("shell.view.sidebar"),
                                       variant="icon", checkable=True, icon_size=18)
         self.btn_sidebar.clicked.connect(lambda: self.actions.trigger("view.toggle_sidebar"))
         h.addWidget(self.btn_sidebar)
@@ -848,14 +848,14 @@ class MainWindow(QMainWindow):
 
     # ============================================================== panels
     def toggle_sidebar(self, on: bool | None = None) -> None:
-        self._sidebar_on = (not self._sidebar_on) if on is None or on == self._sidebar_on else bool(on)
+        self._sidebar_on = (not self._sidebar_on) if on is None else bool(on)
         self.settings.setValue("view/sidebar", self._sidebar_on)
         for ws in self.workspaces():
             ws.set_sidebar_visible(self._sidebar_on)
         self._update_chrome()
 
     def toggle_inspector(self, on: bool | None = None) -> None:
-        self._inspector_on = (not self._inspector_on) if on is None or on == self._inspector_on else bool(on)
+        self._inspector_on = (not self._inspector_on) if on is None else bool(on)
         self.settings.setValue("view/inspector", self._inspector_on)
         for ws in self.workspaces():
             ws.set_inspector_visible(self._inspector_on)

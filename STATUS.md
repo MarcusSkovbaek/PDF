@@ -9,7 +9,10 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 - Core engine (tested): `render`, `pages`, `merge`, `images`, `search`, `annotations`.
 - Split dialog: `ui/dialogs/split_dialog.py` (each page / every N / ranges, live preview, folder picker,
   overwrite confirm, success toast) + `core.pages.split_plan()` + `tests/test_split_dialog.py`.
-  Reference implementation for the other dialogs (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
+- Images -> PDF dialog: `ui/dialogs/images_dialog.py` (thumbnail grid with drag-reorder, file/Explorer drops,
+  Ctrl+V clipboard screenshots, sort/remove, page size/margin/orientation/placement, live page preview);
+  dropping several images on the app opens it pre-filled. Tests: `tests/test_images_dialog.py`.
+  Both dialogs are the reference implementation for the remaining ones (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -34,10 +37,9 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   Add text = drag a box, defaults from `insert.document_text_style`. Add image = file picker or
   clipboard paste, drag to place, keep aspect. Select/move/resize/delete existing annotations.
 - **Agent B – Comment tools + dialogs + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
-  `dialogs/merge_dialog.py` `MergeDialog` (+`.result_bytes`), `dialogs/images_dialog.py` `ImagesToPdfDialog`
-  (drag&drop, Ctrl+V clipboard screenshots, reorder, page size/orientation/margin options, live preview),
-  pages-mode grid organiser (split dialog already DONE – follow its style); `i18n/da_comment.py`,
-  `da_dialogs.py`; tests). Home cards already call actions `tools.merge`, `tools.images_to_pdf`.
+  `dialogs/merge_dialog.py` `MergeDialog` (+`.result_bytes`), pages-mode grid organiser
+  (split + images dialogs already DONE – follow their style); `i18n/da_comment.py`,
+  `da_dialogs.py`; tests). Home card already calls action `tools.merge` (images dialog DONE).
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit

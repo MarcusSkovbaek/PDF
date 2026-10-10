@@ -212,7 +212,11 @@ def test_new_blank_and_save_without_path_uses_save_as(win, qapp, tmp_path, monke
     assert called.get("ok")
 
 
-def test_open_images_and_drop_overlay(win, qapp, tmp_path):
+def test_open_images_and_drop_overlay(win, qapp, tmp_path, monkeypatch):
+    from pdfstudio.ui.dialogs.images_dialog import ImagesToPdfDialog
+
+    # several images open the images->PDF dialog; simulate pressing "Opret PDF"
+    monkeypatch.setattr(ImagesToPdfDialog, "exec", lambda self: (self._create(), self.result())[1])
     p1 = tmp_path / "a.png"
     p2 = tmp_path / "b.png"
     p1.write_bytes(make_png())

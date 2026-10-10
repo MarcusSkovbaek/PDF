@@ -233,6 +233,8 @@ QFrame#ActionCard {
 }
 QFrame#ActionCard:hover { border: 1px solid @accent_border; background: @card_hover; }
 QFrame#IconWell { background: @accent_soft; border: none; border-radius: 10px; }
+QFrame#Card { background: @surface_raised; border: 1px solid @border; border-radius: 14px; }
+QListWidget#ImageGrid { background: @surface_raised; border: 1px solid @border; border-radius: 14px; padding: 6px; }
 QFrame#RecentRow { background: transparent; border-radius: 8px; border: 1px solid transparent; }
 QFrame#RecentRow:hover { background: @hover; }
 QFrame#EmptyState { background: transparent; }

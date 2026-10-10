@@ -697,23 +697,8 @@ class MainWindow(QMainWindow):
         if len(images) == 1:
             self.open_path(images[0])
         elif images:
-            self._images_to_document(images)
-
-    def _images_to_document(self, images: list[str]) -> None:
-        try:
-            from ..core.images import images_to_pdf
-        except Exception:
-            for f in images:
-                self.open_path(f)
-            return
-        try:
-            data = images_to_pdf(images)
-        except Exception as exc:  # noqa: BLE001
-            self.toast(tr("shell.error.open", name=os.path.basename(images[0]), err=str(exc)), "error")
-            return
-        pdf = PdfDocument.from_bytes(data, title=tr("shell.images_title"))
-        self.add_document(pdf)
-        self.toast(tr("shell.images_done", n=len(images)), "success")
+            # several images: let the user order them and pick page options
+            self.open_images_dialog(images)
 
     def open_path(self, path: str, password: str | None = None) -> DocumentWorkspace | None:
         path = os.path.abspath(path)
@@ -983,13 +968,13 @@ class MainWindow(QMainWindow):
             title = getattr(dlg, "result_title", None) or tr("shell.merged_title")
             self.add_document(PdfDocument.from_bytes(dlg.result_bytes, title=title))
 
-    def open_images_dialog(self) -> None:
+    def open_images_dialog(self, initial: list[str] | None = None) -> None:
         try:
             from .dialogs.images_dialog import ImagesToPdfDialog
         except ImportError:
             self.toast(tr("shell.soon"), "info")
             return
-        dlg = ImagesToPdfDialog(self)
+        dlg = ImagesToPdfDialog(self, initial=initial if isinstance(initial, list) else None)
         if dlg.exec() and getattr(dlg, "result_bytes", None):
             title = getattr(dlg, "result_title", None) or tr("shell.images_title")
             self.add_document(PdfDocument.from_bytes(dlg.result_bytes, title=title))

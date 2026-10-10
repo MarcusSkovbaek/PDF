@@ -12,7 +12,10 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 - Images -> PDF dialog: `ui/dialogs/images_dialog.py` (thumbnail grid with drag-reorder, file/Explorer drops,
   Ctrl+V clipboard screenshots, sort/remove, page size/margin/orientation/placement, live page preview);
   dropping several images on the app opens it pre-filled. Tests: `tests/test_images_dialog.py`.
-  Both dialogs are the reference implementation for the remaining ones (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
+- Merge dialog: `ui/dialogs/merge_dialog.py` (file list with first-page thumbnails, drag/up/down reorder,
+  Explorer drops, per-file page ranges, password prompt for locked PDFs, bookmark option). Tests:
+  `tests/test_merge_dialog.py`. ALL DIALOGS (split, images, merge) ARE DONE.
+  The dialogs are the reference implementation for the remaining ones (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -36,10 +39,9 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   `text_edit.replace_block_text`, Esc cancels; inspector shows font/size/color/bold/italic to override.
   Add text = drag a box, defaults from `insert.document_text_style`. Add image = file picker or
   clipboard paste, drag to place, keep aspect. Select/move/resize/delete existing annotations.
-- **Agent B – Comment tools + dialogs + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
-  `dialogs/merge_dialog.py` `MergeDialog` (+`.result_bytes`), pages-mode grid organiser
-  (split + images dialogs already DONE – follow their style); `i18n/da_comment.py`,
-  `da_dialogs.py`; tests). Home card already calls action `tools.merge` (images dialog DONE).
+- **Agent B – Comment tools + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
+  pages-mode grid organiser using `ThumbnailView(grid=True)` + `core.pages`; `i18n/da_comment.py`; tests).
+  Dialogs are all DONE – follow their style.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit

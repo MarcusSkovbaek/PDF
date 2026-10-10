@@ -134,14 +134,57 @@ def _style_key(style: SpanStyle) -> tuple:
 # ---------------------------------------------------------------------------
 # extraction
 # ---------------------------------------------------------------------------
-def _build_line(raw_line: dict, rm: pymupdf.Matrix) -> TextLine | None:
+def _segments(chars: list, d) -> list[list]:
+    """Split a PyMuPDF line at gaps that are clearly not word spaces (table
+    cells, tab stops, columns sharing a baseline)."""
+    vis = [i for i, c in enumerate(chars) if not c[0].isspace()]
+    if len(vis) < 2:
+        return [chars]
+    gaps = []  # (index of next visible char, gap, size, is word gap)
+    for a, b in zip(vis, vis[1:]):
+        end_a = _proj_range(chars[a][2], d)[1]
+        start_b = _proj_range(chars[b][2], d)[0]
+        size = float(chars[b][3].get("size", 0) or chars[a][3].get("size", 0) or 10)
+        g = start_b - end_a
+        word = b - a > 1 or g > 0.2 * size
+        gaps.append((b, g, size, word))
+    word_gaps = [g for _b, g, _s, w in gaps if w]
+    cuts = []
+    for b, g, size, word in gaps:
+        if not word:
+            continue
+        others = list(word_gaps)
+        others.remove(g)
+        ref = min(others) if others else None
+        if g > 1.2 * size or (ref is not None and g > 0.45 * size and g > 1.8 * max(ref, 0.05 * size)):
+            cuts.append(b)
+    if not cuts:
+        return [chars]
+    out, prev = [], 0
+    for b in cuts:
+        out.append(chars[prev:b])
+        prev = b
+    out.append(chars[prev:])
+    return out
+
+
+def _build_lines(raw_line: dict, rm: pymupdf.Matrix) -> list[TextLine]:
     d = tuple(raw_line.get("dir", (1.0, 0.0)))
     chars = []  # (c, origin, bbox, span)
     for span in raw_line.get("spans", ()):
         for ch in span.get("chars", ()):
             chars.append((ch["c"], ch["origin"], pymupdf.Rect(ch["bbox"]), span))
     if not chars:
-        return None
+        return []
+    out = []
+    for seg in _segments(chars, d):
+        ln = _line_from_chars(seg, d, rm)
+        if ln is not None:
+            out.append(ln)
+    return out
+
+
+def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     first = next((i for i, c in enumerate(chars) if not c[0].isspace()), None)
     if first is None:
         return None
@@ -220,9 +263,9 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     for b in data.get("blocks", ()):
         if b.get("type", 0) != 0:
             continue
-        lines = [ln for ln in (_build_line(rl, rm) for rl in b.get("lines", ())) if ln is not None]
+        lines = [ln for rl in b.get("lines", ()) for ln in _build_lines(rl, rm)]
         if lines:
-            groups.append(lines)
+            groups.extend(_split_columns(lines))
     if merge:
         groups = _merge_groups(groups)
     blocks: list[TextBlock] = []
@@ -233,6 +276,27 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
         blocks.append(TextBlock(page=page, bbox=bbox, lines=lines, style=_dominant_style(lines),
                                 rotation=pg.rotation))
     return blocks
+
+
+def _split_columns(lines: list[TextLine]) -> list[list[TextLine]]:
+    """Split one PyMuPDF block into side-by-side columns (lines that do not
+    overlap along the writing direction), e.g. table cells."""
+    if len(lines) < 2 or not all(_is_axis(ln.dir) and ln.dir == lines[0].dir for ln in lines):
+        return [lines]
+    order = sorted(range(len(lines)), key=lambda i: lines[i].extent[0])
+    clusters: list[list[int]] = []
+    hi = None
+    for i in order:
+        a, b = lines[i].extent
+        if clusters and a < hi - 0.5:
+            clusters[-1].append(i)
+            hi = max(hi, b)
+        else:
+            clusters.append([i])
+            hi = b
+    if len(clusters) == 1:
+        return [lines]
+    return [[lines[i] for i in sorted(c)] for c in clusters]
 
 
 def _pitch(lines: list[TextLine]) -> float | None:

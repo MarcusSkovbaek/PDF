@@ -19,7 +19,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    floating tool pill, thumbnails/bookmarks/search sidebar, properties panel, status bar with zoom).
    Open items seen in screenshot review:
    - thumbnail list now sizes cells per page aspect (rotated/landscape pages fixed) – DONE;
-   - still to check: dark theme + home screen screenshots;
+   - dark theme + home screen screenshots reviewed – look good, no issues;
    - "Rediger", "Kommentér", "Sider" modes have no tools yet (phase 3/4).
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)

@@ -1,0 +1,3 @@
+PySide6>=6.7
+pymupdf>=1.24
+qtawesome>=1.3

@@ -7,6 +7,9 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 ## Done
 - Foundation: `core/document.py` (edit/undo/redo/atomic save), `history.py`, `security/netguard.py`, i18n.
 - Core engine (tested): `render`, `pages`, `merge`, `images`, `search`, `annotations`.
+- Split dialog: `ui/dialogs/split_dialog.py` (each page / every N / ranges, live preview, folder picker,
+  overwrite confirm, success toast) + `core.pages.split_plan()` + `tests/test_split_dialog.py`.
+  Reference implementation for the other dialogs (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -33,7 +36,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 - **Agent B – Comment tools + dialogs + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
   `dialogs/merge_dialog.py` `MergeDialog` (+`.result_bytes`), `dialogs/images_dialog.py` `ImagesToPdfDialog`
   (drag&drop, Ctrl+V clipboard screenshots, reorder, page size/orientation/margin options, live preview),
-  `dialogs/split_dialog.py` `SplitDialog(parent, pdf)`, pages-mode grid organiser; `i18n/da_comment.py`,
+  pages-mode grid organiser (split dialog already DONE – follow its style); `i18n/da_comment.py`,
   `da_dialogs.py`; tests). Home cards already call actions `tools.merge`, `tools.images_to_pdf`.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).

@@ -1003,7 +1003,9 @@ class MainWindow(QMainWindow):
         except ImportError:
             self.toast(tr("shell.soon"), "info")
             return
-        SplitDialog(self, ws.pdf).exec()
+        dlg = SplitDialog(self, ws.pdf)
+        if dlg.exec() and dlg.written:
+            self.toast(tr("split.done", count=len(dlg.written), folder=os.path.dirname(dlg.written[0])), "success")
 
     def show_about(self) -> None:
         from .dialogs.common import FolioDialog

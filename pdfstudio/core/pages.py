@@ -303,15 +303,24 @@ def split_document(
     when there are 10+ parts so they sort correctly). The document is not
     modified.
     """
+    doc = pdf.doc
+    return [(name, _subset_bytes(doc, group)) for name, group in split_plan(pdf, every_n=every_n, ranges=ranges)]
+
+
+def split_plan(
+    pdf: PdfDocument,
+    *,
+    every_n: int | None = None,
+    ranges: str | Sequence[str | Sequence[int]] | None = None,
+) -> list[tuple[str, list[int]]]:
+    """What :func:`split_document` would produce, without building any PDF:
+    ``(suggested_filename, 0-based page indices)`` per part. Cheap enough for
+    live previews; raises ``ValueError`` on invalid input like split_document."""
     groups = _split_groups(pdf, every_n, ranges)
     stem = _stem(pdf)
     suffix = tr("core.split.part_suffix")
     width = len(str(len(groups)))
-    doc = pdf.doc
-    return [
-        (f"{stem}_{suffix}{n:0{width}d}.pdf", _subset_bytes(doc, group))
-        for n, group in enumerate(groups, start=1)
-    ]
+    return [(f"{stem}_{suffix}{n:0{width}d}.pdf", list(group)) for n, group in enumerate(groups, start=1)]
 
 
 __all__ = [
@@ -324,4 +333,5 @@ __all__ = [
     "parse_page_ranges",
     "rotate_pages",
     "split_document",
+    "split_plan",
 ]

@@ -1,27 +1,41 @@
-# Status – Folio PDF (paused 2026-10-10, usage limit)
+# Status / handover – Folio PDF (paused 2026-10-10 to protect the weekly usage limit)
 
-All work is committed on `claude/happy-wozniak-yin6iu`. `python -m pytest` is green and
-`main.py --screenshot` starts the app and opens a PDF.
+Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (≈250 tests).
+`QT_QPA_PLATFORM=offscreen python main.py --screenshot out.png --size 1440x900 file.pdf` works.
+Read `CLAUDE.md` first – it is the binding architecture/API contract.
 
 ## Done
-- Foundation: `core/document.py` (edit/undo/redo/save), `history.py`, `security/netguard.py`, i18n, `CLAUDE.md` contract.
+- Foundation: `core/document.py` (edit/undo/redo/atomic save), `history.py`, `security/netguard.py`, i18n.
 - Core engine (tested): `render`, `pages`, `merge`, `images`, `search`, `annotations`.
-- Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, icon in `assets/`.
+- Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
-## Interrupted mid-work (verify + finish first)
-1. **Text editing engine** – `core/fonts.py`, `core/text_edit.py`, `core/insert.py` + tests.
-   The agent was last adding advance-width verification for embedded fonts in `resolve_font`.
-   Check against the CLAUDE.md contract and the requirements (same font/size/color/baseline,
-   Danish glyph fallback, rotated pages, images/vector art preserved, undo).
-2. **UI shell** – `main.py`, `ui/app.py`, `actions.py`, `main_window.py`, `workspace.py`,
-   `home_view.py`, `theme/*`, `viewer/page_view.py`, `tools/{base,select,hand}.py`,
-   `panels/{thumbnails,search_panel,outline}.py`, `widgets/*`, `tests/test_ui_shell.py`.
-   The agent was in its screenshot self-check loop. Re-check light/dark screenshots.
+## Interrupted by usage limit – state verified by coordinator
+1. **Text editing engine** (`core/fonts.py`, `text_edit.py`, `insert.py` + tests): WORKS in a smoke test –
+   editing keeps font/size/baseline, Danish glyphs (ÆØÅ æøå) fall back correctly, rotated page blocks
+   are in display coords. The agent was last adding *advance-width verification for embedded subset
+   fonts* in `resolve_font` – finish/verify that, then review against the CLAUDE.md requirements
+   (images/vector art preserved, other blocks untouched, undo, file growth after repeated edits).
+2. **UI shell**: looks premium already (header with tabs, offline badge, mode bar Vis/Rediger/Kommentér/Sider,
+   floating tool pill, thumbnails/bookmarks/search sidebar, properties panel, status bar with zoom).
+   Open items seen in screenshot review:
+   - verify the thumbnail of a rotated page (page 3 of the sample) is landscape and correct;
+   - vertical gap between thumbnails looks large; check dark theme + home screen screenshots;
+   - "Rediger", "Kommentér", "Sider" modes have no tools yet (phase 3/4).
 
-## Next phases
-3. Edit tools in UI: inline "Rediger tekst" overlay (uses `text_edit`), "Tilføj tekst", "Tilføj billede",
-   properties inspector (font/size/color).
-4. Comment tools (highlight/underline/strike, note, ink, shapes) + dialogs:
-   `dialogs/merge_dialog.py` (`MergeDialog`, `.result_bytes`), `images_dialog.py` (`ImagesToPdfDialog`, incl. clipboard paste),
-   `split_dialog.py` (`SplitDialog(parent, pdf)`), page organiser.
-5. QA loop: tests + screenshots + fixes until polished; README (Danish) with Windows install/build guide.
+## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
+- **Agent A – Edit tools UI** (`ui/viewer/tools/edit_text.py`, `add_text.py`, `add_image.py`,
+  `ui/panels/properties` widgets, `i18n/da_edit.py`, `tests/test_ui_edit.py`): mode "Rediger".
+  Edit text = hover outlines text blocks; click opens an inline editor overlay (QPlainTextEdit with
+  `fonts.qt_family_hint`, scaled to zoom, same color) exactly over the block; Enter/blur commits via
+  `text_edit.replace_block_text`, Esc cancels; inspector shows font/size/color/bold/italic to override.
+  Add text = drag a box, defaults from `insert.document_text_style`. Add image = file picker or
+  clipboard paste, drag to place, keep aspect. Select/move/resize/delete existing annotations.
+- **Agent B – Comment tools + dialogs + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
+  `dialogs/merge_dialog.py` `MergeDialog` (+`.result_bytes`), `dialogs/images_dialog.py` `ImagesToPdfDialog`
+  (drag&drop, Ctrl+V clipboard screenshots, reorder, page size/orientation/margin options, live preview),
+  `dialogs/split_dialog.py` `SplitDialog(parent, pdf)`, pages-mode grid organiser; `i18n/da_comment.py`,
+  `da_dialogs.py`; tests). Home cards already call actions `tools.merge`, `tools.images_to_pdf`.
+- **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
+  fix visual/UX issues and bugs, write Danish `README.md` (install, `build_windows.bat`, offline guarantee).
+Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit
+(coordinator commits), run pytest + screenshot self-check loop before reporting.

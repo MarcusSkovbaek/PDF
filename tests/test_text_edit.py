@@ -394,3 +394,35 @@ def test_file_growth_after_repeated_edits(pdf):
     assert "Anden linje" in pdf.doc[0].get_text()
     # one copy of the Times clone (~50 KB) at most, not one per edit
     assert size1 - size0 < 90_000
+
+
+def test_paragraph_reflows_into_following_lines(pdf):
+    blk = block_with(pdf, 1, "Venstre")
+    lines = blk.text.split("\n")
+    n = len(lines)
+    lines[1] = lines[1] + " Tilføjet tekst her."
+    replace_block_text(pdf, blk, "\n".join(lines))
+    new = block_with(pdf, 1, "Tilføjet")
+    # words flow on into the next lines instead of leaving a ragged stub
+    assert " ".join(new.text.split()) == " ".join(" ".join(lines).split())
+    assert len(new.lines) <= n + 1
+    for ln in new.lines:
+        assert ln.bbox.x1 <= blk.bbox.x1 + 3
+    # the line before the edit is untouched (original font)
+    assert find_span(pdf.doc[1], lines[0])["font"] == "Helvetica"
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_cropped_page_coordinates(rotation):
+    doc = pymupdf.open()
+    p = doc.new_page(width=595, height=842)
+    p.insert_text((100, 200), "Beskaaret side tekst", fontname="helv", fontsize=12)
+    p.set_cropbox(pymupdf.Rect(50, 100, 545, 742))
+    p.set_rotation(rotation)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    (blk,) = text_blocks(pdf.doc, 0)
+    assert pdf.doc[0].rect.contains(blk.bbox)
+    replace_block_text(pdf, blk, "Beskaaret side ændret")
+    (new,) = text_blocks(pdf.doc, 0)
+    assert new.text == "Beskaaret side ændret"
+    assert new.lines[0].origin == pytest.approx(blk.lines[0].origin, abs=0.5)

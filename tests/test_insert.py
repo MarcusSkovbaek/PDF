@@ -148,7 +148,7 @@ def test_add_image_stretch(pdf):
     rect = pymupdf.Rect(100, 300, 500, 400)
     add_image(pdf, 0, rect, make_png(320, 200), keep_aspect=False)
     (info,) = pdf.doc[0].get_image_info()
-    assert pymupdf.Rect(info["bbox"]) == pytest.approx(rect, abs=0.5)
+    assert tuple(info["bbox"]) == pytest.approx(tuple(rect), abs=0.5)
 
 
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])

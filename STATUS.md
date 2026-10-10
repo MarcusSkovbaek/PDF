@@ -18,8 +18,8 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 2. **UI shell**: looks premium already (header with tabs, offline badge, mode bar Vis/Rediger/Kommentér/Sider,
    floating tool pill, thumbnails/bookmarks/search sidebar, properties panel, status bar with zoom).
    Open items seen in screenshot review:
-   - verify the thumbnail of a rotated page (page 3 of the sample) is landscape and correct;
-   - vertical gap between thumbnails looks large; check dark theme + home screen screenshots;
+   - thumbnail list now sizes cells per page aspect (rotated/landscape pages fixed) – DONE;
+   - still to check: dark theme + home screen screenshots;
    - "Rediger", "Kommentér", "Sider" modes have no tools yet (phase 3/4).
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
@@ -36,6 +36,6 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   `dialogs/split_dialog.py` `SplitDialog(parent, pdf)`, pages-mode grid organiser; `i18n/da_comment.py`,
   `da_dialogs.py`; tests). Home cards already call actions `tools.merge`, `tools.images_to_pdf`.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
-  fix visual/UX issues and bugs, write Danish `README.md` (install, `build_windows.bat`, offline guarantee).
+  fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit
 (coordinator commits), run pytest + screenshot self-check loop before reporting.

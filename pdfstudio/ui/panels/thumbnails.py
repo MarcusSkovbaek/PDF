@@ -190,7 +190,7 @@ class ThumbDelegate(QStyledItemDelegate):
         self.view = view
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return self.view.cell_size()
+        return self.view.cell_size(index.data(SizeRole))
 
     def paint(self, p: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         p.save()
@@ -198,8 +198,8 @@ class ThumbDelegate(QStyledItemDelegate):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         cell = QRectF(option.rect)
         tw = self.view.thumb_width
-        box_h = tw * 1.42
         w, h = index.data(SizeRole) or (595.0, 842.0)
+        box_h = self.view.box_height(w, h)
         s = min(tw / w, box_h / h)
         pw, ph = round(w * s), round(h * s)
         x = cell.x() + (cell.width() - pw) / 2
@@ -270,7 +270,9 @@ class ThumbnailView(QListView):
         self.setWrapping(True)
         self.setResizeMode(QListView.ResizeMode.Adjust)
         self.setMovement(QListView.Movement.Static)
-        self.setUniformItemSizes(True)
+        # List mode sizes each cell to its page (landscape pages are shorter),
+        # grid mode keeps uniform cells so rows line up.
+        self.setUniformItemSizes(grid)
         self.setSpacing(4 if not grid else 10)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
@@ -293,12 +295,21 @@ class ThumbnailView(QListView):
         self._update_renderer_width()
 
     # -- sizing ---------------------------------------------------------------
-    def cell_size(self) -> QSize:
+    def box_height(self, page_w: float = 595.0, page_h: float = 842.0) -> float:
+        """Height reserved for the page image: uniform in grid mode, the
+        page's own aspect (capped at A4-ish portrait) in list mode."""
+        tw = self.thumb_width
+        if self.grid or page_w <= 0:
+            return tw * 1.42
+        return min(tw * 1.42, tw * page_h / page_w)
+
+    def cell_size(self, page_size: tuple[float, float] | None = None) -> QSize:
         tw = self.thumb_width
         w = tw + 2 * PAD + (8 if self.grid else 0)
         if not self.grid:
             w = max(w, self.viewport().width() - 2 * self.spacing() - 2)
-        return QSize(w, int(tw * 1.42) + PAD + LABEL_H + 10)
+        pw, ph = page_size or (595.0, 842.0)
+        return QSize(w, int(self.box_height(pw, ph)) + PAD + LABEL_H + 10)
 
     def resizeEvent(self, ev) -> None:  # noqa: N802
         super().resizeEvent(ev)

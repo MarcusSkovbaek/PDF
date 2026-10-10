@@ -1,0 +1,60 @@
+"""Danish strings for the Qt-free engine (``pdfstudio.core``): undo labels,
+error messages and suggested file names."""
+
+STRINGS: dict[str, str] = {
+    # -- undo labels: pages -------------------------------------------------
+    "core.undo.rotate_page": "Rotér side",
+    "core.undo.rotate_pages": "Rotér sider",
+    "core.undo.delete_page": "Slet side",
+    "core.undo.delete_pages": "Slet sider",
+    "core.undo.move_page": "Flyt side",
+    "core.undo.move_pages": "Flyt sider",
+    "core.undo.duplicate_page": "Dupliker side",
+    "core.undo.duplicate_pages": "Dupliker sider",
+    "core.undo.insert_blank": "Indsæt tom side",
+    "core.undo.insert_pages": "Indsæt sider",
+    # -- undo labels: annotations --------------------------------------------
+    "core.undo.highlight": "Fremhæv tekst",
+    "core.undo.underline": "Understreg tekst",
+    "core.undo.strikeout": "Gennemstreg tekst",
+    "core.undo.squiggly": "Bølgeunderstreg tekst",
+    "core.undo.note": "Tilføj note",
+    "core.undo.ink": "Frihåndstegning",
+    "core.undo.rect": "Tilføj rektangel",
+    "core.undo.ellipse": "Tilføj ellipse",
+    "core.undo.line": "Tilføj linje",
+    "core.undo.arrow": "Tilføj pil",
+    "core.undo.update_annot": "Redigér kommentar",
+    "core.undo.delete_annot": "Slet kommentar",
+    # -- errors: page ranges -------------------------------------------------
+    "core.err.range_empty": "Angiv mindst én side.",
+    "core.err.range_syntax": "Ugyldigt sideinterval: »{part}«. Brug fx 1-3, 5, 8-.",
+    "core.err.range_out_of_bounds": "Side {page} findes ikke – dokumentet har {count} sider.",
+    "core.err.range_out_of_bounds_one": "Side {page} findes ikke – dokumentet har kun 1 side.",
+    "core.err.range_zero": "Sidetal starter ved 1.",
+    # -- errors: pages -------------------------------------------------------
+    "core.err.page_index": "Side {page} findes ikke.",
+    "core.err.no_pages": "Ingen sider valgt.",
+    "core.err.delete_all": "Du kan ikke slette alle sider – et dokument skal have mindst én side.",
+    "core.err.rotation": "Rotation skal være et multiplum af 90 grader.",
+    "core.err.insert_position": "Ugyldig indsætningsposition: {pos}.",
+    "core.err.page_size": "Ugyldig sidestørrelse.",
+    "core.err.split_args": "Vælg enten opdeling for hver N. side eller sideintervaller – ikke begge.",
+    "core.err.split_every_n": "Antal sider pr. del skal være mindst 1.",
+    # -- errors: files -------------------------------------------------------
+    "core.err.open_failed": "Kunne ikke åbne »{name}«: {reason}",
+    "core.err.unsupported": "filen er beskadiget eller har et format, der ikke understøttes",
+    "core.err.empty_file": "filen er tom",
+    "core.err.no_sources": "Vælg mindst én fil.",
+    "core.err.no_images": "Vælg mindst ét billede.",
+    "core.err.image_option": "Ugyldig indstilling: {name} = {value!r}",
+    # -- errors: annotations -------------------------------------------------
+    "core.err.annot_kind": "Ukendt kommentartype: {kind}",
+    "core.err.annot_missing": "Kommentaren findes ikke længere.",
+    "core.err.annot_empty": "Figuren er for lille.",
+    "core.err.annot_ink_empty": "Tegningen er tom.",
+    "core.err.annot_prop": "Ukendt egenskab: {name}",
+    # -- misc ----------------------------------------------------------------
+    "core.split.part_suffix": "del",
+    "core.unnamed_source": "Fil",
+}

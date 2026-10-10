@@ -82,11 +82,16 @@ class PdfDocument:
             raise DocumentError(str(exc)) from exc
         if not doc.is_pdf:
             # images / xps / epub etc. -> convert to a PDF document in memory
+            from .images import SUPPORTED_IMAGE_EXTENSIONS, images_to_pdf
+
             try:
-                data = doc.convert_to_pdf()
+                if ("." + ext) in SUPPORTED_IMAGE_EXTENSIONS:
+                    pdf_data = images_to_pdf([data])  # same sizing as "Billeder til PDF"
+                else:
+                    pdf_data = doc.convert_to_pdf()
             finally:
                 doc.close()
-            doc = pymupdf.open("pdf", data)
+            doc = pymupdf.open("pdf", pdf_data)
             title = os.path.splitext(os.path.basename(path))[0] + ".pdf"
             pdf = cls(doc, None, title=title)
             pdf._dirty = True

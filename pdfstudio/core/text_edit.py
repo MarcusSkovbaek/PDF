@@ -2,18 +2,23 @@
 
 Pipeline of :func:`replace_block_text`:
 
-1. Plan: split the new text into lines, map them onto the block's original
-   lines (same index -> same baseline), wrap lines that got too wide, keep the
-   block's alignment and line spacing, and resolve a font per line style
-   (:func:`pdfstudio.core.fonts.resolve_font`). Lines whose text and style are
-   unchanged are **not touched at all** (pixel identical, original kerning,
-   mixed styles inside the line survive).
+1. Plan. Every character of the new text inherits the style (font, size,
+   colour, baseline rise) of the original character it corresponds to
+   (character diff), so bold words, superscripts etc. survive. New lines are
+   mapped onto the block's original lines (same index -> same baseline);
+   lines whose text and style are unchanged are **not touched at all**
+   (pixel identical). Changed lines keep the block's alignment (left / right
+   / centred / justified) and line spacing. In a wrapped paragraph a line that
+   grows too wide reflows into the paragraph's following lines; single
+   lines and blocks of independent lines grow sideways within the page's text
+   area. A font per style comes from :func:`pdfstudio.core.fonts.resolve_font`
+   (embedded -> system -> built-in) and covers every new glyph.
 2. Remove the old glyphs of changed lines with redaction annotations that only
    cover a thin band through the middle of each span, applied with
    images/line-art untouched and no fill – backgrounds, images and vector art
-   stay.
+   stay. Pending user redactions on the page are left pending.
 3. Write the new lines with :class:`pymupdf.TextWriter` at the original
-   baselines, size and colour, in the line's original direction.
+   baselines, in the line's original direction.
 4. Deduplicate font programs: when the written font is byte-identical to a
    font file already in the PDF (e.g. the original embedded font), the new
    font descriptor is pointed at the existing stream.
@@ -33,7 +38,16 @@ from dataclasses import dataclass, field, fields
 import pymupdf
 
 from .document import CONTENT
-from .fonts import SpanStyle, has_space, prepare_text, resolve_font, style_from_span, text_width
+from .fonts import (
+    SpanStyle,
+    _is_mono_name,
+    _serif_from_name,
+    has_space,
+    prepare_text,
+    resolve_font,
+    style_from_span,
+    text_width,
+)
 
 __all__ = [
     "TextLine",
@@ -77,6 +91,8 @@ class TextLine:
     ascender: float = field(default=0.9, repr=False)
     descender: float = field(default=-0.25, repr=False)
     space_em: float | None = field(default=None, repr=False)  # measured space advance / size
+    char_styles: list = field(default_factory=list, repr=False)  # SpanStyle per char of ``text``
+    char_rises: list = field(default_factory=list, repr=False)  # baseline offset per char (pt)
 
 
 @dataclass
@@ -117,9 +133,19 @@ def _perp(d) -> tuple[float, float]:
     return (-d[1], d[0])
 
 
-def _proj_range(rect: pymupdf.Rect, d) -> tuple[float, float]:
-    vals = [_dot((x, y), d) for x in (rect.x0, rect.x1) for y in (rect.y0, rect.y1)]
-    return min(vals), max(vals)
+def _proj_range(rect, d) -> tuple[float, float]:
+    x0, y0, x1, y1 = rect
+    a = x0 * d[0] if d[0] >= 0 else x1 * d[0]
+    b = x1 * d[0] if d[0] >= 0 else x0 * d[0]
+    c = y0 * d[1] if d[1] >= 0 else y1 * d[1]
+    e = y1 * d[1] if d[1] >= 0 else y0 * d[1]
+    return a + c, b + e
+
+
+def _union(boxes) -> pymupdf.Rect:
+    boxes = list(boxes)
+    return pymupdf.Rect(min(b[0] for b in boxes), min(b[1] for b in boxes),
+                        max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
 def _is_axis(d) -> bool:
@@ -172,8 +198,10 @@ def _build_lines(raw_line: dict, rm: pymupdf.Matrix) -> list[TextLine]:
     d = tuple(raw_line.get("dir", (1.0, 0.0)))
     chars = []  # (c, origin, bbox, span)
     for span in raw_line.get("spans", ()):
+        if span.get("alpha", 255) == 0:
+            continue  # invisible text (e.g. an OCR layer) is not editable
         for ch in span.get("chars", ()):
-            chars.append((ch["c"], ch["origin"], pymupdf.Rect(ch["bbox"]), span))
+            chars.append((ch["c"], ch["origin"], tuple(ch["bbox"]), span))
     if not chars:
         return []
     out = []
@@ -201,27 +229,35 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
             counts[sid] = counts.get(sid, 0) + 1
             span_by_id[sid] = c[3]
     dom = span_by_id[max(counts, key=counts.get)]
-    style = style_from_span(dom.get("font", ""), dom.get("size", 11), dom.get("color", 0), dom.get("flags", 0))
+    span_styles: dict[int, SpanStyle] = {}
+    for c in used:
+        sid = id(c[3])
+        if sid not in span_styles:
+            sp = c[3]
+            span_styles[sid] = style_from_span(sp.get("font", ""), sp.get("size", 11), sp.get("color", 0),
+                                               sp.get("flags", 0))
+    style = span_styles[id(dom)]
 
-    raw_bbox = pymupdf.Rect(used[0][2])
-    for c in used[1:]:
-        raw_bbox |= c[2]
+    raw_bbox = _union(c[2] for c in used)
     raw_origin = (float(used[0][1][0]), float(used[0][1][1]))
     start = _dot(raw_origin, d)
     end = max(_proj_range(c[2], d)[1] for c in used if not c[0].isspace())
 
     span_rects = []
     for sid in span_by_id:
-        boxes = [c[2] for c in used if id(c[3]) == sid and not c[0].isspace()]
-        r = pymupdf.Rect(boxes[0])
-        for b in boxes[1:]:
-            r |= b
-        span_rects.append(r)
+        span_rects.append(_union(c[2] for c in used if id(c[3]) == sid and not c[0].isspace()))
     char_rects = [c[2] for c in used if not c[0].isspace()]
     space_widths = [abs(_proj_range(c[2], d)[1] - _proj_range(c[2], d)[0]) / max(float(c[3].get("size", 1) or 1), 1e-3)
                     for c in used if c[0] == " "]
     space_widths = [w for w in space_widths if 0.05 < w < 1.0]
     space_em = sorted(space_widths)[len(space_widths) // 2] if space_widths else None
+
+    nrm = _perp(d)
+    base_n = _dot(raw_origin, nrm)
+    char_styles = [span_styles[id(c[3])] for c in used]
+    char_rises = [round(_dot(c[1], nrm) - base_n, 2) for c in used]
+    if all(abs(r) < 0.05 for r in char_rises):
+        char_rises = [0.0] * len(used)
 
     disp_bbox = pymupdf.Rect(raw_bbox) * rm
     disp_origin = pymupdf.Point(raw_origin) * rm
@@ -239,6 +275,8 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
         ascender=float(dom.get("ascender", 0.9) or 0.9),
         descender=float(dom.get("descender", -0.25) or -0.25),
         space_em=space_em,
+        char_styles=char_styles,
+        char_rises=char_rises,
     )
 
 
@@ -337,24 +375,48 @@ def _merge_groups(groups: list[list[TextLine]]) -> list[list[TextLine]]:
     by content-stream order (typically after an edit appended new text)."""
     if len(groups) < 2:
         return groups
-    changed = True
-    while changed:
-        changed = False
-        for i, g in enumerate(groups):
-            for k, h in enumerate(groups):
-                if i == k:
-                    continue
-                if _continues(g, h):
-                    groups[i] = g + h
-                    del groups[k]
-                    changed = True
-                    break
-            if changed:
-                break
+    import bisect
+
+    by_dir: dict[tuple, list[list[TextLine]]] = {}
     for g in groups:
+        by_dir.setdefault((round(g[0].dir[0], 3), round(g[0].dir[1], 3)), []).append(g)
+    out: list[list[TextLine]] = []
+    for gs in by_dir.values():
+        n = _perp(gs[0][0].dir)
+        changed = True
+        while changed and len(gs) > 1:
+            changed = False
+            gs.sort(key=lambda g: _dot(g[0].raw_origin, n))
+            keys = [_dot(g[0].raw_origin, n) for g in gs]
+            used: set[int] = set()
+            result = []
+            for i, g in enumerate(gs):
+                if i in used:
+                    continue
+                used.add(i)
+                merged = g
+                while True:
+                    last = merged[-1]
+                    p = _dot(last.raw_origin, n)
+                    lo = bisect.bisect_left(keys, p + 0.85 * last.style.size)
+                    hi = bisect.bisect_right(keys, p + 1.65 * last.style.size)
+                    for j in range(lo, hi):
+                        if j not in used and _continues(merged, gs[j]):
+                            merged = merged + gs[j]
+                            used.add(j)
+                            changed = True
+                            break
+                    else:
+                        break
+                result.append(merged)
+            gs = result
+        out.extend(gs)
+    for g in out:
         n = _perp(g[0].dir)
         g.sort(key=lambda ln: (round(_dot(ln.raw_origin, n), 1), _dot(ln.raw_origin, ln.dir)))
-    return groups
+    # keep reading order: by position of the first line
+    out.sort(key=lambda g: (round(g[0].raw_origin[1], 1), g[0].raw_origin[0]))
+    return out
 
 
 def block_at(doc: pymupdf.Document, page: int, point) -> TextBlock | None:
@@ -385,7 +447,7 @@ def _dedupe_font_files(doc: pymupdf.Document, first_new_xref: int) -> None:
         total = doc.xref_length()
     except Exception:
         return
-    if first_new_xref >= total or total > 300_000:
+    if first_new_xref >= total or total > 150_000:
         return
 
     def font_files(lo: int, hi: int):
@@ -505,7 +567,7 @@ def _band_rects(line: TextLine) -> list[pymupdf.Rect]:
             cx, w = (r.x0 + r.x1) / 2, r.width
             rects.append(pymupdf.Rect(cx - 0.18 * w, r.y0, cx + 0.18 * w, r.y1))
     else:
-        rects = [_center_box(r) for r in line.char_rects]
+        rects = [_center_box(pymupdf.Rect(r)) for r in line.char_rects]
     return [r for r in rects if not r.is_empty]
 
 
@@ -566,11 +628,18 @@ def _leftover_chars(page: pymupdf.Page, lines: list[TextLine]) -> list[pymupdf.R
     if not lines:
         return []
     out = []
-    data = page.get_text("rawdict", flags=_EXTRACT_FLAGS)
+    boxes = [pymupdf.Rect(ln.raw_bbox) + (-1, -1, 1, 1) for ln in lines]
+    clip = pymupdf.Rect(boxes[0])
+    for b in boxes[1:]:
+        clip |= b
+    data = page.get_text("rawdict", flags=_EXTRACT_FLAGS, clip=clip)
     for b in data.get("blocks", ()):
         if b.get("type", 0) != 0:
             continue
         for rl in b.get("lines", ()):
+            lb = pymupdf.Rect(rl["bbox"])
+            if not any(lb.intersects(bx) for bx in boxes):
+                continue
             d = tuple(rl.get("dir", (1.0, 0.0)))
             for span in rl.get("spans", ()):
                 for ch in span.get("chars", ()):
@@ -625,6 +694,15 @@ def _merge_style(line_style: SpanStyle, block_style: SpanStyle, new: SpanStyle |
             values["color"] = lv if same else tuple(float(c) for c in nv)
         else:
             values[f.name] = lv if nv == bv else nv
+    if new.font != block_style.font:
+        # a different family was picked: derive serif/mono from its name
+        # unless the caller changed those flags explicitly
+        if new.serif == block_style.serif:
+            guess = _serif_from_name(new.font)
+            if guess is not None:
+                values["serif"] = guess
+        if new.mono == block_style.mono:
+            values["mono"] = _is_mono_name(new.font)
     return SpanStyle(**values)
 
 
@@ -668,7 +746,37 @@ class _Plan:
     runs: list[TextRun]
 
 
-def _alignment(page: pymupdf.Page, lines: list[TextLine], d) -> str:
+@dataclass
+class _PageContext:
+    others: list  # TextLines of the page that are not part of the block
+    pmin: float
+    pmax: float
+    area_lo: float  # text area along the writing direction
+    area_hi: float
+    text_hi: float  # right-most end of any other text
+
+
+def _page_context(page: pymupdf.Page, block: TextBlock, d) -> _PageContext:
+    pmin, pmax = _proj_range(page.rect * page.derotation_matrix, d)
+    own = {(round(ln.raw_origin[0], 2), round(ln.raw_origin[1], 2), ln.text) for ln in block.lines}
+    others = []
+    try:
+        for b in text_blocks(page.parent, block.page, merge=False):
+            for ln in b.lines:
+                if (round(ln.raw_origin[0], 2), round(ln.raw_origin[1], 2), ln.text) not in own:
+                    others.append(ln)
+    except Exception:
+        pass
+    same_axis = [ln for ln in others if abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3]
+    lo = min([ln.extent[0] for ln in same_axis + block.lines])
+    hi = max([ln.extent[1] for ln in same_axis + block.lines])
+    text_hi = max([ln.extent[1] for ln in same_axis], default=-1e9)
+    area_lo = max(min(lo, pmax), pmin)
+    area_hi = min(max(hi, pmax - (area_lo - pmin)), pmax - 9.0)
+    return _PageContext(others, pmin, pmax, area_lo, max(area_hi, hi), text_hi)
+
+
+def _alignment(ctx: _PageContext, lines: list[TextLine]) -> str:
     if len(lines) >= 2:
         starts = [ln.extent[0] for ln in lines]
         ends = [ln.extent[1] for ln in lines]
@@ -680,52 +788,29 @@ def _alignment(page: pymupdf.Page, lines: list[TextLine], d) -> str:
         if max(centers) - min(centers) <= 1.0:
             return "center"
         return "left"
-    pmin, pmax = _proj_range(page.rect * page.derotation_matrix, d)
     start, end = lines[0].extent
-    left_gap, right_gap = start - pmin, pmax - end
-    if left_gap > 36 and right_gap > 36 and abs(left_gap - right_gap) <= 3:
-        return "center"
+    if start - ctx.area_lo > 36:
+        if abs((start + end) / 2 - (ctx.area_lo + ctx.area_hi) / 2) <= 3:
+            return "center"
+        if abs(end - ctx.text_hi) <= 1.0 or end >= ctx.area_hi - 1.0:
+            return "right"  # flush with the text area's right edge
     return "left"
 
 
-def _available_width(page: pymupdf.Page, block: TextBlock, d, align: str, lmin: float, rmax: float) -> float:
-    """How wide a line of ``block`` may become before it is wrapped: the
-    block's own width, or more when there is free space up to the mirrored
-    page margin and no other text is in the way."""
+def _available_width(ctx: _PageContext, block: TextBlock, d, align: str, lmin: float, rmax: float,
+                     paragraph: bool = False) -> float:
+    """How wide a line of ``block`` may become before it is wrapped: a
+    wrapped paragraph keeps its column width; single lines and blocks of
+    independent lines (addresses, right-aligned blocks) may grow inside the
+    page's text area."""
     own = rmax - lmin
+    if paragraph:
+        return own  # a wrapped paragraph keeps its column width (and reflows)
     if not _is_axis(d):
-        return 0.0 if len(block.lines) == 1 else own  # 0 = never wrap
-    n = _perp(d)
-    pmin, pmax = _proj_range(page.rect * page.derotation_matrix, d)
-    size = max(ln.style.size for ln in block.lines)
-    band = (min(_proj_range(ln.raw_bbox, n)[0] for ln in block.lines),
-            max(_proj_range(ln.raw_bbox, n)[1] for ln in block.lines))
-    left_margin = max(lmin - pmin, 18.0)
-    right_margin = max(pmax - rmax, 18.0)
-    limit_lo = pmin + (right_margin if align == "right" else left_margin)
-    limit_hi = pmax - (left_margin if align == "left" else right_margin)
-    if align == "center":
-        m = max(min(lmin - pmin, pmax - rmax), 18.0)
-        limit_lo, limit_hi = pmin + m, pmax - m
-    try:
-        others = page.get_text("blocks", flags=_EXTRACT_FLAGS)
-    except Exception:
-        others = []
-    for ob in others:
-        if len(ob) > 6 and ob[6] != 0:
-            continue
-        r = pymupdf.Rect(ob[:4])
-        o_lo, o_hi = _proj_range(r, n)
-        if o_hi <= band[0] + 0.5 or o_lo >= band[1] - 0.5:
-            continue  # not beside the block
-        a, b = _proj_range(r, d)
-        # a paragraph next to other text is a column: keep its width;
-        # a single line may grow up to about one em from its neighbour
-        gap = size if len(block.lines) == 1 else max(a - rmax, lmin - b, 0.0)
-        if a >= rmax - 0.5:
-            limit_hi = min(limit_hi, a - gap)
-        elif b <= lmin + 0.5:
-            limit_lo = max(limit_lo, b + gap)
+        return 0.0  # 0 = never wrap
+    # a single line (label, heading, table cell) grows sideways like point
+    # text, within the page's text area
+    limit_lo, limit_hi = min(ctx.area_lo, lmin), max(ctx.area_hi, rmax)
     if align == "right":
         avail = rmax - limit_lo
     elif align == "center":
@@ -736,6 +821,93 @@ def _available_width(page: pymupdf.Page, block: TextBlock, d, align: str, lmin: 
     return max(own, avail)
 
 
+# A "rich" character: (char, SpanStyle, rise). Lines are lists of them.
+def _styled_text(block: TextBlock, new_text: str) -> list[tuple[str, SpanStyle, float]]:
+    """Give every character of ``new_text`` the style (and baseline rise) of
+    the original character it corresponds to (character diff against the
+    block's text). Inserted characters continue the style before them."""
+    import difflib
+
+    old_chars: list[tuple[str, SpanStyle | None, float]] = []
+    for k, ln in enumerate(block.lines):
+        if k:
+            old_chars.append(("\n", None, 0.0))
+        styles = ln.char_styles or [ln.style] * len(ln.text)
+        rises = ln.char_rises or [0.0] * len(ln.text)
+        old_chars.extend(zip(ln.text, styles, rises))
+    old_text = "".join(c[0] for c in old_chars)
+    mapped: list[tuple[SpanStyle, float] | None] = [None] * len(new_text)
+    # common prefix / suffix are copied directly; only the middle is diffed
+    pre = 0
+    lim = min(len(old_text), len(new_text))
+    while pre < lim and old_text[pre] == new_text[pre]:
+        pre += 1
+    suf = 0
+    while suf < lim - pre and old_text[-1 - suf] == new_text[-1 - suf]:
+        suf += 1
+    for k in range(pre):
+        if old_chars[k][1] is not None:
+            mapped[k] = (old_chars[k][1], old_chars[k][2])
+    for k in range(1, suf + 1):
+        if old_chars[-k][1] is not None:
+            mapped[-k] = (old_chars[-k][1], old_chars[-k][2])
+    old_mid = old_text[pre: len(old_text) - suf]
+    new_mid = new_text[pre: len(new_text) - suf]
+    sm = difflib.SequenceMatcher(None, old_mid, new_mid, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        i1, i2, j1, j2 = i1 + pre, i2 + pre, j1 + pre, j2 + pre
+        if tag == "equal":
+            for k in range(j2 - j1):
+                src = old_chars[i1 + k]
+                if src[1] is not None:
+                    mapped[j1 + k] = (src[1], src[2])
+        elif tag == "replace":
+            for k in range(j2 - j1):
+                src = old_chars[min(i1 + k, i2 - 1)]
+                if src[1] is not None:
+                    mapped[j1 + k] = (src[1], src[2])
+    # fill gaps: previous mapped char, else next, else the block style
+    prev = None
+    for k in range(len(mapped)):
+        if mapped[k] is None:
+            mapped[k] = prev
+        else:
+            prev = mapped[k]
+    nxt = None
+    for k in range(len(mapped) - 1, -1, -1):
+        if mapped[k] is None:
+            mapped[k] = nxt
+        else:
+            nxt = mapped[k]
+    out = []
+    for ch, m in zip(new_text, mapped):
+        st, rise = m if m is not None else (block.style, 0.0)
+        out.append((ch, st, rise))
+    return out
+
+
+def _rich_text(rich) -> str:
+    return "".join(c[0] for c in rich)
+
+
+def _rich_rstrip(rich):
+    k = len(rich)
+    while k and rich[k - 1][0].isspace():
+        k -= 1
+    return rich[:k]
+
+
+def _runs(rich):
+    """Split rich text into maximal runs of equal (style, rise)."""
+    out = []
+    for ch, st, rise in rich:
+        if out and out[-1][1] is st and out[-1][2] == rise:
+            out[-1][0].append(ch)
+        else:
+            out.append([[ch], st, rise])
+    return [("".join(chs), st, rise) for chs, st, rise in out]
+
+
 def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle | None) -> _Plan:
     old = block.lines
     n_old = len(old)
@@ -743,27 +915,50 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
     new_style = style if override else None
 
     text = (new_text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
-    paragraphs = [p.rstrip() for p in text.split("\n")]
-    while paragraphs and not paragraphs[-1].strip():
-        paragraphs.pop()
+    rich_all = _styled_text(block, text)
+    if new_style is not None:
+        cache: dict[int, SpanStyle] = {}
 
+        def merged(st: SpanStyle) -> SpanStyle:
+            if id(st) not in cache:
+                cache[id(st)] = _merge_style(st, block.style, new_style)
+            return cache[id(st)]
+
+        rich_all = [(ch, merged(st), rise) for ch, st, rise in rich_all]
+    paragraphs = []
+    cur = []
+    for c in rich_all:
+        if c[0] == "\n":
+            paragraphs.append(_rich_rstrip(cur))
+            cur = []
+        else:
+            cur.append(c)
+    paragraphs.append(_rich_rstrip(cur))
+    while paragraphs and not _rich_text(paragraphs[-1]).strip():
+        paragraphs.pop()
     if not paragraphs:
         return _Plan(remove=list(old), runs=[])
 
-    def para_style(i: int) -> SpanStyle:
-        src = old[min(i, n_old - 1)].style
-        return _merge_style(src, block.style, new_style)
+    def unchanged(i: int, rich) -> bool:
+        if override or i >= n_old or _rich_text(rich) != old[i].text:
+            return False
+        styles = old[i].char_styles or [old[i].style] * len(old[i].text)
+        rises = old[i].char_rises or [0.0] * len(old[i].text)
+        return all(c[1] is s and c[2] == r for c, s, r in zip(rich, styles, rises))
 
     # -- fonts, one per distinct style (covering all text in that style) ---
-    texts_by_style: dict[tuple, list[str]] = {}
-    style_by_key: dict[tuple, SpanStyle] = {}
-    for i, p in enumerate(paragraphs):
-        st = para_style(i)
-        k = _style_key(st)
-        style_by_key[k] = st
-        texts_by_style.setdefault(k, []).append(p)
-    fonts = {k: resolve_font(page.parent, block.page, style_by_key[k], "".join(v)).font
-             for k, v in texts_by_style.items()}
+    by_key: dict[tuple, SpanStyle] = {}
+    texts: dict[tuple, list[str]] = {}
+    for rich in paragraphs:
+        for ch, st, _r in rich:
+            k = _style_key(st)
+            by_key.setdefault(k, st)
+            texts.setdefault(k, []).append(ch)
+    fonts = {k: resolve_font(page.parent, block.page, by_key[k], "".join(v).replace("\ufffd", "")).font
+             for k, v in texts.items()}
+
+    def font_of(st: SpanStyle) -> pymupdf.Font:
+        return fonts[_style_key(st)]
 
     # -- geometry ----------------------------------------------------------
     d = old[0].dir
@@ -780,46 +975,77 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
     if override and block.style.size and abs(style.size - block.style.size) > 1e-6:
         scale = float(style.size) / float(block.style.size)
 
-    align = _alignment(page, old, d) if all(_is_axis(ln.dir) for ln in old) else "left"
+    ctx = _page_context(page, block, d)
+    align = _alignment(ctx, old) if all(_is_axis(ln.dir) for ln in old) else "left"
     lmin = min(ln.extent[0] for ln in old)
     rmax = max(ln.extent[1] for ln in old)
-    max_width = _available_width(page, block, d, align, lmin, rmax)
+    at_right = [abs(ln.extent[1] - rmax) <= 1.0 for ln in old]
 
-    # -- lay out lines -------------------------------------------------------
-    def para_space(i: int, st: SpanStyle) -> float | None:
-        em = old[min(i, n_old - 1)].space_em
-        return em * st.size if em else None
+    def stretched(ln: TextLine) -> bool:
+        """Is this line wider than its natural width (justified text)?"""
+        styles = ln.char_styles or [ln.style] * len(ln.text)
+        if " " not in ln.text or any(_style_key(st) not in fonts for st in styles):
+            return False
+        natural = 0.0
+        for txt, st, _rise in _runs(list(zip(ln.text, styles, [0.0] * len(styles)))):
+            natural += text_width(fonts[_style_key(st)], txt, st.size)
+        width = ln.extent[1] - ln.extent[0]
+        return width - natural > max(1.0, 0.01 * width)
+
+    def space_em(i: int) -> float | None:
+        return old[min(i, n_old - 1)].space_em
+
+    def measure(rich, em) -> float:
+        total = 0.0
+        for txt, st, _rise in _runs(rich):
+            total += text_width(font_of(st), txt, st.size, em * st.size if em else None)
+        return total
+
+    justified_block = (align == "left" and n_old >= 3 and sum(at_right[:-1]) >= 2
+                       and any(stretched(ln) for ln in old[:-1]))
+    full = [ln.extent[1] >= rmax - max(2.5 * ln.style.size, 0.15 * (rmax - lmin)) for ln in old]
+    paragraph = align == "left" and (
+        justified_block
+        or (n_old >= 3 and sum(full[:-1]) >= 2)
+        or (n_old == 2 and stretched(old[0]))
+    )
+    max_width = _available_width(ctx, block, d, align, lmin, rmax, paragraph)
 
     def soft_break_after(i: int) -> bool:
         """Did old line ``i`` wrap into line ``i + 1`` (same paragraph)?"""
-        if i >= n_old - 1 or align != "left":
+        if i >= n_old - 1 or not paragraph:
             return False
-        a, b = old[i], old[i + 1]
-        width = rmax - lmin
-        full = a.extent[1] >= rmax - max(2.5 * a.style.size, 0.15 * width)
-        return full and abs(b.extent[0] - lmin) <= 1.0
+        return full[i] and abs(old[i + 1].extent[0] - lmin) <= 1.0
 
-    layout: list[tuple[str, SpanStyle, int]] = []  # (text, style, paragraph index)
-    carry = ""
-    for i, p in enumerate(paragraphs):
-        st = para_style(i)
-        font = fonts[_style_key(st)]
+    # -- lay out lines (wrap + reflow into the paragraph's next lines) -------
+    layout: list[tuple[list, int, bool]] = []  # (rich, paragraph index, paragraph continues)
+    carry: list = []
+    for i, rich in enumerate(paragraphs):
         if carry:
-            p = f"{carry} {p.lstrip()}" if p.strip() else carry
-            carry = ""
-        unchanged = (i < n_old and not override and p == old[i].text)
-        pieces = [p] if (unchanged or not p) else _wrap(p, font, st.size, max_width, para_space(i, st))
-        if len(pieces) > 1 and soft_break_after(i) and i + 1 < len(paragraphs) and paragraphs[i + 1].strip():
-            # reflow: overflowing words continue on the paragraph's next line
-            carry = " ".join(pieces[1:])
+            body = rich
+            while body and body[0][0] == " ":
+                body = body[1:]
+            rich = carry + ([(" ", carry[-1][1], carry[-1][2])] + body if body else [])
+            carry = []
+        if unchanged(i, rich) or not rich:
+            pieces = [rich]
+        else:
+            pieces = _wrap_rich(rich, max_width, lambda r, i=i: measure(r, space_em(i)))
+        if len(pieces) > 1 and soft_break_after(i) and i + 1 < len(paragraphs) \
+                and _rich_text(paragraphs[i + 1]).strip():
+            carry = [c for p in pieces[1:] for c in (p + [(" ", p[-1][1], p[-1][2])])][:-1]
             pieces = pieces[:1]
-        for piece in pieces:
-            layout.append((piece, st, i))
+            layout.append((pieces[0], i, True))
+            continue
+        para_goes_on = (soft_break_after(i) and i + 1 < len(paragraphs)
+                        and bool(_rich_text(paragraphs[i + 1]).strip()))
+        for k, piece in enumerate(pieces):
+            layout.append((piece, i, k < len(pieces) - 1 or para_goes_on))
 
     o0 = first.raw_origin
     remove: list[TextLine] = []
     runs: list[TextRun] = []
-    for j, (txt, st, pi) in enumerate(layout):
+    for j, (rich, pi, continues) in enumerate(layout):
         if j < n_old:
             base = old[j].raw_origin
             ld = old[j].dir
@@ -838,28 +1064,97 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
             off = _dot((base[0] - o0[0], base[1] - o0[1]), n) * (scale - 1.0)
             base = (base[0] + n[0] * off, base[1] + n[1] * off)
 
-        if j < n_old and not override and txt == old[j].text:
+        if j < n_old and pi == j and unchanged(j, rich):
             continue  # unchanged line: leave the original glyphs alone
         if j < n_old:
             remove.append(old[j])
-        if not txt.strip():
+        if not _rich_text(rich).strip():
             continue
-        font = fonts[_style_key(st)]
-        space = para_space(pi, st)
-        width = text_width(font, txt, st.size, space)
+        em = space_em(pi)
+        width = measure(rich, em)
         if align == "right":
             target = end_j - width
         elif align == "center":
             target = (start_j + end_j) / 2 - width / 2
         else:
             target = _dot(base, ld) if j < n_old else _dot(old[-1].raw_origin, ld)
+        extra = 0.0
+        n_spaces = sum(1 for c in rich if c[0] == " ")
+        if (justified_block and continues and j < n_old - 1 and at_right[j] and n_spaces
+                and 0.6 * (rmax - target) <= width < rmax - target):
+            extra = (rmax - target - width) / n_spaces
         shift = target - _dot(base, ld)
         origin = (base[0] + ld[0] * shift, base[1] + ld[1] * shift)
-        runs.append(TextRun(text=txt, font=font, size=st.size, color=tuple(st.color), origin=origin, dir=ld,
-                            space=space))
+        runs.extend(_emit_line(rich, origin, ld, em, extra, font_of))
     for j in range(len(layout), n_old):
         remove.append(old[j])
     return _Plan(remove=remove, runs=runs)
+
+
+def _wrap_rich(rich, width: float, measure) -> list[list]:
+    """Greedy word wrap of rich text to ``width`` (0 = never wrap)."""
+    tol = 1.5 + 0.01 * width
+    if width <= 0 or measure(rich) <= width + tol:
+        return [rich]
+    tokens: list[tuple[list, list]] = []  # (separator, word)
+    sep: list = []
+    word: list = []
+    for c in rich:
+        if c[0] == " ":
+            if word:
+                tokens.append((sep, word))
+                sep, word = [], []
+            sep.append(c)
+        else:
+            word.append(c)
+    if word or sep:
+        tokens.append((sep, word))
+    lines: list[list] = []
+    cur: list = []
+    for sep, word in tokens:
+        cand = cur + sep + word if (cur or not lines) else word
+        if measure(cand) <= width + tol:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur)
+            cur = []
+        while word and measure(word) > width + tol:
+            k = len(word)
+            while k > 1 and measure(word[:k]) > width + tol:
+                k -= 1
+            lines.append(word[:k])
+            word = word[k:]
+        cur = word
+    if cur:
+        lines.append(cur)
+    return lines or [rich]
+
+
+def _emit_line(rich, origin, d, em, extra: float, font_of) -> list[TextRun]:
+    """Turn one laid-out rich line into positioned TextRuns. Runs of one
+    style are written in one piece unless spaces must be stretched
+    (justification) or the font has no space glyph."""
+    n = _perp(d)
+    out: list[TextRun] = []
+    x = 0.0
+    for txt, st, rise in _runs(rich):
+        font = font_of(st)
+        space = em * st.size if em else None
+        pieces = re.split(r"( +)", txt) if (extra or not has_space(font)) else [txt]
+        for piece in pieces:
+            if not piece:
+                continue
+            w = text_width(font, piece, st.size, space)
+            if piece[0] == " " and not piece.strip():
+                x += w + extra * len(piece)
+                continue
+            if piece.strip():
+                pos = (origin[0] + d[0] * x + n[0] * rise, origin[1] + d[1] * x + n[1] * rise)
+                out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
+                                   origin=pos, dir=d, space=space))
+            x += w + (extra * piece.count(" ") if extra else 0.0)
+    return out
 
 
 # ---------------------------------------------------------------------------

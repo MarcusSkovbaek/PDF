@@ -13,16 +13,15 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QObject,
-    QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
     Qt,
     QTimer,
 )
-from PySide6.QtWidgets import QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from ..theme import tokens as T
-from .util import IconButton, ThemedIconLabel, add_shadow
+from .util import IconButton, ThemedIconLabel
 
 KIND_ICON = {
     "info": ("info", "accent_text"),
@@ -39,13 +38,10 @@ class Toast(QWidget):
         self._host = host
         self._closing = False
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(16, 10, 16, 20)  # room for the shadow
-        frame = QFrame(self)
-        frame.setObjectName("Toast")
-        outer.addWidget(frame)
-        lay = QHBoxLayout(frame)
-        lay.setContentsMargins(12, 8, 8, 8)
+        self.SHADOW = 14
+        lay = QHBoxLayout(self)
+        m = self.SHADOW
+        lay.setContentsMargins(m + 12, m + 8, m + 8, m + 8)
         lay.setSpacing(10)
         name, role = KIND_ICON.get(kind, KIND_ICON["info"])
         lay.addWidget(ThemedIconLabel(name, 18, role))
@@ -68,7 +64,6 @@ class Toast(QWidget):
         close = IconButton("x", "", variant="icon-sm", icon_size=14, role="text_subtle")
         close.clicked.connect(self.dismiss)
         lay.addWidget(close)
-        add_shadow(frame, blur=30, y=8)
 
         self._opacity = QGraphicsOpacityEffect(self)
         self._opacity.setOpacity(0.0)
@@ -90,11 +85,37 @@ class Toast(QWidget):
             self._timer.start(1500)
         super().leaveEvent(ev)
 
+    def paintEvent(self, _ev) -> None:  # noqa: N802
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPainter, QPainterPath, QPen
+
+        from ..viewer.page_view import paint_soft_shadow
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = self.SHADOW
+        r = QRectF(self.rect()).adjusted(m, m, -m, -m)
+        # soft shadow built from translucent rounded rings
+        sh = T.qcolor("shadow_strong")
+        for i in range(1, m):
+            c = type(sh)(sh)
+            c.setAlphaF(sh.alphaF() * (1 - i / m) ** 2 * 0.55)
+            path = QPainterPath()
+            path.addRoundedRect(r.adjusted(-i, -i + 4, i, i + 4), 12 + i, 12 + i)
+            p.setPen(QPen(c, 1.2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        card = QPainterPath()
+        card.addRoundedRect(r, 12, 12)
+        p.fillPath(card, T.qcolor("surface_raised"))
+        p.setPen(QPen(T.qcolor("border_strong"), 1))
+        p.drawPath(card)
+        p.end()
+
     def appear(self, target: QPoint) -> None:
         self.move(target + QPoint(0, 14))
         self.show()
         self.raise_()
-        grp = QParallelAnimationGroup(self)
         a = QPropertyAnimation(self, b"pos", self)
         a.setDuration(220)
         a.setStartValue(target + QPoint(0, 14))
@@ -104,15 +125,17 @@ class Toast(QWidget):
         b.setDuration(180)
         b.setStartValue(0.0)
         b.setEndValue(1.0)
-        grp.addAnimation(a)
-        grp.addAnimation(b)
-        grp.start()
-        self._anim = grp
+        self._slide = a
+        self._fade_in = b
+        a.start()
+        b.start()
         self._timer.start()
 
     def slide_to(self, target: QPoint) -> None:
         if self._closing:
             return
+        if getattr(self, "_slide", None) is not None:
+            self._slide.stop()
         a = QPropertyAnimation(self, b"pos", self)
         a.setDuration(T.ANIM_MS)
         a.setEndValue(target)
@@ -170,12 +193,12 @@ class ToastHost(QObject):
 
     def _positions(self) -> list[QPoint]:
         w = self.widget
-        y = w.height() - self.bottom_margin + 20
+        y = w.height() - self.bottom_margin - 6
         out: list[QPoint] = []
         for t in reversed(self._toasts):
             sz = t.sizeHint()
             t.resize(sz)
-            y -= sz.height() - 12
+            y -= sz.height() - 2 * t.SHADOW + 8
             out.append(QPoint((w.width() - sz.width()) // 2, y))
         return list(reversed(out))
 

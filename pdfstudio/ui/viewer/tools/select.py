@@ -212,9 +212,12 @@ class SelectTool(Tool):
         return True
 
     def clear_selection(self) -> None:
+        had = self.has_selection()
         self._anchor = None
         self._focus = None
         self._remove_items()
+        if had:
+            self.changed.emit()
 
     def _remove_items(self) -> None:
         if self.ctx is None:

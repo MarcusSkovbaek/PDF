@@ -38,6 +38,7 @@ from .theme import tokens as T
 from .theme.icons import icon
 from .viewer.page_view import PageView
 from .viewer.tools.base import MODES, ToolContext, ToolRegistry
+from .widgets.segmented import Segment, SegmentedControl
 from .widgets.util import IconButton, ThemedIconLabel, add_shadow, divider, label, on_theme_change, set_prop
 
 try:
@@ -155,6 +156,34 @@ class Organizer(QWidget):
         p.end()
 
 
+class ElideLabel(QLabel):
+    """Single-line label that elides in the middle and shows the full text as tooltip."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__()
+        self._full = text
+        self.setMinimumWidth(40)
+        from PySide6.QtWidgets import QSizePolicy
+
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text
+        self.setToolTip(text)
+        self._apply()
+
+    def text_full(self) -> str:
+        return self._full
+
+    def _apply(self) -> None:
+        fm = self.fontMetrics()
+        super().setText(fm.elidedText(self._full, Qt.TextElideMode.ElideMiddle, max(20, self.width())))
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        self._apply()
+
+
 class Inspector(QWidget):
     """Right panel: active tool's properties, else document information."""
 
@@ -220,8 +249,7 @@ class Inspector(QWidget):
             row = QHBoxLayout()
             k = label(tr(f"shell.inspector.{key}"), "caption")
             k.setFixedWidth(78)
-            val = QLabel("")
-            val.setWordWrap(True)
+            val = ElideLabel("")
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             row.addWidget(k, 0, Qt.AlignmentFlag.AlignTop)
             row.addWidget(val, 1)
@@ -231,26 +259,24 @@ class Inspector(QWidget):
         v.addStretch(1)
         return w
 
-    def set_tool(self, tool) -> None:
-        if self._tool_widget is not None:
-            self.scroll.takeWidget()
-            self._tool_widget.setParent(None)
-            self._tool_widget = None
+    MODE_ICONS = {"view": "eye", "edit": "pencil-simple", "annotate": "chat-circle-text", "pages": "squares-four"}
+
+    def set_tool(self, tool, mode: str | None = None) -> None:
+        current = self.scroll.takeWidget()   # never let QScrollArea delete a widget it does not own
+        if current is not None and current is not self.doc_info:
+            current.setParent(None)
         pw = tool.properties_widget() if tool is not None else None
-        if pw is not None:
-            self._tool_widget = pw
-            self.doc_info.setParent(None)
-            self.scroll.setWidget(pw)
-            self.head_title.setText(tool.display_label())
-        else:
-            if self.scroll.widget() is not self.doc_info:
-                self.scroll.takeWidget()
-                self.scroll.setWidget(self.doc_info)
-            self.head_title.setText(tr("shell.inspector.title"))
+        self._tool_widget = pw
+        self.scroll.setWidget(pw if pw is not None else self.doc_info)
+        self.head_title.setText(tool.display_label() if pw is not None else tr("shell.inspector.title"))
         if tool is not None:
             self.tool_icon.set_icon(tool.icon or "cursor")
             self.tool_name.setText(tool.display_label())
             self.tool_hint.setText(tool.hint or "")
+        elif mode:
+            self.tool_icon.set_icon(self.MODE_ICONS.get(mode, "info"))
+            self.tool_name.setText(tr(f"shell.mode.{mode}"))
+            self.tool_hint.setText(tr(f"shell.mode.{mode}.tip"))
         self.refresh_doc()
 
     def refresh_doc(self) -> None:
@@ -307,16 +333,10 @@ class Sidebar(QWidget):
         head.setObjectName("PanelHeader")
         hl = QHBoxLayout(head)
         hl.setContentsMargins(10, 10, 10, 6)
-        self.tabs = QTabBar()
-        self.tabs.setObjectName("SideTabs")
-        self.tabs.setDrawBase(False)
-        self.tabs.setExpanding(False)
-        self.tabs.setIconSize(QSize(15, 15))
-        self._tab_icons = ["squares-four", "bookmarks-simple", "magnifying-glass"]
-        for name, key in zip(self._tab_icons, ("shell.side.pages", "shell.side.outline", "shell.side.search")):
-            self.tabs.addTab(icon(name, "text_muted", selected_role="accent_text"), tr(key))
-        hl.addWidget(self.tabs)
-        hl.addStretch(1)
+        self.tabs = SegmentedControl(
+            [Segment("pages", tr("shell.side.pages")), Segment("outline", tr("shell.side.outline")),
+             Segment("search", tr("shell.side.search"))], height=30, expand=True, min_seg=48)
+        hl.addWidget(self.tabs, 1)
         lay.addWidget(head)
         self.stack = QStackedWidget()
         self.thumbs = ThumbnailsPanel(workspace)
@@ -326,19 +346,18 @@ class Sidebar(QWidget):
             self.stack.addWidget(w)
         lay.addWidget(self.stack, 1)
         self.tabs.currentChanged.connect(self._on_tab)
-        on_theme_change(self, self._refresh_icons)
 
-    def _refresh_icons(self) -> None:
-        for i, name in enumerate(self._tab_icons):
-            self.tabs.setTabIcon(i, icon(name, "accent_text" if i == self.tabs.currentIndex() else "text_muted"))
+    KEYS = ("pages", "outline", "search")
 
-    def _on_tab(self, i: int) -> None:
-        self.stack.setCurrentIndex(i)
-        self._refresh_icons()
+    def _on_tab(self, key: str) -> None:
+        self.stack.setCurrentIndex(self.KEYS.index(key))
+
+    def current_tab(self) -> str:
+        return self.KEYS[self.stack.currentIndex()]
 
     def show_tab(self, key: str) -> None:
-        i = {"pages": 0, "outline": 1, "search": 2}[key]
-        self.tabs.setCurrentIndex(i)
+        self.tabs.set_current_key(key, animate=self.isVisible())
+        self.stack.setCurrentIndex(self.KEYS.index(key))
 
 
 class DocumentWorkspace(QWidget):
@@ -488,12 +507,14 @@ class DocumentWorkspace(QWidget):
             if self.organizer is None:
                 self.organizer = Organizer(self)
                 self.organizer.view.pageActivated.connect(self._organizer_activated)
+                self.organizer.view.pageOpened.connect(self._organizer_opened)
                 self.organizer.view.selectionChangedPages.connect(lambda _p: self.stateChanged.emit())
                 self.center_stack.addWidget(self.organizer)
             self.center_stack.setCurrentWidget(self.organizer)
             self.organizer.view.set_current_page(self.view.current_page)
         else:
             self.center_stack.setCurrentWidget(self.view)
+        self.sidebar.setVisible(getattr(self, "_sidebar_pref", True) and mode != "pages")
         want = tool_id or self._mode_tool.get(mode) or MODE_DEFAULT_TOOL.get(mode)
         ids = [t.id for t in tools]
         if want not in ids:
@@ -512,7 +533,7 @@ class DocumentWorkspace(QWidget):
             self.tool = None
             # keep basic text selection available in modes without tools
             self.view.set_tool(None, sink=self)
-            self.inspector.set_tool(None)
+            self.inspector.set_tool(None, mode)
             self.toolChanged.emit("")
         self._position_toolbar()
         self.modeChanged.emit(mode)
@@ -544,12 +565,17 @@ class DocumentWorkspace(QWidget):
 
     # --------------------------------------------------------------- panels
     def set_sidebar_visible(self, on: bool) -> None:
-        self.sidebar.setVisible(on)
+        self._sidebar_pref = on
+        self.sidebar.setVisible(on and self.mode != "pages")
 
     def set_inspector_visible(self, on: bool) -> None:
         self.inspector.setVisible(on)
 
     def show_search(self) -> None:
+        if self.mode == "pages":
+            self.set_mode("view")
+            if self.window_ is not None:
+                self.window_.modes.set_current_key("view")
         self.sidebar.setVisible(True)
         self.sidebar.show_tab("search")
         sel = self.tool.selected_text() if self.tool is not None and hasattr(self.tool, "selected_text") else ""
@@ -564,6 +590,13 @@ class DocumentWorkspace(QWidget):
     def _organizer_activated(self, page: int) -> None:
         self.thumbs.set_current_page(page)
         self.view.go_to_page(page)
+
+    def _organizer_opened(self, page: int) -> None:
+        if self.window_ is not None and hasattr(self.window_, "set_mode"):
+            self.window_.set_mode("view")
+        else:
+            self.set_mode("view")
+        QTimer.singleShot(0, lambda: self.view.go_to_page(page))
 
     def _on_current_page(self, page: int) -> None:
         self.thumbs.set_current_page(page)
@@ -617,7 +650,7 @@ class DocumentWorkspace(QWidget):
             sel = self.organizer.view.selected_pages()
             if sel:
                 return sel
-        if self.sidebar.isVisible() and self.sidebar.stack.currentIndex() == 0:
+        if self.sidebar.isVisible() and self.sidebar.current_tab() == "pages":
             sel = self.thumbs.selected_pages()
             if len(sel) > 1 or (sel and self.thumbs.hasFocus()):
                 return sel

@@ -130,8 +130,8 @@ class PageItem(QGraphicsItem):
         p.resetTransform()
         tok = T.current()
         # shadows: tight contact + wide ambient
-        paint_soft_shadow(p, r, 3, T.qcolor("shadow_strong") if not tok.is_dark else QColor(0, 0, 0, 120), 1)
-        paint_soft_shadow(p, r, 16, T.qcolor("shadow") if not tok.is_dark else QColor(0, 0, 0, 90), 5)
+        paint_soft_shadow(p, r, 2, T.qcolor("shadow_strong"), 0.5)
+        paint_soft_shadow(p, r, 14, T.qcolor("shadow"), 4)
         p.fillRect(r, T.qcolor("page"))
         if self.pix is not None:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -141,10 +141,9 @@ class PageItem(QGraphicsItem):
             dr = t.mapRect(clip)
             p.drawPixmap(QRectF(round(dr.x()), round(dr.y()), round(dr.width()), round(dr.height())),
                          dpix, QRectF(dpix.rect()))
-        if tok.is_dark:
-            p.setPen(QPen(QColor(255, 255, 255, 18), 1))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(r.adjusted(-0.5, -0.5, 0.5, 0.5))
+        p.setPen(QPen(QColor(255, 255, 255, 22) if tok.is_dark else QColor(20, 20, 50, 26), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(r.adjusted(-0.5, -0.5, 0.5, 0.5))
         p.restore()
 
     def pixmap_bytes(self) -> int:
@@ -184,6 +183,7 @@ class PageView(QGraphicsView):
 
         self._zoom = 1.0
         self._fit_mode: str | None = "width"
+        self._fit_auto = True   # initial automatic fit-width is capped at 150 %
         self._top_px = 72     # room for the floating toolbar
         self._items: list[PageItem] = []
         self._tops: list[float] = []
@@ -435,19 +435,21 @@ class PageView(QGraphicsView):
     def _fit_zoom(self, mode: str) -> float:
         if not self._items:
             return 1.0
-        vw = max(50, self.viewport().width() - 2 * SIDE_PX)
+        vw = max(50, self.viewport().width() - 2 * SIDE_PX - 4)
         vh = max(50, self.viewport().height() - self._top_px - GAP_PX)
         if mode == "width":
             maxw = max(it.w for it in self._items)
             z = vw / maxw
-            return min(z, 4.0)
+            return min(z, 1.5 if self._fit_auto else 4.0)
         it = self._items[self._current] if self._current < len(self._items) else self._items[0]
         return min(vw / it.w, vh / it.h)
 
     def fit_width(self) -> None:
+        self._fit_auto = False
         self._apply_fit("width")
 
     def fit_page(self) -> None:
+        self._fit_auto = False
         self._apply_fit("page")
 
     def _apply_fit(self, mode: str, emit: bool = True) -> None:
@@ -845,15 +847,16 @@ class PageView(QGraphicsView):
         super().wheelEvent(ev)
 
     def keyPressEvent(self, ev) -> None:  # noqa: N802
-        if ev.key() == Qt.Key.Key_Space and not ev.isAutoRepeat():
-            self._space_down = True
-            self._update_cursor()
+        if self._scene.focusItem() is not None:   # e.g. an inline text editor
+            super().keyPressEvent(ev)
+            return
+        if self._tool is not None and self._tool.key_press(ev):
             ev.accept()
             return
         if ev.key() == Qt.Key.Key_Space:
-            ev.accept()
-            return
-        if self._tool is not None and self._tool.key_press(ev):
+            if not ev.isAutoRepeat():
+                self._space_down = True
+                self._update_cursor()
             ev.accept()
             return
         super().keyPressEvent(ev)

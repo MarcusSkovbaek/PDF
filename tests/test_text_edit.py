@@ -2,7 +2,7 @@ import pymupdf
 import pytest
 
 from pdfstudio.core import CONTENT, PdfDocument
-from pdfstudio.core.fonts import SpanStyle
+from pdfstudio.core.fonts import SpanStyle, style_from_span
 from pdfstudio.core.text_edit import TextBlock, block_at, replace_block_text, text_blocks
 from tests.conftest import SANS_TTF, make_sample_pdf
 
@@ -205,7 +205,7 @@ def test_subset_font_reused_then_fallback_for_new_glyphs():
     page = pdf.doc[0]
     s = find_span(page, "ÆØÅ")
     assert s["text"] == "Hej ÆØÅ æøå"
-    assert not s["flags"] & pymupdf.TEXT_FONT_SERIFED
+    assert not style_from_span(s["font"], 14, 0, 0).serif
     assert s["color"] == 0x0033CC and s["size"] == pytest.approx(14, abs=0.01)
     # each glyph renders: ink spans most of the expected width
     box = ink_bbox(pix(page, pymupdf.Rect(70, 185, 300, 205), zoom=2))
@@ -366,11 +366,11 @@ def test_tight_leading_neighbours_survive():
     blk = text_blocks(pdf.doc, 0)[0]
     lines = blk.text.split("\n")
     assert len(lines) == 3
-    lines[1] = "Midterste linje redigeret"
+    lines[1] = "Midterste linje"
     replace_block_text(pdf, blk, "\n".join(lines))
     text = pdf.doc[0].get_text()
     assert "Linje nummer 0 tæt sat" in text and "Linje nummer 2 tæt sat" in text
-    assert "Linje nummer 1" not in text and "Midterste linje redigeret" in text
+    assert "Linje nummer 1" not in text and "Midterste linje" in text
 
 
 def test_pending_user_redaction_is_not_applied(pdf):
@@ -426,3 +426,63 @@ def test_cropped_page_coordinates(rotation):
     (new,) = text_blocks(pdf.doc, 0)
     assert new.text == "Beskaaret side ændret"
     assert new.lines[0].origin == pytest.approx(blk.lines[0].origin, abs=0.5)
+
+
+def test_invisible_ocr_text_is_not_offered_for_editing():
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((50, 50), "Usynlig OCR", fontname="helv", fontsize=12, render_mode=3)
+    p.insert_text((50, 80), "Synlig", fontname="helv", fontsize=12)
+    assert [b.text for b in text_blocks(doc, 0)] == ["Synlig"]
+
+
+def test_inline_bold_and_superscript_survive_edit():
+    doc = pymupdf.open()
+    p = doc.new_page()
+    x = 72
+    for txt, font, size, rise in [("Normal ", "helv", 12, 0), ("fed", "hebo", 12, 0), (" tekst", "helv", 12, 0),
+                                  ("2", "helv", 7, -5)]:
+        p.insert_text((x, 100 + rise), txt, fontname=font, fontsize=size)
+        x += pymupdf.get_text_length(txt, font, size)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    blk = text_blocks(pdf.doc, 0)[0]
+    assert blk.text == "Normal fed tekst2"
+    replace_block_text(pdf, blk, "Normal fed tekst ændret2")
+    page = pdf.doc[0]
+    bold = find_span(page, "fed")
+    assert bold["flags"] & pymupdf.TEXT_FONT_BOLD or "Bold" in bold["font"]
+    assert bold["text"].strip() == "fed"
+    sup = [s for s in spans(page) if s["text"].strip() == "2"]
+    assert sup and sup[0]["size"] == pytest.approx(7, abs=0.01)
+    assert sup[0]["origin"][1] == pytest.approx(95, abs=0.5)
+    assert "ændret" in page.get_text()
+
+
+def test_justified_paragraph_stays_justified():
+    doc = pymupdf.open()
+    p = doc.new_page()
+    text = ("Dette er et justeret afsnit med en del tekst, som fylder flere linjer, så vi kan se at "
+            "linjerne stadig flugter i højre side efter en redigering af et ord midt i afsnittet. ") * 2
+    p.insert_textbox(pymupdf.Rect(72, 72, 300, 300), text, fontname="tiro", fontsize=11,
+                     align=pymupdf.TEXT_ALIGN_JUSTIFY)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    blk = text_blocks(pdf.doc, 0)[0]
+    right = max(ln.bbox.x1 for ln in blk.lines)
+    lines = blk.text.split("\n")
+    assert "flere" in lines[1]
+    lines[1] = lines[1].replace("flere", "mange")
+    replace_block_text(pdf, blk, "\n".join(lines))
+    new = text_blocks(pdf.doc, 0)[0]
+    edited = new.lines[1]
+    assert "mange" in edited.text
+    assert edited.bbox.x1 == pytest.approx(right, abs=1.0)
+
+
+def test_style_override_with_new_family(pdf):
+    blk = block_with(pdf, 0, "broedtekst")
+    st = SpanStyle(**{**vars(blk.style), "font": "Helvetica"})
+    replace_block_text(pdf, blk, blk.text, style=st)
+    s = find_span(pdf.doc[0], "broedtekst")
+    assert "Sans" in s["font"] or "Helvetica" in s["font"] or "Arial" in s["font"]
+    assert text_blocks(pdf.doc, 0)[1].style.serif is False
+    assert s["origin"] == pytest.approx((72, 130), abs=0.5)

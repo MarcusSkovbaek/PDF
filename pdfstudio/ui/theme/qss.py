@@ -87,6 +87,7 @@ QToolButton:pressed { background: @pressed; }
 QToolButton:checked { background: @selected; color: @accent_text; }
 QToolButton:disabled { color: @text_subtle; }
 QToolButton[variant="icon"] { padding: 0px; min-width: 32px; min-height: 32px; max-width: 32px; max-height: 32px; }
+QToolButton[variant="icon"]:checked { background: @hover; color: @text; }
 QToolButton[variant="icon-sm"] { padding: 0px; min-width: 26px; min-height: 26px; max-width: 26px; max-height: 26px; border-radius: 6px; }
 QToolButton[variant="tool"] { padding: 0px; min-width: 36px; min-height: 36px; max-width: 36px; max-height: 36px; border-radius: 9px; }
 QToolButton[variant="tool"]:checked { background: @accent; color: @text_on_accent; }
@@ -96,15 +97,15 @@ QToolButton[variant="text"]:hover { color: @text; }
 QToolButton::menu-indicator { image: none; width: 0px; }
 
 /* ---------- inputs ---------- */
-QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QComboBox {
+QLineEdit, QPlainTextEdit, QTextEdit {
     background: @surface_sunken; color: @text; border: 1px solid @border_strong;
     border-radius: 7px; selection-background-color: @text_selection; selection-color: @text;
 }
 QLineEdit { padding: 0px 10px; min-height: 30px; }
 QPlainTextEdit, QTextEdit { padding: 6px 8px; }
-QLineEdit:hover, QAbstractSpinBox:hover, QComboBox:hover, QPlainTextEdit:hover, QTextEdit:hover { border-color: @input_hover; }
-QLineEdit:focus, QAbstractSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus, QTextEdit:focus { border: 1px solid @accent; }
-QLineEdit:disabled, QComboBox:disabled, QAbstractSpinBox:disabled { color: @text_subtle; background: @bg_app; border-color: @border; }
+QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover { border-color: @input_hover; }
+QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus { border: 1px solid @accent; }
+QLineEdit:disabled { color: @text_subtle; background: @bg_app; border-color: @border; }
 QLineEdit[variant="bare"] { background: transparent; border: 1px solid transparent; padding: 0px 4px; }
 QLineEdit[variant="bare"]:hover { background: @hover; }
 QLineEdit[variant="bare"]:focus { background: @surface_sunken; border: 1px solid @accent; }
@@ -113,10 +114,10 @@ QLineEdit[variant="palette"] {
     background: transparent; border: none; border-radius: 0px; font-size: 15px;
     padding: 0px 4px; min-height: 44px;
 }
-QAbstractSpinBox { padding: 0px 6px; min-height: 30px; }
-QAbstractSpinBox::up-button, QAbstractSpinBox::down-button { width: 16px; border: none; background: transparent; }
-QComboBox { padding: 0px 10px; min-height: 30px; }
-QComboBox::drop-down { border: none; width: 22px; }
+/* QComboBox / QSpinBox frames are painted by FolioStyle (theme/manager.py) */
+QAbstractSpinBox QLineEdit, QComboBox QLineEdit {
+    background: transparent; border: none; padding: 0px; min-height: 0px; border-radius: 0px;
+}
 QComboBox QAbstractItemView {
     background: @surface_raised; border: 1px solid @border; border-radius: 8px; padding: 4px;
     outline: 0; selection-background-color: @selected; selection-color: @text;
@@ -168,7 +169,7 @@ QSplitter::handle:vertical { height: 1px; }
 QSlider::groove:horizontal { height: 4px; background: @border_strong; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: @accent; border-radius: 2px; }
 QSlider::handle:horizontal {
-    background: @surface_raised; border: 1px solid @border_strong; width: 14px; height: 14px;
+    background: @slider_knob; border: 1px solid @border_strong; width: 14px; height: 14px;
     margin: -6px 0px; border-radius: 8px;
 }
 QSlider::handle:horizontal:hover { border-color: @accent; }
@@ -215,7 +216,7 @@ QTabBar#SideTabs::tab:hover:!selected { background: @hover; color: @text; }
 QTabBar#SideTabs::tab:selected { background: @selected; color: @accent_text; }
 
 QFrame#Badge {
-    background: @success_soft; border: 1px solid @success_border; border-radius: 12px;
+    background: @success_soft; border: 1px solid @success_border; border-radius: 10px;
 }
 QLabel#BadgeText { color: @success; font-size: 12px; font-weight: 600; }
 
@@ -253,7 +254,8 @@ def derived(t: T.Tokens) -> dict[str, str]:
         "card_hover": T.blend("surface_raised", "accent", 0.035, t),
         "danger_hover": T.blend("danger", "text", 0.12, t),
         "success_border": T.value("success", t)[:7] + "40",
-        "text_on_accent_ring": T.value("text_on_accent", t)[:7] + "99",
+        "text_on_accent_ring": T.value("text_on_accent", t)[:7] + "73",
+        "slider_knob": "#DADAE2" if t.is_dark else "#FFFFFF",
     }
 
 

@@ -725,22 +725,72 @@ def _family_faces(keys: list[str], bold: bool, italic: bool) -> list[SystemFace]
 # ---------------------------------------------------------------------------
 # embedded fonts
 # ---------------------------------------------------------------------------
-def _trace_glyphs(page: pymupdf.Page, want: str) -> dict[int, int]:
-    """unicode -> glyph id actually used on the page for spans of font ``want``
-    (a :func:`_loose` name)."""
-    pairs: dict[int, int] = {}
+def _trace_spans(page: pymupdf.Page, want: str) -> list[list[tuple[int, int, float | None]]]:
+    """Per span of font ``want`` (a :func:`_loose` name): the characters as
+    ``(unicode, glyph id, advance in em)`` – what the PDF really shows."""
+    out = []
     try:
         trace = page.get_texttrace()
     except Exception:
-        return pairs
+        return out
     for span in trace:
         if _loose(span.get("font", "")) != want:
             continue
+        size = float(span.get("size") or 0)
+        d = span.get("dir", (1.0, 0.0))
+        chars = []
         for ch in span.get("chars", ()):
             u, gid = ch[0], ch[1]
             if u is None or gid is None or gid <= 0 or u == 0xFFFD or u < 32:
                 continue
-            pairs.setdefault(int(u), int(gid))
+            adv = None
+            if size > 0 and len(ch) > 3 and ch[3]:
+                x0, y0, x1, y1 = ch[3]
+                adv = (abs(x1 - x0) * abs(d[0]) + abs(y1 - y0) * abs(d[1])) / size
+            chars.append((int(u), int(gid), adv))
+        if chars:
+            out.append(chars)
+    return out
+
+
+def _glyph_advance(font: pymupdf.Font, gid: int) -> float | None:
+    try:
+        from pymupdf import mupdf
+
+        return float(mupdf.fz_advance_glyph(font.this, gid, 0))
+    except Exception:
+        return None
+
+
+def _pairs_for_font(font: pymupdf.Font, spans) -> dict[int, int]:
+    """unicode -> glyph id from the trace spans that were provably drawn with
+    this font program (every glyph's advance matches), conflicts dropped."""
+    count = font.glyph_count or 0
+    pairs: dict[int, int] = {}
+    conflicts: set[int] = set()
+    for chars in spans:
+        ok, checked = True, 0
+        for u, gid, adv in chars:
+            if gid >= count:
+                ok = False
+                break
+            if u == 32 or adv is None:
+                continue  # word spacing changes space advances
+            fa = _glyph_advance(font, gid)
+            if fa is None:
+                continue
+            checked += 1
+            if abs(fa - adv) > max(0.02, 0.03 * fa):
+                ok = False
+                break
+        if not ok or not checked:
+            continue
+        for u, gid, _adv in chars:
+            if u in pairs and pairs[u] != gid:
+                conflicts.add(u)
+            pairs.setdefault(u, gid)
+    for u in conflicts:
+        pairs.pop(u, None)
     return pairs
 
 
@@ -844,7 +894,7 @@ def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyl
     want = _loose(style.font)
     if not want:
         return
-    pairs = None
+    spans = None
     seen = set()
     for entry in fonts:
         xref, ext, _ftype, basefont = entry[0], entry[1], entry[2], entry[3]
@@ -866,10 +916,11 @@ def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyl
             continue
         if not name_match and _loose(font.name) != want:
             continue
-        if pairs is None:
-            pairs = _trace_glyphs(page, want)
+        if spans is None:
+            spans = _trace_spans(page, want)
+        pairs = _pairs_for_font(font, spans)
         if not pairs:
-            continue  # cannot prove the cmap matches what the PDF shows
+            continue  # cannot prove which glyphs the PDF shows with this font
         if all(font.has_glyph(u) == gid for u, gid in pairs.items()):
             yield font, pairs
             continue

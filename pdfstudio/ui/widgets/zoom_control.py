@@ -92,9 +92,9 @@ class PageNavigator(QWidget):
         self.btn_next = IconButton("caret-down", tr("shell.nav.next"), variant="icon-sm", icon_size=14, shortcut="PgDown")
         self.field = QLineEdit("1")
         self.field.setProperty("variant", "bare")
-        self.field.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.field.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.field.setFixedHeight(26)
-        self.field.setFixedWidth(44)
+        self.field.setFixedWidth(40)
         self.field.setToolTip(tr("shell.nav.field_tip"))
         self._validator = QIntValidator(1, 1, self)
         self.field.setValidator(self._validator)
@@ -107,6 +107,7 @@ class PageNavigator(QWidget):
         lay.addWidget(self.btn_next)
         lay.addSpacing(4)
         lay.addWidget(self.field)
+        lay.addSpacing(2)
         lay.addWidget(self.total)
 
     def set_state(self, current: int, count: int) -> None:

@@ -243,7 +243,7 @@ class MainWindow(QMainWindow):
         h = QHBoxLayout(w)
         h.setContentsMargins(10, 0, 10, 0)
         self.btn_sidebar = IconButton("layout", tr("shell.view.sidebar"),
-                                      variant="icon", checkable=True, icon_size=18)
+                                      variant="icon", checkable=True, icon_size=18, on_role="text")
         self.btn_sidebar.clicked.connect(lambda: self.actions.trigger("view.toggle_sidebar"))
         h.addWidget(self.btn_sidebar)
         self.doc_title = label("", "heading")
@@ -259,7 +259,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self.modes)
         h.addStretch(1)
         self.btn_inspector = IconButton("sliders-horizontal", tr("shell.view.inspector"), variant="icon",
-                                        checkable=True, icon_size=18)
+                                        checkable=True, icon_size=18, on_role="text")
         self.btn_inspector.clicked.connect(lambda: self.actions.trigger("view.toggle_inspector"))
         h.addWidget(self.btn_inspector)
         return w
@@ -578,7 +578,7 @@ class MainWindow(QMainWindow):
             home.clearRecentRequested.connect(self._clear_recent)
             self._widgets[key] = home
             self.stack.addWidget(home)
-            self.tabs.add_tab(icon("house", "text_muted"), tr("shell.tab.home"), key, closable=True)
+            self.tabs.add_tab(icon("house", "text_muted"), tr("shell.tab.home"), key, closable=False)
         else:
             self._widgets[key].refresh_recent()
         self.tabs.setCurrentIndex(self.tabs.index_of(key))
@@ -903,6 +903,7 @@ class MainWindow(QMainWindow):
             self.setWindowTitle(APP_NAME)
             return
         self.modes.set_current_key(ws.mode, animate=self.isVisible())
+        self.zoom.setVisible(ws.mode != "pages")
         self.setWindowTitle(f"{'• ' if pdf.is_dirty else ''}{pdf.display_name} — {APP_NAME}")
         self.doc_title.setText("")
         self.doc_sub.setText("")

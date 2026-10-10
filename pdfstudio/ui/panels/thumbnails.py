@@ -59,7 +59,7 @@ class ThumbRenderer:
         self.dpr = 1.0
         self._cache: dict[int, tuple] = {}   # page -> (QPixmap, width, stale)
         self._queue: list[int] = []
-        self._timer = QTimer()
+        self._timer = QTimer(model)
         self._timer.setSingleShot(True)
         self._timer.setInterval(0)
         self._timer.timeout.connect(self._step)
@@ -203,7 +203,7 @@ class ThumbDelegate(QStyledItemDelegate):
         s = min(tw / w, box_h / h)
         pw, ph = round(w * s), round(h * s)
         x = cell.x() + (cell.width() - pw) / 2
-        y = cell.y() + PAD + (box_h - ph) / 2
+        y = cell.y() + PAD + (box_h - ph)  # bottom-aligned: label stays close
         page_r = QRectF(round(x), round(y), pw, ph)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
@@ -252,6 +252,7 @@ class ThumbDelegate(QStyledItemDelegate):
 
 class ThumbnailView(QListView):
     pageActivated = Signal(int)
+    pageOpened = Signal(int)          # double-click / Enter
     selectionChangedPages = Signal(list)
 
     def __init__(self, workspace, *, grid: bool = False, thumb_width: int = 116, parent=None) -> None:
@@ -283,7 +284,8 @@ class ThumbnailView(QListView):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._context_menu)
         self.clicked.connect(lambda idx: self.pageActivated.emit(idx.row()))
-        self.activated.connect(lambda idx: self.pageActivated.emit(idx.row()))
+        self.activated.connect(lambda idx: self.pageOpened.emit(idx.row()))
+        self.doubleClicked.connect(lambda idx: self.pageOpened.emit(idx.row()))
         self.selectionModel().selectionChanged.connect(
             lambda *_: self.selectionChangedPages.emit(self.selected_pages()))
         self.setStyleSheet("QListView::item, QListView::item:hover, QListView::item:selected"
@@ -293,7 +295,20 @@ class ThumbnailView(QListView):
     # -- sizing ---------------------------------------------------------------
     def cell_size(self) -> QSize:
         tw = self.thumb_width
-        return QSize(tw + 2 * PAD + (8 if self.grid else 0), int(tw * 1.42) + PAD + LABEL_H + 10)
+        w = tw + 2 * PAD + (8 if self.grid else 0)
+        if not self.grid:
+            w = max(w, self.viewport().width() - 2 * self.spacing() - 2)
+        return QSize(w, int(tw * 1.42) + PAD + LABEL_H + 10)
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        if not self.grid:
+            vw = self.viewport().width()
+            tw = int(max(72, min(150, vw - 2 * PAD - 2 * self.spacing() - 64)))
+            if tw != self.thumb_width:
+                self.set_thumb_width(tw)
+            else:
+                self.scheduleDelayedItemsLayout()
 
     def set_thumb_width(self, w: int) -> None:
         self.thumb_width = int(w)

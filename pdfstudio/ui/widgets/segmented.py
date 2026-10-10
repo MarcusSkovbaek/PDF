@@ -26,8 +26,11 @@ class SegmentedControl(QWidget):
     PAD = 3
     ICON = 16
 
-    def __init__(self, segments: list[Segment], parent: QWidget | None = None, *, height: int = 34) -> None:
+    def __init__(self, segments: list[Segment], parent: QWidget | None = None, *, height: int = 34,
+                 expand: bool = False, min_seg: int = 64) -> None:
         super().__init__(parent)
+        self._expand = expand
+        self._min_seg = min_seg
         self._segments = list(segments)
         self._index = 0
         self._hover = -1
@@ -36,7 +39,8 @@ class SegmentedControl(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding if expand else QSizePolicy.Policy.Fixed,
+                           QSizePolicy.Policy.Fixed)
         self._anim = QVariantAnimation(self)
         self._anim.setDuration(200)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -77,10 +81,16 @@ class SegmentedControl(QWidget):
         fm = QFontMetrics(self._bold_font())
         out = []
         for s in self._segments:
-            w = fm.horizontalAdvance(s.text) + 28
+            w = fm.horizontalAdvance(s.text) + (20 if self._expand else 28)
             if s.icon:
                 w += self.ICON + 7
-            out.append(max(w, 64))
+            out.append(max(w, self._min_seg))
+        if self._expand and out:
+            avail = self.width() - 2 * self.PAD
+            total = sum(out)
+            if avail > total:
+                extra = (avail - total) / len(out)
+                out = [w + extra for w in out]
         return out
 
     def _bold_font(self):
@@ -89,9 +99,19 @@ class SegmentedControl(QWidget):
         return f
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        return QSize(sum(self._seg_widths()) + 2 * self.PAD, self._height)
+        exp, self._expand = self._expand, False
+        try:
+            return QSize(int(sum(self._seg_widths())) + 2 * self.PAD, self._height)
+        finally:
+            self._expand = exp
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
+        if self._expand:
+            exp, self._expand = self._expand, False
+            try:
+                return QSize(sum(self._seg_widths()) + 2 * self.PAD, self._height)
+            finally:
+                self._expand = exp
         return self.sizeHint()
 
     def _rects(self) -> list[QRectF]:

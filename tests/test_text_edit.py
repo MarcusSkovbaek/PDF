@@ -486,3 +486,11 @@ def test_style_override_with_new_family(pdf):
     assert "Sans" in s["font"] or "Helvetica" in s["font"] or "Arial" in s["font"]
     assert text_blocks(pdf.doc, 0)[1].style.serif is False
     assert s["origin"] == pytest.approx((72, 130), abs=0.5)
+
+
+def test_columns_are_in_reading_order(sample_pdf):
+    # page 1 has two columns in different fonts whose first baselines differ slightly
+    from pdfstudio.core import text_edit as te
+
+    blocks = te.text_blocks(sample_pdf.doc, 1)
+    assert blocks[0].text.startswith("Venstre") and blocks[1].text.startswith("Hoejre")

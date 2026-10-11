@@ -414,9 +414,27 @@ def _merge_groups(groups: list[list[TextLine]]) -> list[list[TextLine]]:
     for g in out:
         n = _perp(g[0].dir)
         g.sort(key=lambda ln: (round(_dot(ln.raw_origin, n), 1), _dot(ln.raw_origin, ln.dir)))
-    # keep reading order: by position of the first line
-    out.sort(key=lambda g: (round(g[0].raw_origin[1], 1), g[0].raw_origin[0]))
-    return out
+    return _reading_order(out)
+
+
+ROW_TOLERANCE = 3.0  # pt; first baselines closer than this count as one row
+
+
+def _reading_order(groups: list) -> list:
+    """Top-to-bottom, and left-to-right for blocks starting on the same row.
+
+    Side-by-side columns in different fonts have first baselines that differ
+    by a fraction of a point; a plain (y, x) sort would then put the right
+    column first. Rows are anchored on their first block, so the grouping is
+    deterministic."""
+    by_y = sorted(groups, key=lambda g: (g[0].raw_origin[1], g[0].raw_origin[0]))
+    rows: list[list] = []
+    for g in by_y:
+        if rows and g[0].raw_origin[1] - rows[-1][0][0].raw_origin[1] <= ROW_TOLERANCE:
+            rows[-1].append(g)
+        else:
+            rows.append([g])
+    return [g for row in rows for g in sorted(row, key=lambda g: g[0].raw_origin[0])]
 
 
 def block_at(doc: pymupdf.Document, page: int, point) -> TextBlock | None:

@@ -20,14 +20,18 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   selection-aware inspector panel `ui/panels/pages_panel.py` (+ `tests/test_pages_mode.py`).
   Fixed: stale tool buttons stayed on top of the mode pill after switching modes; selection
   not reported after model resets; closed windows still reacting to theme changes.
+- **"Rediger tekst" tool** (`ui/viewer/tools/edit_text.py`, mode "Rediger"): hover outlines paragraphs; click
+  opens an inline editor exactly over the text (same font/size/colour/line pitch, baseline-aligned by measuring
+  Qt's layout, letter-spacing compensated to the PDF's line width, page background sampled so the old text
+  never shows through); Ctrl+Enter/click elsewhere saves, Tab saves + next paragraph, Esc cancels; inspector
+  panel overrides font/size/colour/bold/italic with "Nulstil til original"; undo/redo cancels an open edit.
+  `ui/widgets/color_button.py`, `i18n/da_edit.py`, `tests/test_edit_text_tool.py` (8 tests).
+  Core verified: no file growth over repeated edits, ~20 ms/edit, images/vector art/other blocks untouched;
+  fixed reading order of side-by-side columns (`_reading_order`).
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
-1. **Text editing engine** (`core/fonts.py`, `text_edit.py`, `insert.py` + tests): WORKS in a smoke test –
-   editing keeps font/size/baseline, Danish glyphs (ÆØÅ æøå) fall back correctly, rotated page blocks
-   are in display coords. The agent was last adding *advance-width verification for embedded subset
-   fonts* in `resolve_font` – finish/verify that, then review against the CLAUDE.md requirements
-   (images/vector art preserved, other blocks untouched, undo, file growth after repeated edits).
+1. **Text editing engine** – DONE and verified (subset-font cmap rebuild with advance-width proof is complete).
 2. **UI shell**: looks premium already (header with tabs, offline badge, mode bar Vis/Rediger/Kommentér/Sider,
    floating tool pill, thumbnails/bookmarks/search sidebar, properties panel, status bar with zoom).
    Open items seen in screenshot review:
@@ -35,14 +39,23 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    - dark theme + home screen screenshots reviewed – look good, no issues;
    - "Rediger" and "Kommentér" modes have no tools yet (agents A/B); "Sider" mode is DONE.
 
+## Optimisation backlog for "Rediger tekst" (for a max/ultra session)
+1. Expose core's wrap/alignment decision (`replace_block_text`: align, paragraph/justified detection,
+   `_available_width`) as a public `text_edit.layout_plan(doc, block, text, style)` and drive the editor's
+   wrap width + alignment (centre/right) from it. Today the editor mirrors the main rule only
+   (single line grows to the text area, multi-line paragraph keeps its column width).
+2. Mixed styles inside a paragraph (a bold word): the editor shows one font; show per-character styles
+   (rich QTextEdit fed from `TextLine.char_styles`) and keep them on commit.
+3. Rotated text: the editor is horizontal; consider a rotated overlay (QGraphicsProxyWidget) or a popover.
+4. Font picker: render family names in their own font, search field, recently used.
+5. Optional "show all text boxes" outline mode (Acrobat style) and Shift+Tab to the previous paragraph.
+6. Key-hint chip placement (now hidden on first keystroke).
+
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
-- **Agent A – Edit tools UI** (`ui/viewer/tools/edit_text.py`, `add_text.py`, `add_image.py`,
-  `ui/panels/properties` widgets, `i18n/da_edit.py`, `tests/test_ui_edit.py`): mode "Rediger".
-  Edit text = hover outlines text blocks; click opens an inline editor overlay (QPlainTextEdit with
-  `fonts.qt_family_hint`, scaled to zoom, same color) exactly over the block; Enter/blur commits via
-  `text_edit.replace_block_text`, Esc cancels; inspector shows font/size/color/bold/italic to override.
-  Add text = drag a box, defaults from `insert.document_text_style`. Add image = file picker or
-  clipboard paste, drag to place, keep aspect. Select/move/resize/delete existing annotations.
+- **Agent A – Add text / Add image tools** (`tools/add_text.py`, `add_image.py`, mode "Rediger"; follow
+  `edit_text.py` patterns): add text = drag a box, defaults from `insert.document_text_style`, same inline
+  editor + panel; add image = file picker or clipboard paste, drag to place, keep aspect.
+  Select/move/resize/delete of added objects. `i18n/da_edit.py` (extend), tests.
 - **Agent B – Comment tools** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`, select/move/delete
   annotations; `i18n/da_comment.py`; tests). Dialogs and pages mode are DONE – follow their style.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,

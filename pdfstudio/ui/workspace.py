@@ -68,6 +68,10 @@ class FloatingToolbar(QFrame):
             item = self._lay.takeAt(0)
             w = item.widget()
             if w is not None:
+                # detach now: a pending deleteLater() would leave the old
+                # buttons painted (and clickable) on top of the new ones
+                w.hide()
+                w.setParent(None)
                 w.deleteLater()
         self._tool_buttons = {}
         for cls in tools:
@@ -211,6 +215,7 @@ class Inspector(QWidget):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         lay.addWidget(self.scroll, 1)
         self._tool_widget: QWidget | None = None
+        self._pages_panel: QWidget | None = None
         self.doc_info = self._build_doc_info()
         self.scroll.setWidget(self.doc_info)
 
@@ -263,11 +268,20 @@ class Inspector(QWidget):
 
     def set_tool(self, tool, mode: str | None = None) -> None:
         current = self.scroll.takeWidget()   # never let QScrollArea delete a widget it does not own
-        if current is not None and current is not self.doc_info:
+        if current is not None and current is not self.doc_info and current is not self._pages_panel:
             current.setParent(None)
         pw = tool.properties_widget() if tool is not None else None
         self._tool_widget = pw
-        self.scroll.setWidget(pw if pw is not None else self.doc_info)
+        if pw is None and mode == "pages":
+            if self._pages_panel is None:
+                from .panels.pages_panel import PagesPanel
+
+                self._pages_panel = PagesPanel(self.workspace)
+            self._pages_panel.refresh()
+            pw_default = self._pages_panel
+        else:
+            pw_default = self.doc_info
+        self.scroll.setWidget(pw if pw is not None else pw_default)
         self.head_title.setText(tool.display_label() if pw is not None else tr("shell.inspector.title"))
         if tool is not None:
             self.tool_icon.set_icon(tool.icon or "cursor")
@@ -279,7 +293,12 @@ class Inspector(QWidget):
             self.tool_hint.setText(tr(f"shell.mode.{mode}.tip"))
         self.refresh_doc()
 
+    def refresh_pages_panel(self) -> None:
+        if self._pages_panel is not None:
+            self._pages_panel.refresh()
+
     def refresh_doc(self) -> None:
+        self.refresh_pages_panel()
         ws = self.workspace
         pdf = ws.pdf
         self.rows["name"].setText(pdf.display_name)
@@ -509,6 +528,7 @@ class DocumentWorkspace(QWidget):
                 self.organizer.view.pageActivated.connect(self._organizer_activated)
                 self.organizer.view.pageOpened.connect(self._organizer_opened)
                 self.organizer.view.selectionChangedPages.connect(lambda _p: self.stateChanged.emit())
+                self.organizer.view.selectionChangedPages.connect(lambda _p: self.inspector.refresh_pages_panel())
                 self.center_stack.addWidget(self.organizer)
             self.center_stack.setCurrentWidget(self.organizer)
             self.organizer.view.set_current_page(self.view.current_page)

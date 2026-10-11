@@ -290,6 +290,8 @@ class ThumbnailView(QListView):
         self.doubleClicked.connect(lambda idx: self.pageOpened.emit(idx.row()))
         self.selectionModel().selectionChanged.connect(
             lambda *_: self.selectionChangedPages.emit(self.selected_pages()))
+        # a model reset drops the selection silently – report it too
+        self.model_.modelReset.connect(lambda: self.selectionChangedPages.emit(self.selected_pages()))
         self.setStyleSheet("QListView::item, QListView::item:hover, QListView::item:selected"
                            " { background: transparent; border: none; padding: 0px; }")
         self._update_renderer_width()
@@ -311,9 +313,27 @@ class ThumbnailView(QListView):
         pw, ph = page_size or (595.0, 842.0)
         return QSize(w, int(self.box_height(pw, ph)) + PAD + LABEL_H + 10)
 
+    def _center_grid(self) -> None:
+        """Grid mode: split the leftover width evenly left/right so the
+        columns sit centred instead of hugging the left edge."""
+        sb = self.verticalScrollBar()
+        # always reserve the scrollbar: Qt wraps as if it were there whenever
+        # the content may overflow, even before it is shown
+        avail = self.width() - 2 * self.frameWidth() - sb.sizeHint().width()
+        # Qt places items at s + i*(w+s) and wraps unless one more spacing
+        # still fits after the last item, so a row of n needs n*(w+s) + 2s.
+        sp = self.spacing()
+        step = self.cell_size().width() + sp
+        cols = max(1, (avail - 2 * sp) // max(1, step))
+        side = max(0, (avail - 2 * sp - cols * step) // 2)
+        if self.viewportMargins().left() != side:
+            self.setViewportMargins(side, 0, side, 0)
+
     def resizeEvent(self, ev) -> None:  # noqa: N802
         super().resizeEvent(ev)
-        if not self.grid:
+        if self.grid:
+            self._center_grid()
+        else:
             vw = self.viewport().width()
             tw = int(max(72, min(150, vw - 2 * PAD - 2 * self.spacing() - 64)))
             if tw != self.thumb_width:
@@ -323,6 +343,8 @@ class ThumbnailView(QListView):
 
     def set_thumb_width(self, w: int) -> None:
         self.thumb_width = int(w)
+        if self.grid:
+            self._center_grid()
         self._update_renderer_width()
         self.model_.layoutChanged.emit()
         self.scheduleDelayedItemsLayout()

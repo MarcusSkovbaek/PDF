@@ -86,6 +86,13 @@ QToolButton:hover { background: @hover; color: @text; }
 QToolButton:pressed { background: @pressed; }
 QToolButton:checked { background: @selected; color: @accent_text; }
 QToolButton:disabled { color: @text_subtle; }
+QToolButton[variant="row"] {
+    background: transparent; border: none; border-radius: 8px; padding: 7px 10px;
+    color: @text; text-align: left; qproperty-iconSize: 17px;
+}
+QToolButton[variant="row"]:hover { background: @hover; }
+QToolButton[variant="row"]:pressed { background: @pressed; }
+QToolButton[variant="row"]:disabled { color: @text_subtle; }
 QToolButton[variant="icon"] { padding: 0px; min-width: 32px; min-height: 32px; max-width: 32px; max-height: 32px; }
 QToolButton[variant="icon"]:checked { background: @hover; color: @text; }
 QToolButton[variant="icon-sm"] { padding: 0px; min-width: 26px; min-height: 26px; max-width: 26px; max-height: 26px; border-radius: 6px; }

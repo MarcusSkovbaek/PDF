@@ -1114,6 +1114,10 @@ class MainWindow(QMainWindow):
                     ev.ignore()
                     return
         self.settings.setValue("window/geometry", self.saveGeometry())
+        try:  # the theme manager outlives this window; stop reacting to it
+            self.theme.changed.disconnect(self._on_theme)
+        except (RuntimeError, TypeError):
+            pass
         for ws in self.workspaces():
             ws.close_document()
         ev.accept()

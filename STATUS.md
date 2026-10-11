@@ -16,6 +16,10 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   Explorer drops, per-file page ranges, password prompt for locked PDFs, bookmark option). Tests:
   `tests/test_merge_dialog.py`. ALL DIALOGS (split, images, merge) ARE DONE.
   The dialogs are the reference implementation for the remaining ones (uses `FolioDialog`, `SegmentedControl`, `da_split.py`).
+- Pages mode ("Sider"): centred organiser grid, pill with rotate/duplicate/extract/insert/delete/split,
+  selection-aware inspector panel `ui/panels/pages_panel.py` (+ `tests/test_pages_mode.py`).
+  Fixed: stale tool buttons stayed on top of the mode pill after switching modes; selection
+  not reported after model resets; closed windows still reacting to theme changes.
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -29,7 +33,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    Open items seen in screenshot review:
    - thumbnail list now sizes cells per page aspect (rotated/landscape pages fixed) – DONE;
    - dark theme + home screen screenshots reviewed – look good, no issues;
-   - "Rediger", "Kommentér", "Sider" modes have no tools yet (phase 3/4).
+   - "Rediger" and "Kommentér" modes have no tools yet (agents A/B); "Sider" mode is DONE.
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
 - **Agent A – Edit tools UI** (`ui/viewer/tools/edit_text.py`, `add_text.py`, `add_image.py`,
@@ -39,9 +43,8 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   `text_edit.replace_block_text`, Esc cancels; inspector shows font/size/color/bold/italic to override.
   Add text = drag a box, defaults from `insert.document_text_style`. Add image = file picker or
   clipboard paste, drag to place, keep aspect. Select/move/resize/delete existing annotations.
-- **Agent B – Comment tools + pages mode** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`,
-  pages-mode grid organiser using `ThumbnailView(grid=True)` + `core.pages`; `i18n/da_comment.py`; tests).
-  Dialogs are all DONE – follow their style.
+- **Agent B – Comment tools** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`, select/move/delete
+  annotations; `i18n/da_comment.py`; tests). Dialogs and pages mode are DONE – follow their style.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit

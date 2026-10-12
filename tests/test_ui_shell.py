@@ -385,7 +385,7 @@ def test_custom_tool_properties_and_toolbar(win, qapp, sample_pdf_path):
         label = "Testværktøj"
         icon = "pen"
         mode = "annotate"
-        order = 5
+        order = -1  # first in its mode (real annotate tools start at 0)
 
         def __init__(self, parent=None):
             super().__init__(parent)

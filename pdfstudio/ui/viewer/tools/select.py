@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 import pymupdf
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QGuiApplication, QPainterPath, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsPathItem
 
 from ....i18n import tr
@@ -211,6 +211,20 @@ class SelectTool(Tool):
             self.ctx.toast(tr("shell.select.copied"), "success")
         return True
 
+    def selection_brush(self) -> QColor:
+        """Fill of the live selection (markup tools preview their colour)."""
+        return T.qcolor("text_selection")
+
+    def line_rects(self) -> dict[int, list[QRectF]]:
+        """Selected words merged per text line: {page: [display rect, ...]}."""
+        out: dict[int, list[QRectF]] = {}
+        for p, words in self.selected_words().items():
+            bands: dict[tuple[int, int], QRectF] = {}
+            for w in words:
+                bands[w.line] = bands[w.line].united(w.rect) if w.line in bands else QRectF(w.rect)
+            out[p] = list(bands.values())
+        return out
+
     def clear_selection(self) -> None:
         had = self.has_selection()
         self._anchor = None
@@ -233,7 +247,7 @@ class SelectTool(Tool):
     def _paint(self) -> None:
         self._remove_items()
         view = self.ctx.view
-        brush = T.qcolor("text_selection")
+        brush = self.selection_brush()
         for p, words in self.selected_words().items():
             path = QPainterPath()
             # merge words on one line into a single band

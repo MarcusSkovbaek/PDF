@@ -424,12 +424,36 @@ class MainWindow(QMainWindow):
           order=10)
 
     def _register_tool_actions(self) -> None:
+        # Tools in different modes may share a key (H = Hånd / Fremhæv). Two
+        # QActions with one shortcut are ambiguous in Qt and both go dead, so
+        # only the first tool of a key owns the shortcut and it dispatches to
+        # the tool of the *current* mode.
+        by_key: dict[str, list[str]] = {}
         for cls in ToolRegistry.all():
+            if cls.shortcut:
+                by_key.setdefault(cls.shortcut.upper(), []).append(cls.id)
+        for cls in ToolRegistry.all():
+            ids = by_key.get((cls.shortcut or "").upper(), [])
+            owner = bool(ids) and ids[0] == cls.id
+            handler = (lambda ids=tuple(ids): self.activate_tool_for_key(ids)) if owner and len(ids) > 1 \
+                else (lambda tid=cls.id: self.activate_tool(tid))
             self.actions.register(
                 f"tool.{cls.id}", tr("shell.tool.use", tool=cls.display_label()), icon=cls.icon or None,
-                shortcut=cls.shortcut, handler=lambda tid=cls.id: self.activate_tool(tid),
+                shortcut=cls.shortcut if owner else None, handler=handler,
                 enabled=lambda: self.current_workspace() is not None, category=tr("shell.cat.tool"),
                 order=200 + cls.order)
+
+    def activate_tool_for_key(self, tool_ids: tuple[str, ...]) -> None:
+        """Shortcut shared by several tools: prefer the current mode's tool."""
+        ws = self.current_workspace()
+        if ws is None:
+            return
+        for tid in tool_ids:
+            cls = ToolRegistry.get(tid)
+            if cls is not None and ws.mode in cls.modes():
+                self.activate_tool(tid)
+                return
+        self.activate_tool(tool_ids[0])
 
     def _discover_commands(self) -> None:
         try:

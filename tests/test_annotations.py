@@ -362,3 +362,26 @@ def test_thin_drag_along_a_line_selects_its_words(sample_pdf):
     _, annot = get_annot(sample_pdf, 0, xref)
     marked = pymupdf.Quad(*annot.vertices).rect
     assert marked.x0 <= hello.x0 + 0.5 and marked.x1 >= world.x1 - 0.5
+
+
+def test_add_markup_lines_flow_selection(sample_pdf):
+    from pdfstudio.core.annotations import add_markup_lines, list_annotations
+
+    page = sample_pdf.page(0)
+    lines = [r for r in (page.search_for("broedtekst"), page.search_for("Anden linje")) for r in r]
+    xref = add_markup_lines(sample_pdf, 0, "highlight", lines, (1, 0.85, 0.2), 0.5)
+    infos = list_annotations(sample_pdf.doc, 0)
+    assert xref and infos[-1].kind == "highlight" and abs(infos[-1].opacity - 0.5) < 0.01
+    assert add_markup_lines(sample_pdf, 0, "underline", [], (0, 0, 0)) is None
+
+
+def test_add_markup_lines_rotated_page(sample_pdf):
+    from pdfstudio.core.annotations import add_markup_lines, list_annotations
+    from pdfstudio.core.render import page_display_size
+
+    page = sample_pdf.page(2)
+    hit = page.search_for("Roteret")[0] * page.rotation_matrix  # display space
+    add_markup_lines(sample_pdf, 2, "highlight", [hit], (1, 1, 0))
+    info = list_annotations(sample_pdf.doc, 2)[-1]
+    w, h = page_display_size(sample_pdf.doc, 2)
+    assert info.rect.intersects(hit) and info.rect.x1 <= w + 1 and info.rect.y1 <= h + 1

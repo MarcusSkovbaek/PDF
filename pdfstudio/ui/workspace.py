@@ -515,6 +515,10 @@ class DocumentWorkspace(QWidget):
         self.stateChanged.emit()
 
     def _on_tool_changed(self) -> None:
+        # Tool.changed means "refresh my properties panel / hint"
+        tool = self.sender()
+        if tool is not None and tool is self.tool:
+            self.inspector.set_tool(self.tool, self.mode)
         self.stateChanged.emit()
 
     def set_mode(self, mode: str, tool_id: str | None = None) -> None:

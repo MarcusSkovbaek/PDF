@@ -28,6 +28,14 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   `ui/widgets/color_button.py`, `i18n/da_edit.py`, `tests/test_edit_text_tool.py` (8 tests).
   Core verified: no file growth over repeated edits, ~20 ms/edit, images/vector art/other blocks untouched;
   fixed reading order of side-by-side columns (`_reading_order`).
+- **Kommentér tools** (`tools/annotate_markup.py`, `annotate_draw.py`, `annotate_select.py`, `_annot_common.py`):
+  Markér kommentar (V: select/move/restyle/delete, double-click edits notes), Fremhæv (H) / Understreg (U) /
+  Gennemstreg (K) with flowing multi-line/multi-page word selection previewed in the markup colour
+  (`core.annotations.add_markup_lines`), Note (N), Tegn (D, freehand), Figur (R: rect/ellipse/line/arrow,
+  Shift = square/circle/45°). Inspector: colour presets + custom, opacity, width, fill; per-tool styles
+  persisted in local QSettings. `i18n/da_comment.py`, `tests/test_annotate_tools.py`.
+  Fixed: tools sharing a shortcut across modes (H, V) made both shortcuts dead – now one action per key
+  dispatches by mode; `Tool.changed` now really refreshes the inspector.
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -37,7 +45,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    Open items seen in screenshot review:
    - thumbnail list now sizes cells per page aspect (rotated/landscape pages fixed) – DONE;
    - dark theme + home screen screenshots reviewed – look good, no issues;
-   - "Rediger" and "Kommentér" modes have no tools yet (agents A/B); "Sider" mode is DONE.
+   - all four modes now have their tools ("Rediger" still lacks Tilføj tekst/billede – agent A).
 
 ## Optimisation backlog for "Rediger tekst" (for a max/ultra session)
 1. Expose core's wrap/alignment decision (`replace_block_text`: align, paragraph/justified detection,
@@ -56,8 +64,9 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   `edit_text.py` patterns): add text = drag a box, defaults from `insert.document_text_style`, same inline
   editor + panel; add image = file picker or clipboard paste, drag to place, keep aspect.
   Select/move/resize/delete of added objects. `i18n/da_edit.py` (extend), tests.
-- **Agent B – Comment tools** (`tools/markup.py`, `note.py`, `ink.py`, `shape.py`, select/move/delete
-  annotations; `i18n/da_comment.py`; tests). Dialogs and pages mode are DONE – follow their style.
+- **Comment tools – optimisation backlog** (agent B no longer needed): resize handles in "Markér kommentar";
+  multi-select + group delete; free-text (typewriter) annotation; comments list panel in the sidebar
+  (jump to / filter by type); highlight colour preview while hovering the swatches.
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit

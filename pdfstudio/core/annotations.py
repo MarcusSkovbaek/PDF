@@ -290,6 +290,39 @@ def add_text_markup(
         return _finish(annot, opacity)
 
 
+def add_markup_lines(
+    pdf: PdfDocument,
+    page: int,
+    kind: str,
+    line_rects: Sequence[RectLike],
+    color: Color,
+    opacity: float = 1.0,
+) -> int | None:
+    """Like :func:`add_text_markup`, but for an explicit flow selection: one
+    quad per given display-space rect (typically the union of the selected
+    words of one text line). Returns the xref, or ``None`` if nothing given."""
+    if kind not in MARKUP_KINDS:
+        raise ValueError(tr("core.err.annot_kind", kind=kind))
+    stroke = _check_color(color)
+    opacity = _check_opacity(opacity)
+    pg = pdf.page(page)
+    quads = [display_to_page_rect(pg, r).quad for r in line_rects]
+    quads = [q for q in quads if not q.rect.is_empty]
+    if not quads:
+        return None
+    with pdf.edit(tr(f"core.undo.{kind}"), CONTENT, (page,)):
+        pg = pdf.page(page)
+        adder = {
+            "highlight": pg.add_highlight_annot,
+            "underline": pg.add_underline_annot,
+            "strikeout": pg.add_strikeout_annot,
+            "squiggly": pg.add_squiggly_annot,
+        }[kind]
+        annot = adder(quads=quads)
+        annot.set_colors(stroke=stroke)
+        return _finish(annot, opacity)
+
+
 # -- notes, ink, shapes ----------------------------------------------------------------
 def add_note(pdf: PdfDocument, page: int, point: PointLike, text: str, color: Color) -> int:
     """Sticky note whose icon's top-left corner is at ``point`` (display)."""

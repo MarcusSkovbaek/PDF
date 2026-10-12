@@ -1,4 +1,21 @@
-# Status / handover – Folio PDF (paused 2026-10-10 to protect the weekly usage limit)
+# Status / handover – Folio PDF (paused 2026-10-12 to protect the weekly usage limit)
+
+## >>> START HERE (next session, max/ultra) <<<
+1. **FIX FIRST – test suite regression (found at pause time, not yet diagnosed):**
+   - `python -m pytest tests/test_ui_shell.py` now HANGS at roughly the 21st test (was green before the
+     last two work packages). Suspects, in order: a modal dialog now opened by a shell test after the new
+     edit/annotate tools were registered (e.g. `QFileDialog`/`QColorDialog`/note dialog without a test
+     hook), the new mode-aware shortcut dispatch in `main_window._register_tool_actions`
+     / `activate_tool_for_key`, or `AddImageTool.choose_file` (file dialog) being reached from a shell test.
+     Find it with: `timeout 120 python -m pytest -v -p no:cacheprovider tests/test_ui_shell.py`
+     (watch the last PASSED line) and `-o faulthandler_timeout=30` for a stack.
+   - `python -m pytest tests/test_annotate_tools.py` passes all tests but the interpreter SEGFAULTS at
+     exit (rc 139) – Qt teardown order (overlay items / AnnotStylePanel / QSettings at shutdown).
+     Likely fix: release tool overlays + panels in the fixture teardown, or `deleteLater()` + process
+     events before QApplication shutdown.
+   - All other test files pass individually (verified per file).
+2. Then continue with the optimisation backlogs below and the QA loop (agent C).
+
 
 Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (≈250 tests).
 `QT_QPA_PLATFORM=offscreen python main.py --screenshot out.png --size 1440x900 file.pdf` works.
@@ -36,6 +53,13 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   persisted in local QSettings. `i18n/da_comment.py`, `tests/test_annotate_tools.py`.
   Fixed: tools sharing a shortcut across modes (H, V) made both shortcuts dead – now one action per key
   dispatches by mode; `Tool.changed` now really refreshes the inspector.
+- **Tilføj tekst** (`tools/add_text.py`, T): click = type at that point (box to the right margin), drag = set
+  wrap width; reuses the Rediger-tekst inline editor + inspector; default = document body style
+  (`insert.document_text_style`), last used style remembered for the session; saved via
+  `insert.add_text_box` (editor baseline/line height use the same font metrics as the core).
+- **Tilføj billede** (`tools/add_image.py`, I): choose file or clipboard in the inspector (preview), click =
+  natural size (96 dpi, max 60 % of the page, centred on the click), drag = fit into frame, aspect kept.
+  Tests: `tests/test_add_tools.py` (5, green individually). `edit_text.py` gained hooks `_block_pitch` / `_write`.
 - Packaging: `packaging/folio.spec`, `build_windows.bat`, `block_network_windows.ps1`, `assets/folio.*`.
 
 ## Interrupted by usage limit – state verified by coordinator
@@ -60,10 +84,9 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 6. Key-hint chip placement (now hidden on first keystroke).
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
-- **Agent A – Add text / Add image tools** (`tools/add_text.py`, `add_image.py`, mode "Rediger"; follow
-  `edit_text.py` patterns): add text = drag a box, defaults from `insert.document_text_style`, same inline
-  editor + panel; add image = file picker or clipboard paste, drag to place, keep aspect.
-  Select/move/resize/delete of added objects. `i18n/da_edit.py` (extend), tests.
+- **Add text / image – optimisation backlog**: select/move/resize of placed images and text boxes
+  (images are page content, so this needs a core "object" layer or placing them as stamp annotations);
+  alignment buttons (left/centre/right) for new text; visual screenshot review of both tools (not done yet).
 - **Comment tools – optimisation backlog** (agent B no longer needed): resize handles in "Markér kommentar";
   multi-select + group delete; free-text (typewriter) annotation; comments list panel in the sidebar
   (jump to / filter by type); highlight colour preview while hovering the swatches.

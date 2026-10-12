@@ -502,11 +502,19 @@ class EditTextTool(Tool):
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         if self.style_override is None or self.style_override.font == self.block.style.font:
             font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, self._spacing_fix(font, ppp))
-        pitch = _line_pitch(self.block) * (style.size / max(self.block.style.size, 0.1))
+        pitch = self._block_pitch() * (style.size / max(self.block.style.size, 0.1))
         bg = _background_color(self.ctx.pdf.doc, self.block.page, self.block.bbox)
         width_px = int(round(self._wrap_width() * ppp))
         self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
         self._reposition()
+
+    def _block_pitch(self) -> float:
+        """Baseline-to-baseline distance (pt) the editor should use."""
+        return _line_pitch(self.block)
+
+    def _write(self, block: te.TextBlock, text: str, style: core_fonts.SpanStyle | None) -> None:
+        """Put the edited text into the PDF (one undo step)."""
+        te.replace_block_text(self.ctx.pdf, block, text, style)
 
     def _spacing_fix(self, font: QFont, ppp: float) -> float:
         """Letter spacing (%) that makes the on-screen font as wide as the
@@ -601,7 +609,7 @@ class EditTextTool(Tool):
             return False
         self._committing = True
         try:
-            te.replace_block_text(self.ctx.pdf, block, text, style)
+            self._write(block, text, style)
         except Exception as exc:  # noqa: BLE001 – never lose the user's session silently
             self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
             return False

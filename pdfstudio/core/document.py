@@ -224,6 +224,7 @@ class PdfDocument:
         folder = os.path.dirname(target) or "."
         fd, tmp = tempfile.mkstemp(prefix=".folio-", suffix=".pdf", dir=folder)
         os.close(fd)
+        self._subset_fonts()
         try:
             self._doc.save(tmp, garbage=3, deflate=True, clean=False)
             os.replace(tmp, target)
@@ -242,7 +243,18 @@ class PdfDocument:
         self._emit(ChangeEvent(SAVED, None, ""))
         return target
 
+    def _subset_fonts(self) -> None:
+        """Keep only the glyphs actually used of every embedded font. Edited
+        text may embed a whole system font (hundreds of KB); Word/Acrobat
+        output is subset too. Best effort – a font that cannot be subset is
+        simply kept as is."""
+        try:
+            self._doc.subset_fonts()
+        except Exception:
+            pass
+
     def to_bytes(self) -> bytes:
+        self._subset_fonts()
         return self._doc.tobytes(garbage=3, deflate=True)
 
     def close(self) -> None:

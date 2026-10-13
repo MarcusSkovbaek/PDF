@@ -519,3 +519,21 @@ def test_layout_info_reports_alignment_and_wrap(sample_pdf):
     col = next(b for b in te.text_blocks(sample_pdf.doc, 1) if b.text.startswith("Venstre"))
     info = te.layout_info(sample_pdf.doc, col)
     assert info.align == "left" and abs(info.wrap_width - col.bbox.width) < 2   # a column keeps its width
+
+
+def test_saving_subsets_fonts_added_by_edits(sample_pdf, tmp_path):
+    """Edits may embed a whole system font; saving keeps only the used glyphs."""
+    import os
+
+    import pymupdf
+
+    from pdfstudio.core import text_edit as te
+
+    b = next(x for x in te.text_blocks(sample_pdf.doc, 0) if x.text.startswith("Indlejret"))
+    te.replace_block_text(sample_pdf, b, "Indlejret skrifttype med ÆØÅ æøå og flere tegn: §½€")
+    unsubset = len(sample_pdf.doc.tobytes(garbage=3, deflate=True))
+    out = str(tmp_path / "saved.pdf")
+    sample_pdf.save(out)
+    assert os.path.getsize(out) < unsubset
+    d = pymupdf.open(out)
+    assert "ÆØÅ æøå" in d[0].get_text() and not d.is_repaired

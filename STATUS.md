@@ -75,6 +75,13 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 4. Font picker: DONE family names rendered in their own font; TODO search field, recently used.
 5. Optional "show all text boxes" outline mode (Acrobat style). DONE: Shift+Tab = previous paragraph.
 6. Key-hint chip placement (now hidden on first keystroke).
+7. Real-world stress test (LibreOffice/Word-style PDF with subset CID fonts, justified text, tables, bullets;
+   `python tests/stress_edit_all_blocks.py file.pdf` edits every block): no exceptions, alignment/justification,
+   bold/italic runs and colours preserved, undo exact. Open: when a changed line contains a wide gap
+   (table cells close enough to be one block, e.g. "2025   2026"), the re-laid line uses normal spaces –
+   keep original glyph positions for the unchanged prefix/suffix of a changed line.
+   FIXED: saving now subsets fonts (`PdfDocument._subset_fonts`) – editing all 18 blocks grew the file
+   62 KB → 1.6 MB before, 217 KB now.
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
 - **Add text / image – optimisation backlog**: select/move/resize of placed images and text boxes

@@ -73,6 +73,9 @@ class AddTextTool(EditTextTool):
 
         return QColor(0, 0, 0, 0)  # nothing to hide: keep the page visible under new text
 
+    def _layout_for(self, block):
+        return te.LayoutInfo("left", float(block.bbox.width))
+
     def _wrap_width(self) -> float:
         return self.block.bbox.width
 

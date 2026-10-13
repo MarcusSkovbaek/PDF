@@ -140,6 +140,11 @@ class InlineTextEditor(QTextEdit):
         cur.mergeBlockFormat(fmt)
         self.blockSignals(False)
 
+    def set_alignment(self, align: Qt.AlignmentFlag) -> None:
+        opt = self.document().defaultTextOption()
+        opt.setAlignment(align)
+        self.document().setDefaultTextOption(opt)
+
     def first_baseline(self) -> tuple[float, float]:
         """(x, y) of the first character's baseline inside the editor."""
         block = self.document().begin()
@@ -329,6 +334,7 @@ class EditTextTool(Tool):
         self.style_override: core_fonts.SpanStyle | None = None
         self._panel: EditTextPanel | None = None
         self._committing = False
+        self._layout: te.LayoutInfo | None = None
 
     # -- lifecycle ---------------------------------------------------------
     def activate(self, ctx) -> None:
@@ -462,6 +468,7 @@ class EditTextTool(Tool):
         view = self.ctx.view
         self.block = block
         self.style_override = None
+        self._layout = self._layout_for(block)
         self.editor = InlineTextEditor(view.viewport())
         self.editor.commitRequested.connect(self.commit)
         self.editor.cancelRequested.connect(self.cancel)
@@ -507,6 +514,9 @@ class EditTextTool(Tool):
         bg = self._editor_background()
         width_px = int(round(self._wrap_width() * ppp))
         self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
+        align = self._layout.align if self._layout is not None and not self.block.rotation else "left"
+        self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
+                                   "right": Qt.AlignmentFlag.AlignRight}.get(align, Qt.AlignmentFlag.AlignLeft))
         self._reposition()
 
     def _editor_background(self) -> QColor:
@@ -534,19 +544,34 @@ class EditTextTool(Tool):
             return 100.0
         return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
 
+    def _layout_for(self, block: te.TextBlock) -> te.LayoutInfo:
+        """How the core will lay out this block (alignment, wrap width)."""
+        return te.layout_info(self.ctx.pdf.doc, block)
+
     def _wrap_width(self) -> float:
-        """Mirror core.text_edit's rule (see ``_available_width``): a single
-        line grows sideways within the page's text area, a paragraph keeps
-        its column width. A little slack keeps the caret visible."""
+        """The core's own wrap width (``text_edit.layout_info``), so the editor
+        breaks lines exactly where the PDF will; a little slack keeps the
+        caret visible. 0 from the core means "never wraps"."""
         b = self.block
         if b.rotation:
             return max(b.bbox.width, b.bbox.height) + 2
         slack = max(2.0, 0.3 * b.style.size)
-        if len(b.lines) == 1:
-            page_w = self.ctx.pdf.page(b.page).rect.width
-            margin = max(36.0, min(b.bbox.x0, 72.0))
-            return max(b.bbox.width, page_w - margin - b.bbox.x0) + slack
-        return b.bbox.width + slack
+        wrap = self._layout.wrap_width if self._layout is not None else b.bbox.width
+        if wrap <= 0:
+            wrap = self.ctx.pdf.page(b.page).rect.width - b.bbox.x0
+        return max(wrap, b.bbox.width) + slack
+
+    def _box_left(self, width_pt: float) -> float | None:
+        """Left edge (pt) of the editor for centred/right-aligned text, or
+        None for left-aligned text (positioned by its first glyph)."""
+        b, lay = self.block, self._layout
+        if lay is None or b.rotation or lay.align == "left":
+            return None
+        if lay.align == "center":
+            return (b.bbox.x0 + b.bbox.x1) / 2 - width_pt / 2
+        # right-aligned: the box's right edge is the text's right edge (Qt
+        # keeps ~1 px for the caret there)
+        return b.bbox.x1 - width_pt + 0.75
 
     def _reposition(self, *_a) -> None:
         if self.editor is None or self.block is None:
@@ -567,6 +592,9 @@ class EditTextTool(Tool):
         bx, by = self.editor.first_baseline()
         x = top_left.x() - bx
         y = top_left.y() - by
+        left_pt = self._box_left(self.editor.lineWrapColumnOrWidth() / ppp)
+        if left_pt is not None:  # centred / right-aligned: Qt aligns inside the box
+            x = view.mapFromScene(view.page_to_scene(b.page, QPointF(left_pt, origin.y()))).x()
         w = self.editor.lineWrapColumnOrWidth() + 2
         h = max(line_px, self.editor.content_height()) + 2
         self.editor.setGeometry(int(round(x)), int(round(y)), int(w), int(round(h)))

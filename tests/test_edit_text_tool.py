@@ -109,3 +109,29 @@ def test_undo_while_editing_cancels(tool):
     tool.ctx.pdf.undo()
     assert tool.editor is None
     assert any(b.text.startswith("Dette") for b in te.text_blocks(tool.ctx.pdf.doc, 0))
+
+
+def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
+    import pymupdf
+
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_textbox(pymupdf.Rect(100, 100, 500, 200), "Brødtekst der fylder hele tekstområdet ud. " * 4,
+                      fontname="helv", fontsize=12)
+    pg.insert_textbox(pymupdf.Rect(100, 260, 500, 360), "Højrestillet adresse\nPostnummer og by",
+                      fontname="helv", fontsize=12, align=2)
+    path = str(tmp_path / "align.pdf")
+    doc.save(path)
+    win.open_path(path)
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    tool = ws.tool
+    b = next(x for x in tool.blocks(0) if x.text.startswith("Højrestillet"))
+    assert te.layout_info(ws.pdf.doc, b).align == "right"
+    tool.start_edit(b)
+    qapp.processEvents()
+    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignRight
+    view = tool.ctx.view
+    right = view.mapFromScene(view.page_to_scene(0, QPointF(b.bbox.x1, b.bbox.y0))).x()
+    assert abs(tool.editor.geometry().right() - right) <= 3
+    tool.cancel()

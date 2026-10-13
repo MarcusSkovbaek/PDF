@@ -762,6 +762,8 @@ def _line_height(line: TextLine, size: float) -> float:
 class _Plan:
     remove: list[TextLine]
     runs: list[TextRun]
+    align: str = "left"          # left | center | right (justified counts as left)
+    wrap_width: float = 0.0      # max line width before wrapping (pt); 0 = never wraps
 
 
 @dataclass
@@ -1106,7 +1108,7 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         runs.extend(_emit_line(rich, origin, ld, em, extra, font_of))
     for j in range(len(layout), n_old):
         remove.append(old[j])
-    return _Plan(remove=remove, runs=runs)
+    return _Plan(remove=remove, runs=runs, align=align, wrap_width=max_width)
 
 
 def _wrap_rich(rich, width: float, measure) -> list[list]:
@@ -1178,6 +1180,24 @@ def _emit_line(rich, origin, d, em, extra: float, font_of) -> list[TextRun]:
 # ---------------------------------------------------------------------------
 # public API
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class LayoutInfo:
+    """How :func:`replace_block_text` will lay out new text for a block:
+    UIs use it so their editor wraps and aligns exactly like the result."""
+
+    align: str          # "left" | "center" | "right"
+    wrap_width: float   # pt along the text direction; 0 = lines never wrap
+
+
+def layout_info(doc: pymupdf.Document, block: TextBlock) -> LayoutInfo:
+    """Alignment and wrap width that editing ``block`` will use."""
+    try:
+        plan = _plan(doc[block.page], block, block.text, None)
+    except Exception:  # never let a UI hint break editing
+        return LayoutInfo("left", float(block.bbox.width))
+    return LayoutInfo(plan.align, float(plan.wrap_width))
+
+
 def replace_block_text(pdf, block: TextBlock, new_text: str, style: SpanStyle | None = None) -> None:
     """Replace the text of ``block`` with ``new_text`` (lines separated by
     ``\\n``) keeping font, size, colour, position and alignment. Only text is

@@ -494,3 +494,28 @@ def test_columns_are_in_reading_order(sample_pdf):
 
     blocks = te.text_blocks(sample_pdf.doc, 1)
     assert blocks[0].text.startswith("Venstre") and blocks[1].text.startswith("Hoejre")
+
+
+def _aligned_doc():
+    import pymupdf
+
+    from pdfstudio.core import PdfDocument
+
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_textbox(pymupdf.Rect(100, 100, 500, 200), "Centreret linje\nAnden centreret", fontname="helv",
+                      fontsize=12, align=1)
+    pg.insert_textbox(pymupdf.Rect(100, 260, 500, 360), "Højrestillet tekst", fontname="helv", fontsize=12, align=2)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def test_layout_info_reports_alignment_and_wrap(sample_pdf):
+    from pdfstudio.core import text_edit as te
+
+    pdf = _aligned_doc()
+    infos = {b.text.split("\n")[0]: te.layout_info(pdf.doc, b) for b in te.text_blocks(pdf.doc, 0)}
+    assert infos["Centreret linje"].align == "center"
+    assert infos["Højrestillet tekst"].align == "right"
+    col = next(b for b in te.text_blocks(sample_pdf.doc, 1) if b.text.startswith("Venstre"))
+    info = te.layout_info(sample_pdf.doc, col)
+    assert info.align == "left" and abs(info.wrap_width - col.bbox.width) < 2   # a column keeps its width

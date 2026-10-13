@@ -65,10 +65,8 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    - all four modes have their tools; Tilføj tekst/billede reviewed visually (new-text editor is transparent).
 
 ## Optimisation backlog for "Rediger tekst" (for a max/ultra session)
-1. Expose core's wrap/alignment decision (`replace_block_text`: align, paragraph/justified detection,
-   `_available_width`) as a public `text_edit.layout_plan(doc, block, text, style)` and drive the editor's
-   wrap width + alignment (centre/right) from it. Today the editor mirrors the main rule only
-   (single line grows to the text area, multi-line paragraph keeps its column width).
+1. DONE: `text_edit.layout_info(doc, block)` exposes the core's alignment + wrap width; the editor wraps
+   and aligns (left/centre/right) exactly like the written result (verified overlay-exact).
 2. Mixed styles inside a paragraph (a bold word): the editor shows one font; show per-character styles
    (rich QTextEdit fed from `TextLine.char_styles`) and keep them on commit.
 3. Rotated text: the editor is horizontal; consider a rotated overlay (QGraphicsProxyWidget) or a popover.

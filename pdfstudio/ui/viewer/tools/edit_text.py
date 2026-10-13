@@ -23,7 +23,7 @@ from dataclasses import replace
 
 import pymupdf
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QKeyEvent, QPen, QTextBlockFormat, QTextCursor
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QKeyEvent, QPen, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -82,6 +82,22 @@ def _background_color(doc: pymupdf.Document, page: int, rect: pymupdf.Rect) -> Q
         samples[pix.pixel(w - 1, y)] += 1
     (r, g, b, *_), _n = samples.most_common(1)[0]
     return QColor(r, g, b)
+
+
+def display_font_name(name: str) -> str:
+    """Human name for a PDF font: "ABCDEF+NimbusSans-Regular" -> "Nimbus Sans",
+    "Times-Roman" -> "Times", "ArialMT" -> "Arial", "TimesNewRomanPS-BoldMT" -> "Times New Roman Bold"."""
+    import re
+
+    n = core_fonts.clean_font_name(name) or name
+    n = re.sub(r"(PSMT|PS|MT)$", "", n)
+    fam, _, style = n.partition("-")
+    fam = re.sub(r"(PSMT|PS|MT)$", "", fam)
+    fam = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", fam).strip()
+    style = re.sub(r"(PSMT|PS|MT)$", "", style)
+    if style.lower() in ("", "regular", "roman", "book", "normal"):
+        return fam or name
+    return f"{fam} {re.sub(r'(?<=[a-z])(?=[A-Z])', ' ', style)}"
 
 
 def _style_key(style: core_fonts.SpanStyle) -> tuple:
@@ -277,7 +293,7 @@ class EditTextPanel(QWidget):
             self.title.setText(tr("edit.text.idle.title"))
             self.text.setText(tr("edit.text.idle.text"))
             return
-        self.title.setText(core_fonts.clean_font_name(block.style.font) or "–")
+        self.title.setText(display_font_name(block.style.font) or "–")
         self.text.setText(f"{block.style.size:g} pt")
         self._loading = True
         try:
@@ -349,7 +365,7 @@ class EditTextTool(Tool):
     def activate(self, ctx) -> None:
         super().activate(ctx)
         view = ctx.view
-        view.zoomChanged.connect(self._reposition)
+        view.zoomChanged.connect(self._on_zoom)
         view.horizontalScrollBar().valueChanged.connect(self._reposition)
         view.verticalScrollBar().valueChanged.connect(self._reposition)
         # resolving fonts the first time scans the system fonts – do it early
@@ -360,13 +376,60 @@ class EditTextTool(Tool):
         self._clear_hover()
         if self.ctx is not None:
             view = self.ctx.view
-            for sig in (view.zoomChanged, view.horizontalScrollBar().valueChanged,
-                        view.verticalScrollBar().valueChanged):
+            for sig, slot in ((view.zoomChanged, self._on_zoom),
+                              (view.horizontalScrollBar().valueChanged, self._reposition),
+                              (view.verticalScrollBar().valueChanged, self._reposition)):
                 try:
-                    sig.disconnect(self._reposition)
+                    sig.disconnect(slot)
                 except (RuntimeError, TypeError):
                     pass
         super().deactivate()
+
+    def _on_zoom(self, *_a) -> None:
+        """Zooming while editing: re-derive font pixel sizes, not just the box."""
+        if self.editor is not None:
+            self._apply_editor_style()
+            self._apply_rich_formats()
+
+    def _apply_rich_formats(self) -> None:
+        """Show per-character styles (a bold word, a coloured phrase) of the
+        original paragraph. Only characters that differ from the paragraph's
+        dominant style get an explicit format; the core keeps those styles on
+        commit by aligning the new text with the old one."""
+        if self.editor is None or self.block is None or self.style_override is not None:
+            return
+        base, ppp = self.block.style, self._px_per_pt()
+        doc = self.editor.document()
+        cur = QTextCursor(doc)
+        if doc.toPlainText() != self.block.text:
+            return  # the user already typed: offsets no longer match
+        self.editor.blockSignals(True)  # formatting is not typing (keeps the key hint)
+        try:
+            self._merge_char_formats(cur, base, ppp)
+        finally:
+            self.editor.blockSignals(False)
+
+    def _merge_char_formats(self, cur: QTextCursor, base: core_fonts.SpanStyle, ppp: float) -> None:
+        pos = 0
+        for line in self.block.lines:
+            styles = line.char_styles or []
+            for k, st in enumerate(styles[:len(line.text)]):
+                if st is None or _style_key(st) == _style_key(base):
+                    continue
+                fmt = QTextCharFormat()
+                fmt.setFontWeight(QFont.Weight.Bold if st.bold else QFont.Weight.Normal)
+                fmt.setFontItalic(st.italic)
+                fmt.setForeground(to_qcolor(st.color))
+                if abs(st.size - base.size) > 0.05:
+                    f = QFont(self.editor.font())
+                    f.setPixelSize(max(1, round(st.size * ppp)))
+                    fmt.setFont(f, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
+                if st.font != base.font and not (st.bold != base.bold or st.italic != base.italic):
+                    fmt.setFontFamilies([core_fonts.qt_family_hint(st)])
+                cur.setPosition(pos + k)
+                cur.setPosition(pos + k + 1, QTextCursor.MoveMode.KeepAnchor)
+                cur.mergeCharFormat(fmt)
+            pos += len(line.text) + 1  # "\n" between lines
 
     def properties_widget(self) -> QWidget | None:
         if self._panel is None:
@@ -478,6 +541,11 @@ class EditTextTool(Tool):
         self.block = block
         self.style_override = None
         self._layout = self._layout_for(block)
+        # make sure the paragraph is on screen (Tab may jump below the fold)
+        r = block.bbox
+        tl = view.page_to_scene(block.page, QPointF(r.x0, r.y0))
+        br = view.page_to_scene(block.page, QPointF(r.x1, r.y1))
+        view.ensureVisible(QRectF(tl, br).normalized(), 40, 60)
         self.editor = InlineTextEditor(view.viewport())
         self.editor.commitRequested.connect(self.commit)
         self.editor.cancelRequested.connect(self.cancel)
@@ -491,6 +559,7 @@ class EditTextTool(Tool):
         self._keys.setObjectName("EditKeysHint")
         self._frame = self._outline(block.page, block.bbox, EDIT_PAD, strong=True)
         self._apply_editor_style()
+        self._apply_rich_formats()
         self.editor.show()
         self._keys.show()
         self.editor.setFocus(Qt.FocusReason.MouseFocusReason)

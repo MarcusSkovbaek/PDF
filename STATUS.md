@@ -67,8 +67,10 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 ## Optimisation backlog for "Rediger tekst" (for a max/ultra session)
 1. DONE: `text_edit.layout_info(doc, block)` exposes the core's alignment + wrap width; the editor wraps
    and aligns (left/centre/right) exactly like the written result (verified overlay-exact).
-2. Mixed styles inside a paragraph (a bold word): the editor shows one font; show per-character styles
-   (rich QTextEdit fed from `TextLine.char_styles`) and keep them on commit.
+2. DONE: mixed styles (bold/italic/colour/size per character) are shown in the editor
+   (`_apply_rich_formats`) and kept on commit by the core. Fixed: zooming while editing now rescales the
+   editor text (was only repositioned); the edited paragraph is scrolled into view (Tab below the fold);
+   panel shows human font names (`display_font_name`).
 3. Rotated text: the editor is horizontal; consider a rotated overlay (QGraphicsProxyWidget) or a popover.
 4. Font picker: DONE family names rendered in their own font; TODO search field, recently used.
 5. Optional "show all text boxes" outline mode (Acrobat style). DONE: Shift+Tab = previous paragraph.

@@ -151,3 +151,51 @@ def test_font_list_previews_families(tool):
     assert panel.font.count() > 1
     assert panel.font.itemData(1, Qt.ItemDataRole.FontRole) is not None
     tool.cancel()
+
+
+def _mixed_doc(tmp_path):
+    import pymupdf
+
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    tw = pymupdf.TextWriter(pg.rect)
+    x = 72
+    for word, font in (("Dette er ", pymupdf.Font("helv")), ("vigtigt", pymupdf.Font("hebo")),
+                       (" for alle.", pymupdf.Font("helv"))):
+        tw.append((x, 100), word, font=font, fontsize=12)
+        x += font.text_length(word, 12)
+    tw.write_text(pg)
+    path = str(tmp_path / "mixed.pdf")
+    doc.save(path)
+    return path
+
+
+def test_editor_shows_mixed_styles_and_follows_zoom(win, qapp, tmp_path):  # noqa: F811
+    win.open_path(_mixed_doc(tmp_path))
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    tool = ws.tool
+    tool.start_edit(tool.blocks(0)[0])
+    cur = tool.editor.textCursor()
+    i = tool.editor.toPlainText().index("vigtigt")
+    cur.setPosition(i + 2)
+    assert cur.charFormat().fontWeight() >= 700                   # the bold word is bold in the editor
+    cur.setPosition(3)
+    assert cur.charFormat().fontWeight() < 700
+    px = tool.editor.font().pixelSize()
+    ws.view.set_zoom(ws.view.zoom * 2)
+    qapp.processEvents()
+    assert tool.editor.font().pixelSize() >= px * 1.8              # zooming rescales the editor text
+    tool.editor.setPlainText("Dette er meget vigtigt for alle.")
+    tool.commit()
+    spans = [s for b in ws.pdf.page(0).get_text("dict")["blocks"] for ln in b["lines"] for s in ln["spans"]]
+    assert any(s["text"] == "vigtigt" and "Bold" in s["font"] for s in spans)
+
+
+def test_display_font_name():
+    from pdfstudio.ui.viewer.tools.edit_text import display_font_name as d
+
+    assert d("ABCDEF+NimbusSans-Regular") == "Nimbus Sans"
+    assert d("Times-Roman") == "Times"
+    assert d("ArialMT") == "Arial"
+    assert d("TimesNewRomanPS-BoldMT") == "Times New Roman Bold"

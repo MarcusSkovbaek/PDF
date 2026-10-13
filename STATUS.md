@@ -79,8 +79,10 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
   (images are page content, so this needs a core "object" layer or placing them as stamp annotations);
   alignment buttons (left/centre/right) for new text.
 - **Comment tools – optimisation backlog** (agent B no longer needed): resize handles in "Markér kommentar";
-  multi-select + group delete; free-text (typewriter) annotation; comments list panel in the sidebar
-  (jump to / filter by type); highlight colour preview while hovering the swatches.
+  multi-select + group delete; free-text (typewriter) annotation; filter by type in the comments panel;
+  highlight colour preview while hovering the swatches. DONE: comments panel (`ui/panels/comments.py`,
+  sidebar tab; grouped by page, exact marked text for markups, click = jump + select; sidebar tabs are
+  icon tabs with tooltips now).
 - **Agent C – QA loop** after A+B: full test run, light/dark screenshots of every mode and dialog,
   fix visual/UX issues and bugs, update the Danish `README.md` (exists) (install, `build_windows.bat`, offline guarantee).
 Each agent prompt must say: read CLAUDE.md + STATUS.md, stay in own files, do not git commit

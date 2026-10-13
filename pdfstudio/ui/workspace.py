@@ -352,21 +352,28 @@ class Sidebar(QWidget):
         head.setObjectName("PanelHeader")
         hl = QHBoxLayout(head)
         hl.setContentsMargins(10, 10, 10, 6)
+        # icon tabs (with tooltips): four text labels do not fit the panel width
         self.tabs = SegmentedControl(
-            [Segment("pages", tr("shell.side.pages")), Segment("outline", tr("shell.side.outline")),
-             Segment("search", tr("shell.side.search"))], height=30, expand=True, min_seg=48)
+            [Segment("pages", "", "squares-four", tr("shell.side.pages")),
+             Segment("outline", "", "bookmarks-simple", tr("shell.side.outline")),
+             Segment("search", "", "magnifying-glass", tr("shell.side.search")),
+             Segment("comments", "", "chat-circle-text", tr("comments.tab"))],
+            height=30, expand=True, min_seg=40)
         hl.addWidget(self.tabs, 1)
         lay.addWidget(head)
         self.stack = QStackedWidget()
         self.thumbs = ThumbnailsPanel(workspace)
         self.outline = OutlinePanel(workspace)
         self.search = SearchPanel(workspace)
-        for w in (self.thumbs, self.outline, self.search):
+        from .panels.comments import CommentsPanel
+
+        self.comments = CommentsPanel(workspace)
+        for w in (self.thumbs, self.outline, self.search, self.comments):
             self.stack.addWidget(w)
         lay.addWidget(self.stack, 1)
         self.tabs.currentChanged.connect(self._on_tab)
 
-    KEYS = ("pages", "outline", "search")
+    KEYS = ("pages", "outline", "search", "comments")
 
     def _on_tab(self, key: str) -> None:
         self.stack.setCurrentIndex(self.KEYS.index(key))
@@ -654,6 +661,7 @@ class DocumentWorkspace(QWidget):
                 except Exception:
                     pass
             self.search.document_changed()
+            self.sidebar.comments.document_changed()
         self.inspector.refresh_doc()
         self.titleChanged.emit()
         self.stateChanged.emit()

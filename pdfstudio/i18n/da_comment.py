@@ -42,4 +42,8 @@ STRINGS = {
     "annot.kind.line": "Linje",
     "annot.kind.arrow": "Pil",
     "annot.kind.freetext": "Tekstfelt",
+    "comments.tab": "Kommentarer",
+    "comments.page": "Side {n}  ({count})",
+    "comments.empty.title": "Ingen kommentarer",
+    "comments.empty.text": "Fremhævninger, noter, tegninger og figurer vises her. Klik for at hoppe til dem.",
 }

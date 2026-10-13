@@ -159,7 +159,24 @@ def run(argv: list[str] | None = None) -> int:
             app.quit()
 
         QTimer.singleShot(1100, shoot)
-    return app.exec()
+    code = app.exec()
+    shutdown(app)
+    return code
+
+
+def shutdown(app: QApplication) -> None:
+    """Destroy all Qt objects while Python is still running. Leaving them to
+    interpreter finalisation can crash on exit (C++ destructor order)."""
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    for w in app.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
 def _apply_debug_state(win, args) -> None:

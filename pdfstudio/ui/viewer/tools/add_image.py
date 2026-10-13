@@ -187,6 +187,7 @@ class AddImageTool(Tool):
             self._title = label("", "heading")
             self._detail = label("", "muted", wrap=True)
             self._preview = QLabel()
+            self._preview.setMinimumWidth(0)
             self._preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cl.addWidget(self._title)
             cl.addWidget(self._detail)
@@ -197,6 +198,7 @@ class AddImageTool(Tool):
             pick = QPushButton(icon("folder-open", "text"), tr("edit.add_image.choose"))
             pick.clicked.connect(self.choose_file)
             paste = QPushButton(icon("clipboard-text", "text"), tr("edit.add_image.paste"))
+            paste.setToolTip(tr("edit.add_image.paste.tip"))
             paste.clicked.connect(self.from_clipboard)
             for b in (pick, paste):
                 b.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -228,7 +230,7 @@ class AddImageTool(Tool):
         else:
             img.loadFromData(self.pending)
         if not img.isNull():
-            pm = QPixmap.fromImage(img.scaled(QSize(220, 140), Qt.AspectRatioMode.KeepAspectRatio,
+            pm = QPixmap.fromImage(img.scaled(QSize(196, 120), Qt.AspectRatioMode.KeepAspectRatio,
                                               Qt.TransformationMode.SmoothTransformation))
             self._preview.setPixmap(pm)
             self._preview.show()

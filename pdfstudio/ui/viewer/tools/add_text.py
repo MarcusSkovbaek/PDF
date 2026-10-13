@@ -68,6 +68,11 @@ class AddTextTool(EditTextTool):
     def _block_pitch(self) -> float:
         return _metrics(self.ctx.pdf.doc, self.block.page, self.block.style)[1]
 
+    def _editor_background(self):
+        from PySide6.QtGui import QColor
+
+        return QColor(0, 0, 0, 0)  # nothing to hide: keep the page visible under new text
+
     def _wrap_width(self) -> float:
         return self.block.bbox.width
 

@@ -28,6 +28,11 @@ def win(qapp, tmp_path):
     w.close()
     common._AUTO.clear()
     w.deleteLater()
+    # processEvents() never runs DeferredDelete outside an event loop: without
+    # this every test's window would leak and be restyled by later tests
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
     qapp.processEvents()
     app_mod.configure_settings(None)
 

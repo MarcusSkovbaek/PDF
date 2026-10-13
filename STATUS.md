@@ -1,23 +1,16 @@
 # Status / handover – Folio PDF (paused 2026-10-12 to protect the weekly usage limit)
 
 ## >>> START HERE (next session, max/ultra) <<<
-1. **FIX FIRST – test suite regression (found at pause time, not yet diagnosed):**
-   - `python -m pytest tests/test_ui_shell.py` now HANGS at roughly the 21st test (was green before the
-     last two work packages). Suspects, in order: a modal dialog now opened by a shell test after the new
-     edit/annotate tools were registered (e.g. `QFileDialog`/`QColorDialog`/note dialog without a test
-     hook), the new mode-aware shortcut dispatch in `main_window._register_tool_actions`
-     / `activate_tool_for_key`, or `AddImageTool.choose_file` (file dialog) being reached from a shell test.
-     Find it with: `timeout 120 python -m pytest -v -p no:cacheprovider tests/test_ui_shell.py`
-     (watch the last PASSED line) and `-o faulthandler_timeout=30` for a stack.
-   - `python -m pytest tests/test_annotate_tools.py` passes all tests but the interpreter SEGFAULTS at
-     exit (rc 139) – Qt teardown order (overlay items / AnnotStylePanel / QSettings at shutdown).
-     Likely fix: release tool overlays + panels in the fixture teardown, or `deleteLater()` + process
-     events before QApplication shutdown.
-   - All other test files pass individually (verified per file).
-2. Then continue with the optimisation backlogs below and the QA loop (agent C).
+State at pause (2026-10-13): **full suite green in ~50 s, no hangs, no crashes**; an end-to-end run
+(edit text, add text, add image, highlight, note, rotate, 6× undo + redo, save, reopen) verified the saved
+PDF content and validity. Visual review done for every mode, tool and dialog in light + dark.
+Resolved at pause: the "hang" was a test fixture leaking every MainWindow (deleteLater never ran outside an
+event loop → each test restyled all previous windows, 78 s for test_ui_shell); the exit segfault was Qt
+objects left to interpreter finalisation – fixed in tests (`conftest.qapp` teardown) AND in the app
+(`ui.app.shutdown()` after `app.exec()`, clean exit verified).
+Next: work through the optimisation backlogs below, then a QA loop (agent C).
 
-
-Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (≈250 tests).
+Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (~50 s).
 `QT_QPA_PLATFORM=offscreen python main.py --screenshot out.png --size 1440x900 file.pdf` works.
 Read `CLAUDE.md` first – it is the binding architecture/API contract.
 
@@ -69,7 +62,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    Open items seen in screenshot review:
    - thumbnail list now sizes cells per page aspect (rotated/landscape pages fixed) – DONE;
    - dark theme + home screen screenshots reviewed – look good, no issues;
-   - all four modes now have their tools ("Rediger" still lacks Tilføj tekst/billede – agent A).
+   - all four modes have their tools; Tilføj tekst/billede reviewed visually (new-text editor is transparent).
 
 ## Optimisation backlog for "Rediger tekst" (for a max/ultra session)
 1. Expose core's wrap/alignment decision (`replace_block_text`: align, paragraph/justified detection,
@@ -86,7 +79,7 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
 - **Add text / image – optimisation backlog**: select/move/resize of placed images and text boxes
   (images are page content, so this needs a core "object" layer or placing them as stamp annotations);
-  alignment buttons (left/centre/right) for new text; visual screenshot review of both tools (not done yet).
+  alignment buttons (left/centre/right) for new text.
 - **Comment tools – optimisation backlog** (agent B no longer needed): resize handles in "Markér kommentar";
   multi-select + group delete; free-text (typewriter) annotation; comments list panel in the sidebar
   (jump to / filter by type); highlight colour preview while hovering the swatches.

@@ -122,7 +122,8 @@ class InlineTextEditor(QTextEdit):
         sel.setAlpha(70)
         self.setStyleSheet(
             "QTextEdit#InlineTextEditor { border: none; padding: 0px;"
-            f" background: {background.name()}; color: {color.name()};"
+            f" background: rgba({background.red()},{background.green()},{background.blue()},{background.alpha()});"
+            f" color: {color.name()};"
             f" selection-background-color: rgba({sel.red()},{sel.green()},{sel.blue()},{sel.alpha()});"
             f" selection-color: {color.name()}; }}")
         self._apply_line_height()
@@ -503,10 +504,14 @@ class EditTextTool(Tool):
         if self.style_override is None or self.style_override.font == self.block.style.font:
             font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, self._spacing_fix(font, ppp))
         pitch = self._block_pitch() * (style.size / max(self.block.style.size, 0.1))
-        bg = _background_color(self.ctx.pdf.doc, self.block.page, self.block.bbox)
+        bg = self._editor_background()
         width_px = int(round(self._wrap_width() * ppp))
         self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
         self._reposition()
+
+    def _editor_background(self) -> QColor:
+        """Opaque page colour: hides the original text while it is edited."""
+        return _background_color(self.ctx.pdf.doc, self.block.page, self.block.bbox)
 
     def _block_pitch(self) -> float:
         """Baseline-to-baseline distance (pt) the editor should use."""

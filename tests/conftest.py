@@ -109,6 +109,19 @@ def qapp():
 
     app = QApplication.instance() or QApplication([])
     yield app
+    # Tear Qt down deterministically while Python is still alive; leaving
+    # widgets/scene items to interpreter finalisation crashes in C++.
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    for w in app.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+    app.processEvents()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
 __all__ = ["make_sample_pdf", "make_png", "SANS_TTF", "SERIF_TTF", "io"]

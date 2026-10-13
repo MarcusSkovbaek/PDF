@@ -97,6 +97,7 @@ class InlineTextEditor(QTextEdit):
     commitRequested = Signal()
     cancelRequested = Signal()
     nextRequested = Signal()
+    previousRequested = Signal()
 
     def __init__(self, viewport: QWidget) -> None:
         super().__init__(viewport)
@@ -189,11 +190,15 @@ class InlineTextEditor(QTextEdit):
             ev.accept()
             self.nextRequested.emit()
             return
+        if key == Qt.Key.Key_Backtab or (key == Qt.Key.Key_Tab and mods & Qt.KeyboardModifier.ShiftModifier):
+            ev.accept()
+            self.previousRequested.emit()
+            return
         super().keyPressEvent(ev)
 
     def event(self, ev) -> bool:
         # keep Tab for us instead of focus navigation
-        if ev.type() == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Tab:
+        if ev.type() == QEvent.Type.KeyPress and ev.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
             self.keyPressEvent(ev)
             return True
         return super().event(ev)
@@ -283,6 +288,10 @@ class EditTextPanel(QWidget):
             for fam in core_fonts.available_families():
                 if fam != original:
                     self.font.addItem(fam, fam)
+            for i in range(self.font.count()):  # preview each family in itself
+                f = QFont(core_fonts.qt_family_hint(core_fonts.SpanStyle(self.font.itemData(i) or "", 12)))
+                f.setPointSizeF(self.font.font().pointSizeF() if self.font.font().pointSizeF() > 0 else 10)
+                self.font.setItemData(i, f, Qt.ItemDataRole.FontRole)
             idx = self.font.findData(style.font)
             self.font.setCurrentIndex(max(0, idx))
             self.size.setValue(style.size)
@@ -473,6 +482,7 @@ class EditTextTool(Tool):
         self.editor.commitRequested.connect(self.commit)
         self.editor.cancelRequested.connect(self.cancel)
         self.editor.nextRequested.connect(self.commit_and_next)
+        self.editor.previousRequested.connect(lambda: self.commit_and_next(-1))
         self.editor.textChanged.connect(self._reposition)
         self.editor.setPlainText(block.text)
         self._keys = QLabel(tr("edit.text.keys"), view.viewport())
@@ -651,22 +661,25 @@ class EditTextTool(Tool):
         self._blocks.pop(block.page, None)
         return True
 
-    def commit_and_next(self) -> None:
-        """Save, then open the next paragraph in reading order (Tab)."""
+    def commit_and_next(self, step: int = 1) -> None:
+        """Save, then open the next (Tab) or previous (Shift+Tab) paragraph
+        in reading order."""
         if self.block is None:
             return
         page, old = self.block.page, self.blocks(self.block.page)
         idx = next((i for i, b in enumerate(old) if b.bbox == self.block.bbox), -1)
-        nxt = old[idx + 1] if 0 <= idx < len(old) - 1 else None
+        j = idx + step
+        nxt = old[j] if idx >= 0 and 0 <= j < len(old) else None
         anchor = QPointF((nxt.bbox.x0 + nxt.bbox.x1) / 2, (nxt.bbox.y0 + nxt.bbox.y1) / 2) if nxt else None
         self.commit()
         target = None
         if anchor is not None:
             target = self.block_at(page, anchor)
-        else:
-            for p in range(page + 1, self.ctx.pdf.page_count):
+        else:  # continue on the next / previous page that has text
+            pages = range(page + 1, self.ctx.pdf.page_count) if step > 0 else range(page - 1, -1, -1)
+            for p in pages:
                 if self.blocks(p):
-                    target = self.blocks(p)[0]
+                    target = self.blocks(p)[0] if step > 0 else self.blocks(p)[-1]
                     break
         if target is not None:
             self.ctx.view.go_to_page(target.page) if target.page != page else None

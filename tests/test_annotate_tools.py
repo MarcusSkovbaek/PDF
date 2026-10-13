@@ -141,3 +141,33 @@ def test_inspector_follows_annotation_selection(ws):
     assert isinstance(ws.inspector.scroll.widget(), AnnotStylePanel)
     ws.tool.select(None)
     assert not isinstance(ws.inspector.scroll.widget(), AnnotStylePanel)
+
+
+def test_resize_with_corner_handle(ws):
+    ws.set_tool("annotate.shape")
+    ws.tool.set_kind("rect")
+    drag(ws.tool, ws.view, 0, (100, 500), (200, 560))
+    ws.set_tool("annotate.select")
+    tool = ws.tool
+    tool.select(list_annotations(ws.pdf.doc, 0)[-1])
+    assert len(tool._frame.childItems()) == 4                     # corner handles
+    corner = tool._corners()[2]                                   # bottom-right (frame is padded)
+    assert tool.handle_at(0, corner) == 2
+    drag(tool, ws.view, 0, (corner.x(), corner.y()), (260, 620))
+    r = list_annotations(ws.pdf.doc, 0)[-1].rect
+    assert abs(r.x0 - 100) < 1.5 and abs(r.y0 - 500) < 1.5      # opposite corner fixed
+    assert abs(r.x1 - 260) < 1.5 and abs(r.y1 - 620) < 1.5
+    ws.pdf.undo()
+    r = list_annotations(ws.pdf.doc, 0)[-1].rect
+    assert abs(r.x1 - 200) < 1.5
+
+
+def test_note_has_no_resize_handles(ws, monkeypatch):
+    from pdfstudio.ui.viewer.tools import _annot_common
+
+    monkeypatch.setattr(_annot_common, "_AUTO_NOTE", "x")
+    ws.set_tool("annotate.note")
+    ws.tool.mouse_release(ev(ws.view, 0, 400, 120))
+    ws.set_tool("annotate.select")
+    ws.tool.select(list_annotations(ws.pdf.doc, 0)[-1])
+    assert ws.tool._frame.childItems() == []

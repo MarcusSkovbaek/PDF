@@ -135,3 +135,19 @@ def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
     right = view.mapFromScene(view.page_to_scene(0, QPointF(b.bbox.x1, b.bbox.y0))).x()
     assert abs(tool.editor.geometry().right() - right) <= 3
     tool.cancel()
+
+
+def test_shift_tab_goes_to_previous_paragraph(tool):
+    b = _block(tool, "Indlejret")
+    tool.start_edit(b)
+    _key(tool.editor, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+    assert tool.block is not None and tool.block.text.startswith("Dette")
+    tool.cancel()
+
+
+def test_font_list_previews_families(tool):
+    tool.start_edit(_block(tool, "Dette"))
+    panel = tool.properties_widget()
+    assert panel.font.count() > 1
+    assert panel.font.itemData(1, Qt.ItemDataRole.FontRole) is not None
+    tool.cancel()

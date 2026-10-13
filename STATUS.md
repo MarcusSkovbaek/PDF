@@ -70,16 +70,16 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
 2. Mixed styles inside a paragraph (a bold word): the editor shows one font; show per-character styles
    (rich QTextEdit fed from `TextLine.char_styles`) and keep them on commit.
 3. Rotated text: the editor is horizontal; consider a rotated overlay (QGraphicsProxyWidget) or a popover.
-4. Font picker: render family names in their own font, search field, recently used.
-5. Optional "show all text boxes" outline mode (Acrobat style) and Shift+Tab to the previous paragraph.
+4. Font picker: DONE family names rendered in their own font; TODO search field, recently used.
+5. Optional "show all text boxes" outline mode (Acrobat style). DONE: Shift+Tab = previous paragraph.
 6. Key-hint chip placement (now hidden on first keystroke).
 
 ## Next phases – ready-to-launch agents (run 1+2 in parallel, then 3)
 - **Add text / image – optimisation backlog**: select/move/resize of placed images and text boxes
   (images are page content, so this needs a core "object" layer or placing them as stamp annotations);
   alignment buttons (left/centre/right) for new text.
-- **Comment tools – optimisation backlog** (agent B no longer needed): resize handles in "Markér kommentar";
-  multi-select + group delete; free-text (typewriter) annotation; filter by type in the comments panel;
+- **Comment tools – optimisation backlog** (agent B no longer needed): DONE resize handles (corners, opposite
+  corner fixed, notes excluded); TODO multi-select + group delete; free-text (typewriter) annotation; filter by type in the comments panel;
   highlight colour preview while hovering the swatches. DONE: comments panel (`ui/panels/comments.py`,
   sidebar tab; grouped by page, exact marked text for markups, click = jump + select; sidebar tabs are
   icon tabs with tooltips now).

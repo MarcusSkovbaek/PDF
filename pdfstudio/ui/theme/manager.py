@@ -131,7 +131,14 @@ class FolioStyle(QProxyStyle):
             if sc == SC.SC_ComboBoxFrame:
                 return r
         if control == CC.CC_SpinBox:
+            from PySide6.QtWidgets import QAbstractSpinBox
+
             bw = 20
+            if getattr(option, "buttonSymbols", None) == QAbstractSpinBox.ButtonSymbols.NoButtons:
+                if sc == SC.SC_SpinBoxEditField:   # compact field: the text gets the whole width
+                    return QRect(r.left() + 8, r.top() + 1, r.width() - 16, r.height() - 2)
+                if sc in (SC.SC_SpinBoxUp, SC.SC_SpinBoxDown):
+                    return QRect()
             if sc == SC.SC_SpinBoxUp:
                 return QRect(r.right() - bw - 2, r.top() + 2, bw, r.height() // 2 - 2)
             if sc == SC.SC_SpinBoxDown:

@@ -128,6 +128,17 @@ def test_shared_shortcut_follows_mode(win, ws):  # noqa: F811
     ws.set_mode("view")
     act.trigger()
     assert ws.tool.id == "view.hand"
+    for mode in ("edit", "pages"):                      # no H tool there: the neutral "Vis" tool
+        ws.set_mode(mode)
+        act.trigger()
+        assert ws.tool.id == "view.hand" and ws.mode == "view"
+    t_owner = next(a for a in (win.actions.action("tool.edit.add_text"), win.actions.action("tool.annotate.freetext"))
+                   if a.shortcut().toString() == "T")
+    t_owner.trigger()                                   # T in "Vis": no T tool there -> first one
+    assert ws.tool.id == "edit.add_text"
+    ws.set_mode("annotate")
+    t_owner.trigger()
+    assert ws.tool.id == "annotate.freetext"
 
 
 def test_inspector_follows_annotation_selection(ws):

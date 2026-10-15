@@ -47,9 +47,15 @@ class SplitDialog(FolioDialog):
         self.mode.currentChanged.connect(self._mode_changed)
         self.body.addWidget(self.mode)
 
-        # mode specific options (the "each" page is intentionally empty)
+        # mode specific options ("each" has none: it explains the result, so
+        # the stack does not leave an empty gap under the segmented control)
         self.options = QStackedWidget()
-        self.options.addWidget(QWidget())
+        each_page = QWidget()
+        each_col = QVBoxLayout(each_page)
+        each_col.setContentsMargins(0, 4, 0, 0)
+        each_col.addWidget(label(tr("split.each.label"), "muted", wrap=True))
+        each_col.addStretch(1)
+        self.options.addWidget(each_page)
         n_page = QWidget()
         n_row = QHBoxLayout(n_page)
         n_row.setContentsMargins(0, 4, 0, 0)

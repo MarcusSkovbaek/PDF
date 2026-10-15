@@ -392,3 +392,38 @@ def test_key_hint_does_not_cover_other_text(tool, qapp, zoom):
             tool.editor.insertPlainText("x")
             assert tool._keys.isVisible()                          # harmless: it stays
         tool.cancel()
+
+
+def test_first_line_indent_paragraph_editor_starts_at_the_column(win, qapp, tmp_path):  # noqa: F811
+    """A paragraph with a first-line indent: only the editor's first line is
+    indented; the box (and every later line) starts at the column edge, where
+    the core puts the reflowed lines."""
+    import pymupdf
+
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    lines = ["Dette er et afsnit med indrykket første linje som",
+             "fortsætter her på anden linje uden indrykning og",
+             "slutter på den tredje linje."]
+    for i, t in enumerate(lines):
+        pg.insert_text((90 if i == 0 else 72, 100 + 14 * i), t, fontname="helv", fontsize=11)
+    path = str(tmp_path / "indent.pdf")
+    doc.save(path)
+    win.open_path(path)
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    qapp.processEvents()
+    tool = ws.tool
+    b = tool.blocks(0)[0]
+    tool.start_edit(b)
+    qapp.processEvents()
+    view = tool.ctx.view
+    first = view.mapFromScene(view.page_to_scene(0, QPointF(*b.lines[0].origin)))
+    column = view.mapFromScene(view.page_to_scene(0, QPointF(72, b.lines[0].origin[1])))
+    bx, by = tool.editor.first_baseline()
+    geo = tool.editor.geometry()
+    assert abs(geo.x() + bx - first.x()) <= 1.5 and abs(geo.y() + by - first.y()) <= 1.5
+    assert abs(geo.x() - column.x()) <= 1.5          # the box starts at the column, not at the indent
+    second = tool.editor.document().begin().layout().lineAt(1)
+    assert abs(geo.x() + second.x() - column.x()) <= 1.5
+    tool.cancel()

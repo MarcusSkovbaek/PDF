@@ -432,3 +432,93 @@ def test_thumbnail_drop_reorders(win, qapp, sample_pdf_path):
     view.dropEvent(ev)
     pump(qapp, 50)
     assert [ws.pdf.page(i).get_text() for i in range(3)] == [texts[1], texts[2], texts[0]]
+
+
+def test_closing_leaks_no_windows(qapp, tmp_path, sample_pdf_path):
+    """Inspector panels of every tool, rebuilt selection panels and the
+    document panels all die with the window – nothing is left behind as a
+    hidden top-level widget (those were restyled on every theme change and
+    made the test-suite crawl)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    from pdfstudio.core import annotations as A
+    from pdfstudio.ui import app as app_mod
+    from pdfstudio.ui.dialogs import common
+    from pdfstudio.ui.main_window import MainWindow
+    from pdfstudio.ui.viewer.tools.base import MODES, ToolRegistry
+
+    def flush_deletes():
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        qapp.processEvents()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+
+    flush_deletes()
+    before = len(qapp.topLevelWidgets())
+    app_mod.configure_settings(str(tmp_path / "settings"))
+    try:
+        w = MainWindow()
+        w.resize(1280, 820)
+        w.show()
+        ws = w.open_path(sample_pdf_path)
+        A.add_note(ws.pdf, 0, (330, 92), "Tjek tallene", (1, .84, 0))
+        A.add_shape(ws.pdf, 0, "rect", (72, 420), (300, 480), (.9, .2, .2))
+        for mode in MODES:
+            ws.set_mode(mode)
+            for cls in ToolRegistry.for_mode(mode):
+                ws.set_tool(cls.id)
+                qapp.processEvents()
+        ws.set_tool("annotate.select")
+        infos = A.list_annotations(ws.pdf.doc, 0)
+        for _ in range(4):
+            for info in infos:
+                ws.tool.select(info)
+            ws.tool.set_selection(infos)
+            ws.tool.select(None)
+        flush_deletes()
+        transient = [p for p in ws.inspector.findChildren(type(ws.inspector.doc_info))
+                     if p.property("transientPanel")]
+        assert len(transient) <= 1   # rebuilt selection panels are deleted, not parked
+        ws.set_mode("view")
+        common._AUTO["save_changes"] = "discard"
+        assert w.close()
+        w.deleteLater()
+        flush_deletes()
+        left = [type(x).__name__ for x in qapp.topLevelWidgets()]
+        assert len(left) == before, left
+    finally:
+        common._AUTO.clear()
+        app_mod.configure_settings(None)
+
+
+def test_no_two_actions_share_a_shortcut(win, qapp, sample_pdf_path):
+    """Every key sequence of the window belongs to exactly one action (Qt
+    disables ambiguous shortcuts), tools sharing a key across modes included,
+    and every tool button of every mode pill names its shortcut."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QAction
+
+    from pdfstudio.ui.viewer.tools.base import MODES, ToolRegistry
+
+    ws = win.open_path(sample_pdf_path)
+    owners: dict[str, list[str]] = {}
+    for act in win.findChildren(QAction):
+        if act.shortcutContext() == Qt.ShortcutContext.WidgetShortcut:
+            continue  # display-only hints (menus)
+        for seq in act.shortcuts():
+            if not seq.isEmpty():
+                owners.setdefault(seq.toString(), []).append(act.objectName() or act.text())
+    dups = {k: v for k, v in owners.items() if len(v) > 1}
+    assert not dups, dups
+    for cls in ToolRegistry.all():   # every tool shortcut reaches a tool
+        if cls.shortcut:
+            assert cls.shortcut.upper() in owners, cls.id
+    for mode in MODES:
+        ws.set_mode(mode)
+        qapp.processEvents()
+        tools = ToolRegistry.for_mode(mode)
+        assert ws.toolbar.tool_ids() == [t.id for t in tools]          # pill order = registry order
+        for cls in tools:
+            tip = ws.toolbar._tool_buttons[cls.id].toolTip()
+            assert tip.startswith(cls.display_label())
+            if cls.shortcut:
+                assert tip.endswith(f"({cls.shortcut})"), tip

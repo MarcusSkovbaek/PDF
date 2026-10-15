@@ -115,6 +115,7 @@ class AnnotSelectTool(Tool):
     def set_selection(self, infos, *, emit: bool = True) -> None:
         """Replace the selection. ``emit`` rebuilds the inspector – not wanted
         while restyling or while a rubber band is being dragged."""
+        self._flush_panel()  # a slider/size change still pending belongs to the old selection
         unique: dict[Key, core_annots.AnnotInfo] = {}
         for a in infos:
             if a is not None:
@@ -127,6 +128,15 @@ class AnnotSelectTool(Tool):
             self.changed.emit()
         if emit or old != [_key(a) for a in self.selection]:
             self.selectionChanged.emit()
+
+    def _flush_panel(self) -> None:
+        panel = self._panel
+        if panel is None:
+            return
+        try:
+            panel._flush()
+        except RuntimeError:  # the inspector already deleted it
+            self._panel = None
 
     def toggle(self, info: core_annots.AnnotInfo) -> None:
         if self.is_selected(info):
@@ -229,6 +239,7 @@ class AnnotSelectTool(Tool):
 
     # -- lifecycle -----------------------------------------------------------------
     def deactivate(self) -> None:
+        self._flush_panel()
         self.end_session()
         self._clear_preview()
         self._clear_band()
@@ -506,6 +517,7 @@ class AnnotSelectTool(Tool):
             cl.addWidget(label(tr("annot.select.none.hint"), "muted", wrap=True))
             v.addWidget(card)
             v.addStretch(1)
+            w.setProperty("transientPanel", True)  # rebuilt per selection: the inspector deletes it
             return w
         first = sel[0]
         width_kinds = [a for a in sel if a.kind in WIDTH_KINDS]
@@ -540,6 +552,7 @@ class AnnotSelectTool(Tool):
                                 text=bool(text_kinds), mixed=mixed)
         panel.propertyChanged.connect(self._apply_property)
         panel.previewRequested.connect(self._show_preview)
+        panel.setProperty("transientPanel", True)
         self._panel = panel
         return panel
 

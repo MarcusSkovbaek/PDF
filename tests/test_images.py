@@ -10,7 +10,7 @@ from pdfstudio.core.images import (
     images_to_pdf,
     is_image_file,
 )
-from tests.conftest import make_png
+from tests.conftest import filled_pixmap, make_png
 
 MM = 72 / 25.4
 
@@ -21,17 +21,13 @@ def open_pdf(data: bytes) -> pymupdf.Document:
 
 def two_tone_png(width: int = 200, height: int = 100) -> bytes:
     """Left half blue, right half red."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, width, height), False)
-    pix.set_rect(pymupdf.IRect(0, 0, width // 2, height), (0, 0, 255))
-    pix.set_rect(pymupdf.IRect(width // 2, 0, width, height), (255, 0, 0))
+    pix = filled_pixmap(width, height, (255, 0, 0), regions=[((0, 0, width // 2, height), (0, 0, 255))])
     return pix.tobytes("png")
 
 
 def transparent_png() -> bytes:
     """100x50: left half opaque green, right half fully transparent."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 100, 50), True)
-    pix.set_rect(pix.irect, (0, 0, 0, 0))
-    pix.set_rect(pymupdf.IRect(0, 0, 50, 50), (0, 160, 0, 255))
+    pix = filled_pixmap(100, 50, (0, 0, 0, 0), alpha=True, regions=[((0, 0, 50, 50), (0, 160, 0, 255))])
     return pix.tobytes("png")
 
 

@@ -5,7 +5,7 @@ from pdfstudio.core import CONTENT, PdfDocument
 from pdfstudio.core.fonts import SpanStyle
 from pdfstudio.core.insert import add_image, add_text_box, document_text_style
 from pdfstudio.core.text_edit import text_blocks
-from tests.conftest import make_png, make_sample_pdf
+from tests.conftest import filled_pixmap, make_png, make_sample_pdf
 
 
 @pytest.fixture
@@ -17,9 +17,7 @@ def pdf():
 
 def two_tone_png(w=60, h=40) -> bytes:
     """Top half red, bottom half blue."""
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, w, h), False)
-    pix.set_rect(pymupdf.IRect(0, 0, w, h // 2), (255, 0, 0))
-    pix.set_rect(pymupdf.IRect(0, h // 2, w, h), (0, 0, 255))
+    pix = filled_pixmap(w, h, (255, 0, 0), regions=[((0, h // 2, w, h), (0, 0, 255))])
     return pix.tobytes("png")
 
 

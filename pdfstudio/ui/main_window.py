@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, __version__
 from ..core import DocumentError, InvalidPassword, PasswordRequired, PdfDocument
-from ..i18n import tr
+from ..i18n import tr, tr_n
 from .actions import ActionRegistry
 from .home_view import HomeView
 from .theme import tokens as T
@@ -408,7 +408,11 @@ class MainWindow(QMainWindow):
         r("pages.insert_file", tr("shell.pages.insert_file"), icon="file-arrow-down", shortcut="Ctrl+Shift+I",
           handler=pw(lambda ws: ws.insert_from_file_dialog()), enabled=has_ws, menu="pages", mode="pages",
           category=cat_pages, order=60)
+        # Delete works on selected pages in the grid / thumbnails (not a window
+        # shortcut: the tools use Delete for their own selection)
+        del_key = QKeySequence(Qt.Key.Key_Delete).toString(QKeySequence.SequenceFormat.NativeText)
         r("pages.delete", tr("shell.pages.delete"), icon="trash",
+          tooltip=f"{tr('shell.pages.delete')}  ({del_key})",
           handler=pw(lambda ws: ws.delete_selected()),
           enabled=lambda: bool(self.current_pdf() and self.current_pdf().page_count > 1),
           menu="pages", mode="pages", category=cat_pages, order=70)
@@ -444,15 +448,18 @@ class MainWindow(QMainWindow):
                 order=200 + cls.order)
 
     def activate_tool_for_key(self, tool_ids: tuple[str, ...]) -> None:
-        """Shortcut shared by several tools: prefer the current mode's tool."""
+        """Shortcut shared by several tools: the current mode's tool; in a
+        mode without one, the neutral "Vis" mode's tool (V = Markér tekst,
+        H = Hånd), else the first registered one."""
         ws = self.current_workspace()
         if ws is None:
             return
-        for tid in tool_ids:
-            cls = ToolRegistry.get(tid)
-            if cls is not None and ws.mode in cls.modes():
-                self.activate_tool(tid)
-                return
+        for mode in (ws.mode, "view"):
+            for tid in tool_ids:
+                cls = ToolRegistry.get(tid)
+                if cls is not None and mode in cls.modes():
+                    self.activate_tool(tid)
+                    return
         self.activate_tool(tool_ids[0])
 
     def _discover_commands(self) -> None:
@@ -978,7 +985,7 @@ class MainWindow(QMainWindow):
         files = self._drop_files(ev.mimeData())
         if files:
             ev.acceptProposedAction()
-            QTimer.singleShot(0, lambda: self.open_files(files))
+            QTimer.singleShot(0, self, lambda: self.open_files(files))
 
     # =========================================================== dialogs
     def open_merge_dialog(self) -> None:
@@ -1088,7 +1095,7 @@ class MainWindow(QMainWindow):
         finally:
             painter.end()
             progress.close()
-        self.toast(tr("shell.print.sent", n=len(pages)), "success")
+        self.toast(tr_n("shell.print.sent", len(pages)), "success")
 
     def export_images(self, folder: str | None = None, dpi: int = 150) -> int:
         ws = self.current_workspace()
@@ -1126,7 +1133,7 @@ class MainWindow(QMainWindow):
         finally:
             progress.close()
         if done:
-            self.toast(tr("shell.export.done", n=done, folder=os.path.basename(folder) or folder), "success")
+            self.toast(tr_n("shell.export.done", done, folder=os.path.basename(folder) or folder), "success")
         return done
 
     # ============================================================= close

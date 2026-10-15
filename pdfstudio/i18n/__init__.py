@@ -28,6 +28,15 @@ def tr(key: str, **kwargs) -> str:
     return text.format(**kwargs) if kwargs else text
 
 
+def tr_n(key: str, n: int, **kwargs) -> str:
+    """Count-dependent text: ``key + ".one"`` when ``n == 1`` (if that key
+    exists), else ``key``; ``n`` is passed to the format string."""
+    if not _lang:
+        set_language("da")
+    one = f"{key}.one"
+    return tr(one if n == 1 and one in _strings else key, n=n, **kwargs)
+
+
 def register(strings: dict[str, str]) -> None:
     """Let a feature module contribute strings (useful for plugins)."""
     if not _lang:

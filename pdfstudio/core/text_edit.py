@@ -346,7 +346,8 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
             continue
         lines = [ln for rl in b.get("lines", ()) for ln in _build_lines(rl, rm)]
         if lines:
-            groups.extend(_split_columns(lines))
+            for col in _split_columns(lines):
+                groups.extend(_split_size_changes(col))
     if merge:
         groups = _merge_groups(groups)
     blocks: list[TextBlock] = []
@@ -378,6 +379,24 @@ def _split_columns(lines: list[TextLine]) -> list[list[TextLine]]:
     if len(clusters) == 1:
         return [lines]
     return [[lines[i] for i in sorted(c)] for c in clusters]
+
+
+def _split_size_changes(lines: list[TextLine]) -> list[list[TextLine]]:
+    """Split one PyMuPDF block where the text size jumps from one row to the
+    next: a caption or heading set tight above a paragraph is a paragraph of
+    its own (MuPDF happily puts both in one block). Uses the same size
+    tolerance as :func:`_continues`, so the parts are never merged back."""
+    out = [[lines[0]]]
+    for prev, ln in zip(lines, lines[1:]):
+        sa, sb = prev.style.size, ln.style.size
+        if (sa and sb and not (0.85 <= sb / sa <= 1.18)
+                and abs(prev.dir[0] - ln.dir[0]) < 1e-3 and abs(prev.dir[1] - ln.dir[1]) < 1e-3):
+            n = _perp(prev.dir)
+            if _dot(ln.raw_origin, n) - _dot(prev.raw_origin, n) > 0.5 * min(sa, sb):  # the next row
+                out.append([ln])
+                continue
+        out[-1].append(ln)
+    return out
 
 
 def _pitch(lines: list[TextLine]) -> float | None:

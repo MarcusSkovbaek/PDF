@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QLocale, QSettings, Qt, QTimer
 from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import QApplication
 
@@ -92,6 +92,9 @@ def create_app(argv: list[str] | None = None, *, theme: str | None = None) -> QA
         except Exception:  # pragma: no cover
             pass
         app = QApplication(argv if argv is not None else sys.argv[:1])
+    # The UI is Danish: number fields show "12,5 mm" (decimal comma) on any
+    # system, consistent with the sizes the app formats itself.
+    QLocale.setDefault(QLocale(QLocale.Language.Danish, QLocale.Country.Denmark))
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_ORG)
     app.setApplicationDisplayName(APP_NAME)

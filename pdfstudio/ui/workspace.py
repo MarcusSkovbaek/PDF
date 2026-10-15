@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core import CONTENT, RELOADED, SAVED, STRUCTURE
-from ..i18n import tr
+from ..i18n import tr, tr_n
 from .theme import tokens as T
 from .theme.icons import icon
 from .viewer.page_view import PageView
@@ -216,6 +216,12 @@ class Inspector(QWidget):
         lay.addWidget(self.scroll, 1)
         self._tool_widget: QWidget | None = None
         self._pages_panel: QWidget | None = None
+        # Tools cache their panels; a panel that is not shown is parked here
+        # (hidden child) so it dies with the workspace. Parking it as a
+        # parentless widget leaked one hidden top-level window per panel that
+        # Qt kept restyling on every theme change.
+        self._parking = QWidget(self)
+        self._parking.hide()
         self.doc_info = self._build_doc_info()
         self.scroll.setWidget(self.doc_info)
 
@@ -268,8 +274,11 @@ class Inspector(QWidget):
 
     def set_tool(self, tool, mode: str | None = None) -> None:
         current = self.scroll.takeWidget()   # never let QScrollArea delete a widget it does not own
-        if current is not None and current is not self.doc_info and current is not self._pages_panel:
-            current.setParent(None)
+        if current is not None:
+            current.hide()
+            current.setParent(self._parking)
+            if current.property("transientPanel"):
+                current.deleteLater()        # rebuilt by its tool on every call (e.g. selection panels)
         pw = tool.properties_widget() if tool is not None else None
         self._tool_widget = pw
         if pw is None and mode == "pages":
@@ -586,7 +595,7 @@ class DocumentWorkspace(QWidget):
         x = max(8, (self.center.width() - sh.width()) // 2)
         tb.move(x, 14)
         tb.raise_()
-        QTimer.singleShot(0, self._recenter_toolbar)
+        QTimer.singleShot(0, self, self._recenter_toolbar)
 
     def _recenter_toolbar(self) -> None:
         tb = self.toolbar
@@ -627,7 +636,7 @@ class DocumentWorkspace(QWidget):
             self.window_.set_mode("view")
         else:
             self.set_mode("view")
-        QTimer.singleShot(0, lambda: self.view.go_to_page(page))
+        QTimer.singleShot(0, self, lambda: self.view.go_to_page(page))
 
     def _on_current_page(self, page: int) -> None:
         self.thumbs.set_current_page(page)
@@ -695,7 +704,7 @@ class DocumentWorkspace(QWidget):
                 self.organizer.view.select_pages(pages)
             if pages and self.mode != "pages":
                 self.view.go_to_page(pages[0])
-        QTimer.singleShot(0, apply)
+        QTimer.singleShot(0, self, apply)
 
     def _need_core(self) -> bool:
         if core_pages is None:
@@ -734,7 +743,7 @@ class DocumentWorkspace(QWidget):
             self.toast(tr("shell.pages.cant_delete_all"), "warning")
             return
         self._run(core_pages.delete_pages, pages,
-                  success=tr("shell.pages.deleted", n=len(pages)), undo=True)
+                  success=tr_n("shell.pages.deleted", len(pages)), undo=True)
 
     def duplicate_selected(self) -> None:
         if not self._need_core():
@@ -790,7 +799,7 @@ class DocumentWorkspace(QWidget):
             inserted.extend(new)
             at += len(new)
         if inserted:
-            self.toast(tr("shell.pages.inserted", n=len(inserted)), "success",
+            self.toast(tr_n("shell.pages.inserted", len(inserted)), "success",
                        action_text=tr("shell.undo_short"), on_action=self.pdf.undo)
             self._select_after(inserted)
 
@@ -821,7 +830,7 @@ class DocumentWorkspace(QWidget):
         except OSError as exc:
             self.toast(tr("shell.error.save", err=str(exc)), "error")
             return
-        self.toast(tr("shell.pages.extracted", n=len(pages), name=os.path.basename(path)), "success")
+        self.toast(tr_n("shell.pages.extracted", len(pages), name=os.path.basename(path)), "success")
 
 
 def _last_dir(path: str | None = None) -> str:

@@ -402,7 +402,7 @@ class FreeTextTool(StyledTool):
     id = "annotate.freetext"
     label = tr("annot.freetext")
     hint = tr("annot.freetext.hint")
-    icon = "text-t"
+    icon = "text-aa"   # like "Tilføj tekst" (also T): adds text; T-icon = edit existing text
     shortcut = "T"
     order = 45
     cursor = Qt.CursorShape.IBeamCursor

@@ -43,7 +43,7 @@ FILTERS: dict[str, frozenset[str] | None] = {
     "drawings": frozenset({"ink", "rect", "ellipse", "line", "arrow", "polygon", "polyline"}),
     "text": frozenset({"freetext"}),
 }
-FILTER_ICONS = {"markup": "highlighter-circle", "notes": "note", "drawings": "scribble-loop", "text": "text-t"}
+FILTER_ICONS = {"markup": "highlighter-circle", "notes": "note", "drawings": "scribble-loop", "text": "text-aa"}
 
 
 def _dot(color: tuple | None) -> QIcon:
@@ -51,8 +51,9 @@ def _dot(color: tuple | None) -> QIcon:
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(to_qcolor(color) if color else T.qcolor("text_subtle"))
-    p.setPen(T.qcolor("border_strong"))  # keeps dark colours visible in dark mode
+    fill = to_qcolor(color) if color else T.qcolor("text_subtle")
+    p.setBrush(fill)
+    p.setPen(T.swatch_outline(fill))  # keeps dark colours visible in dark mode
     p.drawEllipse(QRectF(2.5, 2.5, 9, 9))
     p.end()
     return QIcon(pm)

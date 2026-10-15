@@ -143,8 +143,9 @@ class Swatch(QToolButton):
             p.drawEllipse(self.rect().adjusted(1, 1, -1, -1))
         path = QPainterPath()
         path.addEllipse(r)
-        p.fillPath(path, to_qcolor(self.color))
-        p.setPen(QPen(T.qcolor("border_strong"), 1))  # keeps dark swatches visible in dark mode
+        fill = to_qcolor(self.color)
+        p.fillPath(path, fill)
+        p.setPen(QPen(T.swatch_outline(fill), 1))  # keeps dark swatches visible in dark mode
         p.drawEllipse(r)
         p.end()
 
@@ -418,6 +419,13 @@ class AnnotStylePanel(QWidget):
         self.fill.clicked.connect(self._fill_clicked)
         if fill:
             form.addRow("", self.fill)
+        # controls the panel does not show still back _sync(): keep them as
+        # hidden children instead of parentless (leaked top-level) widgets
+        for w, shown in ((self.opacity, opacity), (self.opacity_label, opacity), (self.width, width),
+                         (self.width_label, width), (self.fill, fill)):
+            if not shown:
+                w.setParent(self)
+                w.hide()
         v.addLayout(form)
         v.addStretch(1)
         self._sync()
@@ -505,7 +513,7 @@ class AnnotStylePanel(QWidget):
             sw.setChecked(not mixed_color and same_color(sw.color, self.style_.color))
         self.custom.set_color(tuple(self.style_.color))
         self.opacity_label.setText("–" if "opacity" in self.mixed else f"{self.opacity.value()} %")
-        self.width_label.setText("–" if "width" in self.mixed else f"{self.width.value() / 2:g} pt")
+        self.width_label.setText("–" if "width" in self.mixed else f"{self.width.value() / 2:g} pt".replace(".", ","))
         if self.sample is not None:
             self.sample.style_ = self.style_
             self.sample.update()

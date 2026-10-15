@@ -704,3 +704,41 @@ def test_block_angle_in_display_space(pdf):
     p.insert_text((100, 500), "Lodret tekst", fontname="helv", fontsize=12, rotate=90)
     up = PdfDocument.from_bytes(doc.tobytes())
     assert text_blocks(up.doc, 0)[0].angle == -90   # reads bottom to top
+
+
+def test_caption_set_tight_above_a_paragraph_is_its_own_block():
+    """LibreOffice (and MuPDF's block detection) puts a 9 pt figure caption
+    and the 11 pt paragraph right below it into one block; editing the
+    paragraph must not drag the caption along (its centred first line used to
+    shift the whole editor sideways)."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((200, 100), "Figur 1: Omsætning fordelt på regioner", fontname="helv", fontsize=9,
+                  color=(.4, .4, .4))
+    y = 113
+    for t in ("Forventer omsætning bestyrelsen udviklingen medarbejdere bestyrelsen leverandører væksten",
+              "grønne regnskabsår resultat effektivisering medarbejdere leverandører og meget mere tekst",
+              "samlede leverandører produktionen."):
+        p.insert_text((72, y), t, fontname="helv", fontsize=11)
+        y += 14
+    assert len(p.get_text("dict")["blocks"]) == 1          # MuPDF: one block
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    caption, body = text_blocks(pdf.doc, 0)
+    assert caption.text.startswith("Figur 1") and len(caption.lines) == 1
+    assert body.text.startswith("Forventer") and len(body.lines) == 3
+    assert abs(body.bbox.x0 - 72) < 1
+    replace_block_text(pdf, body, body.text.replace("Forventer", "Vi forventer"))
+    caption2, body2 = text_blocks(pdf.doc, 0)
+    assert caption2.text == caption.text and abs(caption2.bbox.x0 - caption.bbox.x0) < 0.01
+    assert body2.text.startswith("Vi forventer")
+
+
+def test_superscript_on_the_same_row_stays_in_its_paragraph():
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 100), "Omsætningen steg med 12 procent i Danmark", fontname="helv", fontsize=11)
+    p.insert_text((300, 96), "1", fontname="helv", fontsize=6)
+    p.insert_text((72, 114), "og fortsatte i resten af Norden.", fontname="helv", fontsize=11)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    texts = [b.text for b in text_blocks(pdf.doc, 0)]
+    assert any("Omsætningen" in t and "Norden" in t for t in texts), texts

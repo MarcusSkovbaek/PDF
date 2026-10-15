@@ -237,6 +237,17 @@ class InlineTextEditor(QTextEdit):
         cur.mergeBlockFormat(fmt)
         self.blockSignals(False)
 
+    def set_first_line_indent(self, px: float) -> None:
+        """Indent of the first line only (a paragraph's first-line indent)."""
+        block = self.document().begin()
+        fmt = block.blockFormat()
+        if abs(fmt.textIndent() - px) < 0.01:
+            return
+        fmt.setTextIndent(px)
+        self.blockSignals(True)
+        QTextCursor(block).setBlockFormat(fmt)
+        self.blockSignals(False)
+
     def set_alignment(self, align: Qt.AlignmentFlag) -> None:
         opt = self.document().defaultTextOption()
         opt.setAlignment(align)
@@ -720,7 +731,7 @@ class EditTextPanel(QWidget):
             self.text.setText(tr(self.tool.idle_text_key))
             return
         self.title.setText(display_font_name(block.style.font) or "–")
-        self.text.setText(f"{block.style.size:g} pt")
+        self.text.setText(f"{block.style.size:g} pt".replace(".", ","))
         self._loading = True
         try:
             original = display_font_name(block.style.font) or core_fonts.clean_font_name(block.style.font)
@@ -1198,7 +1209,18 @@ class EditTextTool(Tool):
         self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
                                    "right": Qt.AlignmentFlag.AlignRight,
                                    "justify": Qt.AlignmentFlag.AlignJustify}.get(align, Qt.AlignmentFlag.AlignLeft))
+        self.editor.set_first_line_indent(self._first_line_indent() * ppp)
         self._reposition()
+
+    def _first_line_indent(self) -> float:
+        """A left-aligned paragraph whose first line starts further right than
+        the others (first-line indent): the editor's box starts at the column
+        edge and only its first line is indented – like the core lays it out."""
+        b, lay = self.block, self._layout
+        if self.rotated() or len(b.lines) < 2 or (lay is not None and lay.align != "left"):
+            return 0.0
+        indent = b.lines[0].origin[0] - min(ln.origin[0] for ln in b.lines)
+        return indent if indent > 0.5 else 0.0
 
     def _editor_background(self) -> QColor:
         """Opaque page colour: hides the original text while it is edited."""

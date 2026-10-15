@@ -233,3 +233,13 @@ def blend(role_a: str, role_b: str, t: float, tokens: Tokens | None = None) -> s
     b = rgba(value(role_b, tokens))
     m = [round(x + (y - x) * t) for x, y in zip(a, b)]
     return "#" + "".join(f"{c:02X}" for c in m)
+
+
+def swatch_outline(fill, tokens: Tokens | None = None):
+    """Outline colour for a colour dot/swatch showing ``fill`` (a QColor):
+    the subtle border normally, a lighter ring where a dark fill would melt
+    into a dark theme's surfaces (black ink, dark arrows)."""
+    t = tokens or current()
+    if t.is_dark and fill.lightnessF() < 0.4:
+        return qcolor("text_subtle", t)
+    return qcolor("border_strong", t)

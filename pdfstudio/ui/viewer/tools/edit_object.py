@@ -614,7 +614,7 @@ class EditObjectTool(Tool):
         self._stale_previews.extend(stale)
         if stale:
             self._stale_page = page
-            QTimer.singleShot(600, self._clear_stale_previews)   # fallback
+            QTimer.singleShot(600, self, self._clear_stale_previews)   # fallback
         if isinstance(new, core_objects.ImageObject):
             self._set_selected(new)
 
@@ -947,6 +947,9 @@ class ImageObjectPanel(QWidget):
         s.setKeyboardTracking(False)        # commit on Enter / focus out / arrows – not per keystroke
         s.setToolTip(tip)
         s.setMinimumWidth(78)
+        # compact inspector fields (Figma-style): arrow keys / wheel still step
+        # the value; the step buttons only ate the room "120,0 mm" needs
+        s.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
         s.setAlignment(Qt.AlignmentFlag.AlignRight)
         return s
 

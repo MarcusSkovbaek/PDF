@@ -487,13 +487,13 @@ class ThumbnailView(QListView):
             rows = [int(x) for x in bytes(md.data(MIME)).decode().split(",") if x]
             ev.setDropAction(Qt.DropAction.MoveAction)
             ev.accept()
-            QTimer.singleShot(0, lambda: self.workspace.move_pages(rows, row))
+            QTimer.singleShot(0, self, lambda: self.workspace.move_pages(rows, row))
             return
         if md.hasUrls():
             files = [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
             ev.setDropAction(Qt.DropAction.CopyAction)
             ev.accept()
-            QTimer.singleShot(0, lambda: self.workspace.insert_files(files, row))
+            QTimer.singleShot(0, self, lambda: self.workspace.insert_files(files, row))
             return
         ev.ignore()
 

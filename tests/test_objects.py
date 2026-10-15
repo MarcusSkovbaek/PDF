@@ -9,7 +9,7 @@ import pytest
 
 from pdfstudio.core import PdfDocument
 from pdfstudio.core import objects as ob
-from tests.conftest import make_png, make_sample_pdf
+from tests.conftest import filled_pixmap, make_png, make_sample_pdf
 
 RED = (220, 30, 30)
 GREEN = (20, 180, 60)
@@ -24,15 +24,11 @@ def png(rgb=RED, w=40, h=30) -> bytes:
 
 
 def jpeg(rgb=GREEN, w=64, h=48) -> bytes:
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, w, h), False)
-    pix.set_rect(pix.irect, rgb)
-    return pix.tobytes("jpeg", jpg_quality=95)
+    return filled_pixmap(w, h, rgb).tobytes("jpeg", jpg_quality=95)
 
 
 def alpha_png(w=30, h=20) -> bytes:
-    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, w, h), True)
-    pix.set_rect(pix.irect, (0, 0, 255, 140))
-    return pix.tobytes("png")
+    return filled_pixmap(w, h, (0, 0, 255, 140), alpha=True).tobytes("png")
 
 
 def build(content: bytes, *, images: dict[str, bytes] | None = None, forms: dict[str, tuple[bytes, dict]] | None = None,
@@ -306,11 +302,19 @@ def test_strings_and_dicts_with_operators_inside():
     tricky = (b"BT /F1 9 Tf 10 10 Td (q Q cm \\) (Do) /Im1 Do) Tj [(a) -20 (b)] TJ <0BDC0A> Tj ET"
               b" % q Q 1 0 0 1 9 9 cm /Im1 Do\n/Q BMC /Span <</ActualText (x>) Q) /Alt true>> BDC EMC EMC\n")
     content = tricky + IMG
-    pdf, _ = build(content, images={"Im1": png()})
-    (img,) = assert_matches_mupdf(pdf.doc, 0)
-    ob.move_image(pdf, 0, img, 5, 5)
-    assert pdf.doc[0].read_contents().startswith(tricky)
-    assert_matches_mupdf(pdf.doc, 0)
+    # the deliberately odd stream makes MuPDF print syntax errors while it
+    # interprets it – expected here, so keep them out of the test output
+    shown = pymupdf.TOOLS.mupdf_display_errors()
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    try:
+        pdf, _ = build(content, images={"Im1": png()})
+        (img,) = assert_matches_mupdf(pdf.doc, 0)
+        ob.move_image(pdf, 0, img, 5, 5)
+        assert pdf.doc[0].read_contents().startswith(tricky)
+        assert_matches_mupdf(pdf.doc, 0)
+    finally:
+        pymupdf.TOOLS.mupdf_display_errors(shown)
+        pymupdf.TOOLS.reset_mupdf_warnings()
 
 
 # ---------------------------------------------------------------------------

@@ -239,3 +239,8 @@ def test_empty_page_panel_counts_images(ws, qapp):
     qapp.processEvents()
     panel.refresh()
     assert "1 billede" in panel.meta.text()
+    # a low-resolution warning does not stick to the "nothing selected" text
+    click(ws.tool, ws.view, 1, CX, CY)
+    assert panel.meta.property("role") == "danger"                  # 40 px over 160 pt = 18 ppi
+    ws.tool.select(None)
+    assert panel.meta.property("role") == "caption"

@@ -34,7 +34,7 @@ import math
 import os
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QLocale, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -58,7 +58,6 @@ from PySide6.QtWidgets import (
     QGraphicsPolygonItem,
     QGraphicsRectItem,
     QGridLayout,
-    QHBoxLayout,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -71,7 +70,7 @@ from ....core.images import SUPPORTED_IMAGE_EXTENSIONS
 from ....i18n import tr
 from ...theme import tokens as T
 from ...theme.icons import icon
-from ...widgets.util import IconButton, label, on_theme_change
+from ...widgets.util import IconButton, label, on_theme_change, set_prop
 from ..render_util import to_qimage
 from .base import Tool, ToolMouseEvent, ToolRegistry
 
@@ -133,7 +132,8 @@ def format_name(obj: core_objects.ImageObject) -> str:
 
 
 def _mm(v: float) -> str:
-    return f"{v * MM_PER_PT:.1f}".replace(".", ",")
+    """Points as millimetres with one decimal, in the UI locale (as the spin boxes)."""
+    return QLocale().toString(v * MM_PER_PT, "f", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +843,9 @@ class _Thumb(QWidget):
                 p.save()
                 p.setClipRect(target)
                 cell = 6
-                light, dark = T.qcolor("surface_raised"), T.qcolor("border")
+                # paper tones in both themes: the image is shown as it sits on the page
+                light = T.qcolor("page")
+                dark = QColor(T.blend("page", "text_subtle", 0.22))
                 y, row = target.top(), 0
                 while y < target.bottom():
                     x, col = target.left(), row % 2
@@ -984,6 +986,7 @@ class ImageObjectPanel(QWidget):
             key = "objects.count.zero" if n == 0 else "objects.count.one" if n == 1 else "objects.count.many"
             self.meta.setText(tr(key, n=n, page=page + 1) if page >= 0 else "")
             self.meta.setVisible(page >= 0)
+            set_prop(self.meta, "role", "caption")
             self.note.setVisible(False)
             self.thumb.set_image(None, False)
             return
@@ -1005,9 +1008,7 @@ class ImageObjectPanel(QWidget):
             meta += "\n" + ", ".join(orient).capitalize()
         self.meta.setText(meta)
         self.meta.setVisible(True)
-        self.meta.setProperty("role", "danger" if 0 < ppi < LOW_PPI else "caption")
-        self.meta.style().unpolish(self.meta)
-        self.meta.style().polish(self.meta)
+        set_prop(self.meta, "role", "danger" if 0 < ppi < LOW_PPI else "caption")
         note = tr("objects.in_form") if obj.in_form else tr("objects.inline") if obj.inline else ""
         self.note.setText(note)
         self.note.setVisible(bool(note))

@@ -71,15 +71,17 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    (`_apply_rich_formats`) and kept on commit by the core. Fixed: zooming while editing now rescales the
    editor text (was only repositioned); the edited paragraph is scrolled into view (Tab below the fold);
    panel shows human font names (`display_font_name`).
-3. Rotated text: the editor is horizontal; consider a rotated overlay (QGraphicsProxyWidget) or a popover.
-4. Font picker: DONE family names rendered in their own font; TODO search field, recently used.
-5. Optional "show all text boxes" outline mode (Acrobat style). DONE: Shift+Tab = previous paragraph.
-6. Key-hint chip placement (now hidden on first keystroke).
+3. DONE: rotated text (vertical, diagonal, rotated pages) is edited in place in a rotated editor.
+4. DONE: font picker with search, "I dokumentet" / "Senest brugt" / "Alle skrifttyper", previews.
+5. DONE: "Vis alle tekstbokse" toggle (visible pages only); Shift+Tab = previous paragraph.
+6. DONE: key-hint chip placed where it covers no text.
+   DONE: wide gaps / table cells in changed lines keep their columns; cells keep their alignment.
+   DONE: Tilføj tekst alignment buttons (left/centre/right) with live preview.
+   OPEN: never-wrapping text: editor frame reaches the page edge (long frame on diagonal stamps).
 7. Real-world stress test (LibreOffice/Word-style PDF with subset CID fonts, justified text, tables, bullets;
    `python tests/stress_edit_all_blocks.py file.pdf` edits every block): no exceptions, alignment/justification,
    bold/italic runs and colours preserved, undo exact. Open: when a changed line contains a wide gap
-   (table cells close enough to be one block, e.g. "2025   2026"), the re-laid line uses normal spaces –
-   keep original glyph positions for the unchanged prefix/suffix of a changed line.
+   (table cells close enough to be one block) – FIXED, see 6.
    FIXED: list items / addresses were treated as one reflowing paragraph (a lengthened item flowed into
    the next one) – soft breaks now use the classic reflow test against the real column width; blocks
    without soft breaks grow sideways. Justified paragraphs are shown in the editor as one Qt-justified

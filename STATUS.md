@@ -1,16 +1,18 @@
 # Status / handover – Folio PDF (paused 2026-10-12 to protect the weekly usage limit)
 
-## >>> START HERE (next session, max/ultra) <<<
-State at pause (2026-10-13): **full suite green in ~50 s, no hangs, no crashes**; an end-to-end run
-(edit text, add text, add image, highlight, note, rotate, 6× undo + redo, save, reopen) verified the saved
-PDF content and validity. Visual review done for every mode, tool and dialog in light + dark.
-Resolved at pause: the "hang" was a test fixture leaking every MainWindow (deleteLater never ran outside an
-event loop → each test restyled all previous windows, 78 s for test_ui_shell); the exit segfault was Qt
-objects left to interpreter finalisation – fixed in tests (`conftest.qapp` teardown) AND in the app
-(`ui.app.shutdown()` after `app.exec()`, clean exit verified).
-Next: work through the optimisation backlogs below, then a QA loop (agent C).
+## >>> START HERE (max-effort review & optimisation) <<<
+State 2026-10-15: all planned features built (four modes, all tools, dialogs), whole-app QA pass done
+(see "QA status" below for verified items, measurements and the ranked list of remaining issues).
+Full suite: 408 tests green in ~60 s on Linux AND on Windows (GitHub Actions).
+Windows installer: `packaging/installer.iss` (Inno Setup, Danish wizard) + `packaging/folio.spec`; the
+workflow `.github/workflows/windows-installer.yml` builds on windows-latest, runs the tests, smoke-tests the
+frozen app and a silent install, and publishes `FolioPDF-Setup-<version>.exe` (~42 MB) as an artifact.
+Suggested order for the review: (1) the ranked QA issues (undo memory per step, reflow of text below a
+grown paragraph, per-page text cache for the editor, block grouping on Word/InDesign PDFs, async search,
+thumbnail cache limit); (2) a code-level review of core/text_edit.py, core/objects.py and the tools for
+simplification; (3) a real-Windows UX pass (HiDPI, font picker popup placement, file associations).
 
-Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (~50 s).
+Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` green (~60 s).
 `QT_QPA_PLATFORM=offscreen python main.py --screenshot out.png --size 1440x900 file.pdf` works.
 Read `CLAUDE.md` first – it is the binding architecture/API contract.
 

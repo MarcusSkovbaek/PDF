@@ -93,6 +93,8 @@ class TextLine:
     space_em: float | None = field(default=None, repr=False)  # measured space advance / size
     char_styles: list = field(default_factory=list, repr=False)  # SpanStyle per char of ``text``
     char_rises: list = field(default_factory=list, repr=False)  # baseline offset per char (pt)
+    char_pos: list = field(default_factory=list, repr=False)  # (start, end) along dir per char (raw)
+    display_dir: tuple[float, float] = field(default=(1.0, 0.0), repr=False)  # dir on screen
 
 
 @dataclass
@@ -106,6 +108,19 @@ class TextBlock:
     @property
     def text(self) -> str:
         return "\n".join(line.text for line in self.lines)
+
+    @property
+    def angle(self) -> float:
+        """Direction of the text as displayed, in degrees (y axis down, so
+        positive is clockwise): 0 = left to right, 90 = top to bottom,
+        -90 = bottom to top, 180 = upside down."""
+        if not self.lines:
+            return 0.0
+        dx, dy = self.lines[0].display_dir
+        a = math.degrees(math.atan2(dy, dx))
+        snapped = round(a / 90.0) * 90.0
+        a = snapped if abs(a - snapped) < 0.05 else a
+        return 180.0 if a <= -180.0 else a + 0.0
 
 
 @dataclass
@@ -259,8 +274,10 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     if all(abs(r) < 0.05 for r in char_rises):
         char_rises = [0.0] * len(used)
 
+    char_pos = [(_dot(c[1], d), _proj_range(c[2], d)[1]) for c in used]
     disp_bbox = pymupdf.Rect(raw_bbox) * rm
     disp_origin = pymupdf.Point(raw_origin) * rm
+    disp_dir = pymupdf.Point(d) * rm - pymupdf.Point(0, 0) * rm
     return TextLine(
         text=text,
         bbox=disp_bbox,
@@ -277,6 +294,8 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
         space_em=space_em,
         char_styles=char_styles,
         char_rises=char_rises,
+        char_pos=char_pos,
+        display_dir=(float(disp_dir.x), float(disp_dir.y)),
     )
 
 
@@ -999,6 +1018,10 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
 
     ctx = _page_context(page, block, d)
     align = _alignment(ctx, old) if all(_is_axis(ln.dir) for ln in old) else "left"
+    if align == "left" and n_old == 1 and _is_axis(d) and not override:
+        # a lone table cell follows its column (right-aligned amounts grow
+        # to the left, centred headers both ways)
+        align = _Columns(first, ctx.others).column_side(*first.extent) or align
     lmin = min(ln.extent[0] for ln in old)
     rmax = max(ln.extent[1] for ln in old)
     at_right = [abs(ln.extent[1] - rmax) <= 1.0 for ln in old]
@@ -1066,9 +1089,12 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         max_width = _available_width(ctx, block, d, align, lmin, rmax, False)
 
     # -- lay out lines (wrap + reflow into the paragraph's next lines) -------
-    layout: list[tuple[list, int, bool]] = []  # (rich, paragraph index, paragraph continues)
+    # (rich, paragraph index, paragraph continues, intact = the whole
+    # paragraph on one line without text carried over from the line above)
+    layout: list[tuple[list, int, bool, bool]] = []
     carry: list = []
     for i, rich in enumerate(paragraphs):
+        carried = bool(carry)
         if carry:
             body = rich
             while body and body[0][0] == " ":
@@ -1083,17 +1109,17 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
                 and _rich_text(paragraphs[i + 1]).strip():
             carry = [c for p in pieces[1:] for c in (p + [(" ", p[-1][1], p[-1][2])])][:-1]
             pieces = pieces[:1]
-            layout.append((pieces[0], i, True))
+            layout.append((pieces[0], i, True, False))
             continue
         para_goes_on = (soft_break_after(i) and i + 1 < len(paragraphs)
                         and bool(_rich_text(paragraphs[i + 1]).strip()))
         for k, piece in enumerate(pieces):
-            layout.append((piece, i, k < len(pieces) - 1 or para_goes_on))
+            layout.append((piece, i, k < len(pieces) - 1 or para_goes_on, not carried and len(pieces) == 1))
 
     o0 = first.raw_origin
     remove: list[TextLine] = []
     runs: list[TextRun] = []
-    for j, (rich, pi, continues) in enumerate(layout):
+    for j, (rich, pi, continues, intact) in enumerate(layout):
         if j < n_old:
             base = old[j].raw_origin
             ld = old[j].dir
@@ -1131,6 +1157,19 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         if (justified_block and continues and j < n_old - 1 and at_right[j] and n_spaces
                 and 0.6 * (rmax - target) <= width < rmax - target):
             extra = (rmax - target - width) / n_spaces
+        if (j < n_old and pi == j and intact and not override and not extra and _is_axis(ld)
+                and len(old[j].char_pos) == len(old[j].text)
+                and not (justified_block and at_right[j] and j < n_old - 1)):
+            # a line edited in place: keep the old geometry (unchanged words,
+            # gap widths, table columns) instead of re-typesetting it
+            pieces = _place_line(rich, old[j], em, font_of, align=align,
+                                 columns=_Columns(old[j], ctx.others + old))
+            b0 = _dot(base, ld)
+            for piece, x in pieces:
+                off = x - b0
+                runs.extend(_emit_line(piece, (base[0] + ld[0] * off, base[1] + ld[1] * off), ld, em, 0.0,
+                                       font_of))
+            continue
         shift = target - _dot(base, ld)
         origin = (base[0] + ld[0] * shift, base[1] + ld[1] * shift)
         runs.extend(_emit_line(rich, origin, ld, em, extra, font_of))
@@ -1179,6 +1218,275 @@ def _wrap_rich(rich, width: float, measure) -> list[list]:
     if cur:
         lines.append(cur)
     return lines or [rich]
+
+
+def _cell_edges(line: TextLine) -> list[tuple[float, float]]:
+    """(start, end) along the writing direction of the "cells" of a line:
+    runs of glyphs separated by gaps wider than a usual word space."""
+    if len(line.char_pos) != len(line.text):
+        return [line.extent]
+    vis = [i for i, c in enumerate(line.text) if not c.isspace()]
+    if not vis:
+        return []
+    out = []
+    start, prev = line.char_pos[vis[0]][0], vis[0]
+    for i in vis[1:]:
+        if line.char_pos[i][0] - line.char_pos[prev][1] > 0.3 * line.style.size:
+            out.append((start, line.char_pos[prev][1]))
+            start = line.char_pos[i][0]
+        prev = i
+    out.append((start, line.char_pos[prev][1]))
+    return out
+
+
+class _Columns:
+    """Table columns around a line, seen through the cells of nearby lines
+    (rows): which edge of a cell lines up with the cells above and below."""
+
+    TOL = 0.75  # pt
+
+    def __init__(self, line: TextLine, neighbours: list[TextLine]) -> None:
+        d, n = line.dir, _perp(line.dir)
+        here = _dot(line.raw_origin, n)
+        reach = 30.0 * max(line.style.size, 1.0)
+        self.edges = [e for ln in neighbours
+                      if ln is not line and abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3
+                      and abs(_dot(ln.raw_origin, n) - here) <= reach
+                      for e in _cell_edges(ln)]
+
+    def votes(self, start: float, end: float) -> dict[str, int]:
+        tol = self.TOL
+        votes = {"left": 0, "right": 0, "center": 0}
+        for s0, e0 in self.edges:
+            same_l, same_r = abs(s0 - start) <= tol, abs(e0 - end) <= tol
+            if same_l and same_r:
+                continue  # an identical cell says nothing about alignment
+            if same_l:
+                votes["left"] += 1
+            elif same_r:
+                votes["right"] += 1
+            elif abs((s0 + e0) / 2 - (start + end) / 2) <= tol:
+                votes["center"] += 1
+        return votes
+
+    def evidence(self, start: float, end: float) -> int:
+        """How many cells of other rows share an edge or the centre."""
+        tol = self.TOL
+        return sum(1 for s0, e0 in self.edges
+                   if abs(s0 - start) <= tol or abs(e0 - end) <= tol
+                   or abs((s0 + e0) / 2 - (start + end) / 2) <= tol)
+
+    def column_side(self, start: float, end: float) -> str | None:
+        """"right" / "center" when at least two other rows say the cell's
+        column is aligned that way, else None."""
+        votes = self.votes(start, end)
+        best = max(("right", "center"), key=votes.get)
+        return best if votes[best] >= 2 and votes[best] > votes["left"] else None
+
+    def side(self, start: float, end: float) -> str | None:
+        """"left" | "right" | "center": how the cell sits in its column
+        (None: no other row shares an edge with it)."""
+        votes = self.votes(start, end)
+        if not any(votes.values()):
+            return None
+        best = max(votes, key=votes.get)
+        return best if votes[best] > votes["left"] else "left"
+
+
+def _place_line(rich, old: TextLine, em, font_of, *, align: str = "left",
+                columns: _Columns | None = None) -> list[tuple[list, float]]:
+    """Lay out a changed line that replaces ``old`` in place, keeping as much
+    of the old geometry as possible. Returns pieces of rich text with their
+    start along the line direction (raw page space).
+
+    * a left-aligned line starts where it did and words starting in its
+      unchanged beginning stay exactly where they were – no drift from
+      kerning or character spacing; right-aligned / centred lines keep their
+      end / centre;
+    * gaps that survive from the old line keep their old width;
+    * a gap clearly wider than a word space (table cells, tab stops), or a
+      slightly wide one followed by text that lines up with cells of nearby
+      rows (``columns``), starts a new *cell* that returns to its old column
+      – keeping its left edge, or its right edge / centre when the column is
+      aligned that way – unless the text before it now reaches that far
+      (not in centred lines, which are re-centred as a whole);
+    * the unchanged end of a cell keeps its internal geometry.
+
+    New words and gaps get their natural width. Old positions are only
+    trusted when the font we write with has the old glyph widths (otherwise
+    pinned words could overlap)."""
+    import difflib
+
+    text = _rich_text(rich)
+    old_text, pos = old.text, old.char_pos
+    n_new, n_old = len(text), len(old_text)
+    to_old: list[int | None] = [None] * n_new
+    for tag, i1, _i2, j1, j2 in difflib.SequenceMatcher(None, old_text, text, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for k in range(j2 - j1):
+                to_old[j1 + k] = i1 + k
+    lim = min(n_new, n_old)
+    prefix = 0
+    while prefix < lim and text[prefix] == old_text[prefix]:
+        prefix += 1
+    suffix = 0
+    while suffix < lim - prefix and text[-1 - suffix] == old_text[-1 - suffix]:
+        suffix += 1
+    suffix_from, to_old_suffix = n_new - suffix, n_old - n_new
+
+    def natural(a: int, b: int) -> float:
+        return sum(text_width(font_of(st), t, st.size, em * st.size if em else None)
+                   for t, st, _r in _runs(rich[a:b]))
+
+    def space_width(st: SpanStyle) -> float:
+        try:
+            return text_width(font_of(st), " ", st.size, em * st.size if em else None)
+        except KeyError:  # a style that no longer occurs in the text
+            return (old.space_em or 0.28) * st.size
+
+    tokens = [(m.start(), m.end()) for m in re.finditer(r"[^ ]+| +", text)]
+
+    # do the old glyph widths match the fonts we write with?
+    nat_sum = old_sum = 0.0
+    for a, b in tokens:
+        ia = to_old[a]
+        if text[a] == " " or ia is None or any(to_old[k] != ia + k - a for k in range(a, b)):
+            continue
+        nat_sum += natural(a, b)
+        old_sum += pos[ia + b - a - 1][1] - pos[ia][0]
+    faithful = old_sum > 0 and abs(nat_sum - old_sum) <= max(0.6, 0.02 * old_sum)
+
+    # the old line's gaps: (first, last char index, width, starts a cell)
+    old_gaps: list[tuple[int, int, float, bool]] = []
+    i = 0
+    while i < n_old:
+        if not old_text[i].isspace():
+            i += 1
+            continue
+        lo = i
+        while i < n_old and old_text[i].isspace():
+            i += 1
+        hi = i - 1
+        if lo == 0 or hi == n_old - 1:
+            continue
+        st = old.char_styles[lo] if len(old.char_styles) == n_old else old.style
+        width = pos[hi + 1][0] - pos[lo - 1][1]
+        normal = space_width(st) * (hi - lo + 1)
+        old_gaps.append([lo, hi, width, width > normal + max(0.25 * st.size, 0.6 * normal)])
+    if columns is not None:
+        # a slightly wide gap is a cell boundary too when the text after it
+        # lines up with cells of other rows (compact tables)
+        for g in old_gaps:
+            if not g[3] and g[2] > space_width(old.style) * (g[1] - g[0] + 1) + 0.6:
+                start = pos[g[1] + 1][0]
+                stop = next((h[0] for h in old_gaps if h[0] > g[1] and h[3]), n_old)
+                last = max(k for k in range(g[1] + 1, stop) if not old_text[k].isspace())
+                g[3] = columns.evidence(start, pos[last][1]) >= 2
+
+    def old_gap(ga: int, gb: int) -> list | None:
+        """The old gap that the new gap ``text[ga:gb]`` continues."""
+        for k in range(ga, gb):
+            i = to_old[k]
+            if i is not None and old_text[i].isspace():
+                return next((g for g in old_gaps if g[0] <= i <= g[1]), None)
+        return None
+
+    def old_cell_end(first: int) -> float:
+        """End of the old cell that starts at old char ``first``."""
+        stop = next((g[0] for g in old_gaps if g[3] and g[0] > first), n_old)
+        last = max(k for k in range(first, stop) if not old_text[k].isspace())
+        return pos[last][1]
+
+    # split the new line into cells at gaps that continue a wide old gap
+    cells: list[tuple[tuple | None, list[tuple[int, int]]]] = [(None, [])]
+    for a, b in tokens:
+        if text[a] == " " and align != "center" and any(text[k] != " " for k in range(a)):
+            g = old_gap(a, b)
+            if g is not None and g[3] and b < n_new:
+                cells.append((((a, b), g), []))
+                continue
+        cells[-1][1].append((a, b))
+    if not cells[0][1]:
+        cells.pop(0)
+
+    def lay(cell: list[tuple[int, int]], x0: float, cursor: float | None, first_cell: bool,
+            pin_prefix: bool) -> tuple[list[list], float | None]:
+        """Place the words of one cell, the first one at ``x0``."""
+        pieces: list[list] = []
+        gap: tuple[int, int] | None = None
+        delta: float | None = None  # shift of the unchanged end of the cell
+        for a, b in cell:
+            if text[a] == " ":
+                gap = (a, b)
+                continue
+            nat_gap = natural(*gap) if gap else 0.0
+            if not pieces:
+                flow = x0 + (nat_gap if first_cell else 0.0)
+            else:
+                flow = cursor + nat_gap
+            x = flow
+            prev = old_gap(*gap) if gap is not None and pieces else None
+            if pin_prefix and faithful and a < prefix:
+                x = pos[a][0]                  # unchanged beginning: exact old position
+            elif faithful and a >= suffix_from and delta is not None:
+                x = pos[a + to_old_suffix][0] + delta
+            elif prev is not None:
+                x = cursor + prev[2]           # keep the old gap width
+            if cursor is not None:
+                x = max(x, cursor + 0.5 * (nat_gap or space_width(rich[a][1])))  # never touch
+            if faithful and a >= suffix_from:
+                delta = x - pos[a + to_old_suffix][0]
+            if pieces and gap is not None and abs(x - flow) < 0.01:
+                pieces[-1][1] = b              # natural flow: same piece
+            else:
+                pieces.append([a, b, x])
+            cursor = x + natural(a, b)
+            ia = to_old[a]
+            if (faithful and ia is not None and all(to_old[k] == ia + k - a for k in range(a + 1, b))
+                    and not any(pos[i][1] - pos[i][0] < 0.05 * rich[a][1].size for i in range(ia, ia + b - a))):
+                # a word of the old line (not drawn with ligatures, whose parts
+                # have no width of their own): keep its glyph positions (kerning)
+                start, sx = a, x
+                for k in range(a + 1, b):
+                    old_x = x + pos[ia + k - a][0] - pos[ia][0]
+                    diff = abs(old_x - (sx + natural(start, k)))
+                    if 0.02 < diff <= 0.15 * rich[k][1].size:
+                        pieces[-1][1] = k
+                        pieces.append([k, b, old_x])
+                        start, sx = k, old_x
+                cursor = sx + natural(start, b)
+            gap = None
+        return pieces, cursor
+
+    out: list[list] = []
+    cursor: float | None = None
+    multi = len(cells) > 1
+    for k, (lead, cell) in enumerate(cells):
+        if lead is None:
+            first_old, start_x = 0, old.extent[0]
+        else:
+            (_ga, _gb), g = lead
+            first_old, start_x = g[1] + 1, pos[g[1] + 1][0]
+        end_x = old_cell_end(first_old) if multi else old.extent[1]
+        if multi:
+            side = columns.side(start_x, end_x) if columns is not None else None
+            if side is None:  # no rows to compare with: follow the line
+                side = "right" if align == "right" and k == len(cells) - 1 else "left"
+        else:
+            side = align
+        if side == "left":
+            x0 = start_x
+        else:
+            _dry, end = lay(cell, 0.0, None, lead is None, False)
+            width = end or 0.0  # from x0 (incl. leading spaces) to the last glyph
+            x0 = end_x - width if side == "right" else (start_x + end_x) / 2 - width / 2
+        if lead is not None and cursor is not None:
+            x0 = max(x0, cursor + natural(*lead[0]))  # the text before reaches into the column
+        pieces, end = lay(cell, x0, cursor, lead is None, side == "left")
+        out.extend(pieces)
+        if end is not None:
+            cursor = end
+    return [(rich[a:b], x) for a, b, x in out]
 
 
 def _emit_line(rich, origin, d, em, extra: float, font_of) -> list[TextRun]:

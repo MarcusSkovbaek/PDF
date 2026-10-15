@@ -577,3 +577,130 @@ def test_justified_paragraph_reports_soft_breaks():
     par = next(b for b in te.text_blocks(pdf.doc, 0) if b.text.startswith("Kvartalets"))
     info = te.layout_info(pdf.doc, par)
     assert info.justified and info.soft_breaks == tuple(range(len(par.lines) - 1))
+
+
+# -- changed lines keep their old geometry (table cells, unchanged words) -------------
+def _words(page, clip=None):
+    """[(word, x0 of its first glyph origin, x1)] in raw page space, reading order."""
+    out = []
+    for b in page.get_text("rawdict", clip=clip)["blocks"]:
+        for ln in b.get("lines", ()):
+            cur = []
+            for s in ln["spans"]:
+                for ch in s["chars"]:
+                    if ch["c"].isspace():
+                        if cur:
+                            out.append(cur)
+                        cur = []
+                    else:
+                        cur.append(ch)
+            if cur:
+                out.append(cur)
+    return [("".join(c["c"] for c in w), w[0]["origin"][0], w[-1]["bbox"][2]) for w in out]
+
+
+def _raw_text_doc(content: bytes, rotation: int = 0) -> PdfDocument:
+    """A page whose content stream is ``content`` (Helvetica as /helv)."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_text((72, 100), "x", fontname="helv", fontsize=12)   # registers /helv
+    doc.update_stream(pg.get_contents()[0], content)
+    if rotation:
+        pg.set_rotation(rotation)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def _table_line_doc(rotation=0):
+    """One line with two table cells 7 pt apart, positioned like office
+    suites do it (TJ offsets, no space character)."""
+    pdf = _raw_text_doc(b"BT /helv 10 Tf 1 0 0 1 100 742 Tm [(2025) -700 (2026)] TJ ET", rotation)
+    return pdf, 100 + pymupdf.get_text_length("2025", "helv", 10) + 7
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_wide_gap_in_changed_line_keeps_the_column(rotation):
+    pdf, col = _table_line_doc(rotation)
+    (blk,) = text_blocks(pdf.doc, 0)
+    assert blk.text == "2025 2026" and len(blk.lines) == 1
+    replace_block_text(pdf, blk, "2025 2027")
+    words = dict((w, x) for w, x, _x1 in _words(pdf.doc[0]))
+    assert words["2025"] == pytest.approx(100, abs=0.05)
+    assert words["2027"] == pytest.approx(col, abs=0.05)          # not collapsed to a word space
+    (blk,) = text_blocks(pdf.doc, 0)
+    replace_block_text(pdf, blk, "2025, 2027")                     # the first cell grows into the gap
+    words = dict((w, x) for w, x, _x1 in _words(pdf.doc[0]))
+    assert words["2027"] == pytest.approx(col, abs=0.05)
+    (blk,) = text_blocks(pdf.doc, 0)
+    replace_block_text(pdf, blk, "1202520252025 2027")             # ... and pushes it when it must
+    (a, xa, ea), (b, xb, _eb) = _words(pdf.doc[0])
+    assert (a, b) == ("1202520252025", "2027") and xb > col and xb - ea > 2.0
+
+
+def _compact_table_doc():
+    """Rows "label  num  num" with right-aligned number columns 4 pt apart."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    rows = [("Q1", "101,5", "112,0"), ("Q2", "98,7", "120,4"), ("Q3", "110,2", "99,9")]
+    for k, (label, a, b) in enumerate(rows):
+        y = 100 + 18 * k
+        pg.insert_text((60, y), label, fontname="helv", fontsize=10)
+        for text, right in ((a, 120.0), (b, 150.0)):
+            pg.insert_text((right - pymupdf.get_text_length(text, "helv", 10), y), text, fontname="helv", fontsize=10)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def test_compact_table_cells_keep_their_right_edge():
+    pdf = _compact_table_doc()
+    row = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("98,7"))
+    assert row.text == "98,7 120,4"
+    replace_block_text(pdf, row, "98,7 7,5")
+    words = {w: (x0, x1) for w, x0, x1 in _words(pdf.doc[0], clip=row.bbox + (-20, -2, 20, 2))}
+    assert words["98,7"][1] == pytest.approx(120, abs=0.1)
+    assert words["7,5"][1] == pytest.approx(150, abs=0.1)          # right-aligned like its column
+    row = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("98,7"))
+    assert row.text == "98,7"                                      # the cells are blocks of their own now
+    from pdfstudio.core.text_edit import layout_info
+
+    assert layout_info(pdf.doc, row).align == "right"              # ... in a right-aligned column
+    replace_block_text(pdf, row, "1.098,7")                        # so it grows to the left
+    words = {w: (x0, x1) for w, x0, x1 in _words(pdf.doc[0], clip=row.bbox + (-20, -2, 40, 2))}
+    assert words["1.098,7"][1] == pytest.approx(120, abs=0.1)
+    assert words["7,5"][1] == pytest.approx(150, abs=0.1)
+    row = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("1.098,7"))
+    replace_block_text(pdf, row, "1.098,7 7,5")                    # (typing a cell into another)
+
+
+def test_unchanged_beginning_of_a_changed_line_is_pixel_identical():
+    # kerned glyph positions (TJ) that the font's own advances would not reproduce
+    pdf = _raw_text_doc(b"BT /helv 12 Tf 1 0 0 1 72 700 Tm [(Om) 30 (s) -20 (\\346tning i alt) -400 (410,5 mio.)] TJ ET")
+    (blk,) = text_blocks(pdf.doc, 0)
+    assert blk.text.startswith("Omsætning i alt")
+    page = pdf.doc[0]
+    clip = pymupdf.Rect(blk.bbox.x0 - 2, blk.bbox.y0 - 2, blk.bbox.x0 + 100, blk.bbox.y1 + 2)
+    before = pix(page, clip).samples
+    words_before = _words(page)
+    replace_block_text(pdf, blk, blk.text.replace("410,5", "411,0"))
+    page = pdf.doc[0]
+    assert pix(page, clip).samples == before                     # "Omsætning i alt" did not move
+    after = dict((w, x) for w, x, _x1 in _words(page))
+    assert after["411,0"] == pytest.approx(dict((w, x) for w, x, _ in words_before)["410,5"], abs=0.05)
+
+
+def test_centred_and_justified_lines_still_relayout():
+    pdf = _aligned_doc()
+    blk = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Centreret"))
+    c = (blk.lines[0].bbox.x0 + blk.lines[0].bbox.x1) / 2
+    replace_block_text(pdf, blk, blk.text.replace("Centreret linje", "Centreret linje der er længere"))
+    new = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Centreret"))
+    assert (new.lines[0].bbox.x0 + new.lines[0].bbox.x1) / 2 == pytest.approx(c, abs=0.6)
+
+
+def test_block_angle_in_display_space(pdf):
+    assert text_blocks(pdf.doc, 0)[0].angle == 0
+    (rot,) = text_blocks(pdf.doc, 2)               # horizontal text on a page rotated by 90
+    assert rot.angle == 90
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((100, 500), "Lodret tekst", fontname="helv", fontsize=12, rotate=90)
+    up = PdfDocument.from_bytes(doc.tobytes())
+    assert text_blocks(up.doc, 0)[0].angle == -90   # reads bottom to top

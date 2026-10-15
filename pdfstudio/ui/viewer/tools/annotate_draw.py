@@ -1,12 +1,13 @@
 """Drawing tools of "Kommentér": Note, Tegn (freehand ink) and Figur
 (rectangle / ellipse / line / arrow). Live previews are scene overlays in
-display coordinates; the annotation is created on release (one undo step)."""
+display coordinates; the annotation is created on release (one undo step).
+The inspector shows a sample of the style (hovering a swatch previews it)."""
 
 from __future__ import annotations
 
 import math
 
-from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
+from PySide6.QtCore import QLineF, QPointF, QRectF, QSettings, Qt
 from PySide6.QtGui import QBrush, QPainterPath, QPen
 from PySide6.QtWidgets import QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsPathItem, QGraphicsRectItem, QWidget
 
@@ -14,8 +15,8 @@ from ....core import annotations as core_annots
 from ....i18n import tr
 from ...widgets.color_button import to_qcolor
 from ...widgets.segmented import Segment, SegmentedControl
-from ._annot_common import PRESETS, AnnotStyle, AnnotStylePanel, ask_note
-from .base import Tool, ToolMouseEvent, ToolRegistry
+from ._annot_common import PRESETS, AnnotStyle, StyledTool, ask_note
+from .base import ToolMouseEvent, ToolRegistry
 
 MIN_DRAG = 3.0  # pt; smaller drags count as clicks
 
@@ -29,30 +30,7 @@ def _pen(style: AnnotStyle) -> QPen:
     return pen
 
 
-class _StyledTool(Tool):
-    mode = "annotate"
-    default_style = AnnotStyle(PRESETS[5], 1.0, 2.0)
-    panel_width = True
-    panel_fill = False
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.style = AnnotStyle.load(self.id, self.default_style)
-        self._panel: AnnotStylePanel | None = None
-
-    def extra_widget(self) -> QWidget | None:
-        return None
-
-    def properties_widget(self):
-        if self._panel is None:
-            self._panel = AnnotStylePanel(self.label, self.hint, self.style, width=self.panel_width,
-                                          fill=self.panel_fill, extra=self.extra_widget())
-            self._panel.styleChanged.connect(self._style_changed)
-        return self._panel
-
-    def _style_changed(self, style: AnnotStyle) -> None:
-        self.style = style
-        style.save(self.id)
+_StyledTool = StyledTool  # backwards compatible name
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +45,7 @@ class NoteTool(_StyledTool):
     cursor = Qt.CursorShape.CrossCursor
     default_style = AnnotStyle(PRESETS[0], 1.0)
     panel_width = False
+    sample_kind = "note"
 
     def mouse_release(self, ev: ToolMouseEvent) -> None:
         if ev.page < 0 or ev.button != Qt.MouseButton.LeftButton:
@@ -88,6 +67,7 @@ class InkTool(_StyledTool):
     order = 50
     cursor = Qt.CursorShape.CrossCursor
     default_style = AnnotStyle(PRESETS[4], 1.0, 2.0)
+    sample_kind = "ink"
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -150,11 +130,10 @@ class ShapeTool(_StyledTool):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        from PySide6.QtCore import QSettings
-
         self.kind = str(QSettings().value("annot/shape_kind", "rect"))
         if self.kind not in core_annots.SHAPE_KINDS:
             self.kind = "rect"
+        self.sample_kind = self.kind  # the inspector sample shows the chosen shape
         self._page = -1
         self._start = QPointF()
         self._item = None
@@ -171,10 +150,11 @@ class ShapeTool(_StyledTool):
         return seg
 
     def set_kind(self, kind: str) -> None:
-        from PySide6.QtCore import QSettings
-
-        self.kind = kind
+        self.kind = self.sample_kind = kind
         QSettings().setValue("annot/shape_kind", kind)
+        if self._panel is not None and self._panel.sample is not None:
+            self._panel.sample.kind = kind
+            self._panel.sample.update()
 
     def _end(self, ev: ToolMouseEvent) -> QPointF:
         p = ev.pos_on(self._page)

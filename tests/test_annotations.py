@@ -385,3 +385,195 @@ def test_add_markup_lines_rotated_page(sample_pdf):
     info = list_annotations(sample_pdf.doc, 2)[-1]
     w, h = page_display_size(sample_pdf.doc, 2)
     assert info.rect.intersects(hit) and info.rect.x1 <= w + 1 and info.rect.y1 <= h + 1
+
+
+# -- free text (typewriter) --------------------------------------------------------------
+from pdfstudio.core.annotations import (  # noqa: E402
+    add_free_text,
+    annotations_in_rect,
+    delete_annotations,
+    free_text_size,
+    move_annotations,
+    render_preview,
+    update_annotations,
+)
+
+DANISH = "Blåbærgrød på Ærø\nÆØÅ æøå"
+
+
+def center(r: pymupdf.Rect) -> pymupdf.Point:
+    return pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+
+
+def display_words(pdf, page: int) -> dict[str, pymupdf.Rect]:
+    pg = pdf.page(page)
+    return {w[4]: pymupdf.Rect(w[:4]) * pg.rotation_matrix for w in pg.get_text("words")}
+
+
+@pytest.mark.parametrize("page", [0, 2])
+def test_free_text_danish_on_plain_and_rotated_page(sample_pdf, page):
+    w, h = free_text_size(DANISH, 14)
+    rect = pymupdf.Rect(100, 400, 100 + w, 400 + h)
+    xref = add_free_text(sample_pdf, page, rect, DANISH, RED, 14)
+    assert sample_pdf.history.undo_label == "Tilføj tekstfelt"
+    info = next(i for i in list_annotations(sample_pdf, page) if i.xref == xref)
+    assert info.kind == "freetext" and info.contents == DANISH
+    assert close(info.rect, rect, 0.5)
+    assert close(info.color, RED, 0.01) and info.fontsize == 14 and info.font == "sans"
+    assert info.fill is None and info.opacity == 1.0
+    words = display_words(sample_pdf, page)
+    for word in ("Blåbærgrød", "Ærø", "ÆØÅ", "æøå"):          # really written, in display space
+        assert word in words, word
+        assert rect.contains(center(words[word]))
+    first = words["Blåbærgrød"]
+    assert first.width > first.height                          # reads upright on the rotated page too
+    assert first.x0 == pytest.approx(rect.x0, abs=1.0)
+    # rendered red where it was put
+    pix = render_page(sample_pdf.doc, page, 2.0, clip=first)
+    reds = sum(1 for y in range(pix.height) for x in range(pix.width)
+               if (lambda p: p[0] > 150 and p[1] < 110 and p[2] < 110)(pix.pixel(x, y)))
+    assert reds > 20
+    assert annotation_at(sample_pdf, page, center(first)).xref == xref
+
+
+def test_free_text_size_and_wrapping(sample_pdf):
+    w1, h1 = free_text_size("Blåbærgrød på Ærø", 12)
+    assert h1 == pytest.approx(1.3 * 12, abs=0.01)             # one line (1.2 em) + a little room
+    assert w1 > pymupdf.Font("helv").text_length("Blåbærgrød på Ærø", 12)   # æøå measured correctly
+    text = "Dette er en lang tekst som skal ombrydes i et smalt felt"
+    w2, h2 = free_text_size(text, 12, "serif", width=110)
+    assert w2 == 110 and h2 > 2 * 1.2 * 12                     # wraps onto several lines
+    xref = add_free_text(sample_pdf, 1, (320, 500, 320 + w2, 500 + h2), text, BLUE, 12, font="serif")
+    pg = sample_pdf.page(1)
+    words = [w for w in pg.get_text("words", clip=pymupdf.Rect(318, 498, 434, 502 + h2))]
+    assert " ".join(w[4] for w in words) == text               # nothing clipped away
+    assert list_annotations(sample_pdf, 1)[-1].font == "serif" and xref
+
+
+def test_free_text_outside_winansi_is_kept(sample_pdf):
+    text = "Łódź Ω 25 €"
+    w, h = free_text_size(text, 12)
+    add_free_text(sample_pdf, 0, (100, 600, 100 + w, 600 + h), text, BLUE, 12)
+    got = " ".join(w[4] for w in sample_pdf.page(0).get_text("words", clip=(98, 598, 102 + w, 602 + h)))
+    assert got == text
+
+
+def test_free_text_update_and_undo(sample_pdf):
+    xref = add_free_text(sample_pdf, 2, (100, 100, 300, 140), "Før", RED, 12)
+    update_annotation(sample_pdf, 2, xref, contents="Efter – æøå", fontsize=18, color=BLUE, font="mono",
+                      fill=(1.0, 1.0, 0.8), opacity=0.5, rect=(120, 110, 320, 150))
+    info = list_annotations(sample_pdf, 2)[0]
+    assert info.contents == "Efter – æøå" and info.fontsize == 18 and info.font == "mono"
+    assert close(info.color, BLUE, 0.01) and close(info.fill, (1, 1, 0.8), 0.01)
+    assert abs(info.opacity - 0.5) < 0.01 and close(info.rect, (120, 110, 320, 150), 0.5)
+    assert "Efter" in display_words(sample_pdf, 2)
+    update_annotation(sample_pdf, 2, xref, fill=None)
+    assert list_annotations(sample_pdf, 2)[0].fill is None
+    sample_pdf.undo()
+    sample_pdf.undo()
+    info = list_annotations(sample_pdf, 2)[0]
+    assert info.contents == "Før" and info.fontsize == 12 and close(info.color, RED, 0.01)
+
+
+def test_free_text_validation(sample_pdf):
+    for kwargs in ({"text": "  "}, {"font": "comic"}, {"fontsize": 0}, {"color": (2, 0, 0)}):
+        args = {"text": "x", "font": "sans", "fontsize": 12, "color": RED, **kwargs}
+        with pytest.raises(ValueError):
+            add_free_text(sample_pdf, 0, (10, 10, 100, 40), args["text"], args["color"], args["fontsize"],
+                          font=args["font"])
+    with pytest.raises(ValueError):
+        add_free_text(sample_pdf, 0, (10, 10, 10, 40), "x")
+    assert not sample_pdf.history.can_undo
+
+
+def test_free_text_is_a_standard_annotation_after_save(sample_pdf, tmp_path):
+    w, h = free_text_size(DANISH, 12)
+    add_free_text(sample_pdf, 2, (100, 200, 100 + w, 200 + h), DANISH, BLUE, 12)
+    out = str(tmp_path / "freetext.pdf")
+    sample_pdf.save(out)
+    doc = pymupdf.open(out)
+    page = doc[2]
+    annot = next(page.annots())
+    assert annot.type[1] == "FreeText" and annot.info["content"] == DANISH
+    assert doc.xref_get_key(annot.xref, "AP/N")[0] == "xref"        # has an appearance stream
+    assert "Tf" in doc.xref_get_key(annot.xref, "DA")[1]
+    words = {w[4] for w in page.get_text("words")}
+    assert {"Blåbærgrød", "ÆØÅ"} <= words
+    doc.close()
+
+
+# -- group operations ---------------------------------------------------------------------
+def test_update_annotations_is_one_step(sample_pdf):
+    a = add_shape(sample_pdf, 0, "rect", (100, 300), (200, 400), RED)
+    b = add_ink(sample_pdf, 1, [[(100, 100), (150, 150)]], RED)
+    update_annotations(sample_pdf, [(0, a, {"color": BLUE}), (1, b, {"color": BLUE, "width": 4})])
+    assert sample_pdf.history.undo_label == "Redigér kommentarer"
+    assert close(list_annotations(sample_pdf, 0)[0].color, BLUE, 0.01)
+    assert list_annotations(sample_pdf, 1)[0].width == 4
+    sample_pdf.undo()
+    assert close(list_annotations(sample_pdf, 0)[0].color, RED, 0.01)
+    assert close(list_annotations(sample_pdf, 1)[0].color, RED, 0.01)
+    with pytest.raises(TypeError):
+        update_annotations(sample_pdf, [(0, a, {"colour": BLUE})])
+
+
+def test_move_annotations_together_and_merge_nudges(sample_pdf):
+    a = add_shape(sample_pdf, 2, "rect", (100, 100), (200, 150), RED)
+    b = add_free_text(sample_pdf, 2, (300, 100, 400, 130), "Æble", BLUE)
+    start = {i.xref: i.rect for i in list_annotations(sample_pdf, 2)}
+    move_annotations(sample_pdf, [(2, a), (2, b)], 10, 5)
+    assert sample_pdf.history.undo_label == "Flyt kommentarer"
+    depth = len(sample_pdf.history._undo)
+    for _ in range(3):                                             # a burst of nudges
+        move_annotations(sample_pdf, [(2, a), (2, b)], 1, 0, merge=True)
+    assert len(sample_pdf.history._undo) == depth                 # folded into the first move
+    now = {i.xref: i.rect for i in list_annotations(sample_pdf, 2)}
+    for x in (a, b):
+        assert close(now[x], start[x] + (13, 5, 13, 5), 0.5)
+    sample_pdf.undo()
+    back = {i.xref: i.rect for i in list_annotations(sample_pdf, 2)}
+    for x in (a, b):
+        assert close(back[x], start[x], 0.5)
+    # merge only folds into a previous *move*
+    update_annotation(sample_pdf, 2, a, color=BLUE)
+    move_annotations(sample_pdf, [(2, a)], 1, 1, merge=True)
+    assert sample_pdf.history.undo_label == "Flyt kommentar"
+    sample_pdf.undo()
+    assert sample_pdf.history.undo_label == "Redigér kommentar"
+
+
+def test_delete_annotations_is_one_step(sample_pdf):
+    a = add_note(sample_pdf, 0, (50, 50), "a", RED)
+    b = add_shape(sample_pdf, 0, "ellipse", (100, 300), (200, 400), RED)
+    c = add_shape(sample_pdf, 1, "line", (100, 300), (200, 400), RED)
+    delete_annotations(sample_pdf, [(0, a), (0, b), (1, c)])
+    assert sample_pdf.history.undo_label == "Slet kommentarer"
+    assert list_annotations(sample_pdf, 0) == [] and list_annotations(sample_pdf, 1) == []
+    sample_pdf.undo()
+    assert [i.xref for i in list_annotations(sample_pdf, 0)] == [a, b]
+    assert [i.xref for i in list_annotations(sample_pdf, 1)] == [c]
+
+
+def test_annotations_in_rect(sample_pdf):
+    a = add_shape(sample_pdf, 2, "rect", (100, 100), (200, 150), RED)
+    b = add_shape(sample_pdf, 2, "line", (300, 120), (400, 120), RED)   # zero-height geometry
+    add_shape(sample_pdf, 2, "rect", (100, 500), (200, 550), RED)
+    hits = [i.xref for i in annotations_in_rect(sample_pdf, 2, (150, 110, 350, 125))]
+    assert hits == [a, b]
+    assert [i.xref for i in annotations_in_rect(sample_pdf, 2, (90, 90, 250, 160), contained=True)] == [a]
+
+
+def test_render_preview_leaves_document_untouched(sample_pdf):
+    xref = add_shape(sample_pdf, 2, "rect", (100, 100), (200, 150), RED, fill=RED)
+    depth = len(sample_pdf.history._undo)
+    pix = render_preview(sample_pdf.doc, 2, {xref: {"color": BLUE, "fill": BLUE}}, 1.0, clip=(90, 90, 210, 160))
+    assert pix is not None and (pix.x, pix.y) == (90, 90)
+    r, g, b = pix.pixel(60, 35)                                   # the middle of the rect
+    assert b > 200 and r < 60
+    hidden = render_preview(sample_pdf.doc, 2, {xref: None}, 1.0, clip=(90, 90, 210, 160))
+    assert hidden.pixel(60, 35) == (255, 255, 255)
+    # the document itself is unchanged
+    assert len(sample_pdf.history._undo) == depth
+    assert close(list_annotations(sample_pdf, 2)[0].color, RED, 0.01)
+    r, g, b = render_page(sample_pdf.doc, 2, 1.0).pixel(150, 125)
+    assert r > 200 and b < 60

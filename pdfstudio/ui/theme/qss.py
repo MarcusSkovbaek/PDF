@@ -241,8 +241,11 @@ QFrame#ActionCard {
 QFrame#ActionCard:hover { border: 1px solid @accent_border; background: @card_hover; }
 QFrame#IconWell { background: @accent_soft; border: none; border-radius: 10px; }
 QLabel#EditKeysHint {
-    background: @surface_raised; color: @text_muted; border: 1px solid @border;
-    border-radius: 6px; padding: 3px 8px; font-size: 11px;
+    background: @surface_raised; color: @text_subtle; border: 1px solid @border;
+    border-radius: 10px; padding: 2px 9px; font-size: 11px;
+}
+QLineEdit#FontSearch, QLineEdit#FontSearch:hover, QLineEdit#FontSearch:focus {
+    background: transparent; border: none; padding: 0px 2px; min-height: 34px; font-size: 13px;
 }
 QFrame#Card { background: @surface_raised; border: 1px solid @border; border-radius: 14px; }
 QListWidget#ImageGrid { background: @surface_raised; border: 1px solid @border; border-radius: 14px; padding: 6px; }

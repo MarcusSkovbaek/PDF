@@ -36,7 +36,7 @@ class MarkupTool(SelectTool):
 
     def properties_widget(self):
         if self._panel is None:
-            self._panel = AnnotStylePanel(self.label, self.hint, self.style)
+            self._panel = AnnotStylePanel(self.label, self.hint, self.style, sample=self.kind)
             self._panel.styleChanged.connect(self._style_changed)
         return self._panel
 

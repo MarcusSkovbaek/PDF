@@ -100,3 +100,44 @@ def test_add_image_from_clipboard_image(ws):
     tool.mouse_release(ev(ws.view, 0, 300, 300, buttons=Qt.MouseButton.NoButton))
     bbox = ws.pdf.page(0).get_image_info()[-1]["bbox"]
     assert abs((bbox[2] - bbox[0]) - 120) < 1
+
+
+def test_alignment_buttons_center_and_right(ws, qapp):
+    from tests.test_annotate_tools import drag
+
+    ws.set_tool("edit.add_text")
+    tool = ws.tool
+    panel = tool.properties_widget()
+    assert panel.align_box.isVisibleTo(panel) and not panel.view_box.isVisibleTo(panel)
+    assert panel.title.text() == "Klik for at skrive"
+    panel.align_buttons["center"].click()
+    assert tool.align == "center"
+    tool.mouse_press(ev(ws.view, 0, 300, 500))                       # click: centred on the click
+    tool.mouse_release(ev(ws.view, 0, 300, 500, buttons=Qt.MouseButton.NoButton))
+    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignHCenter
+    tool.editor.setPlainText("Midt på")
+    _ctrl_enter(tool.editor)
+    new = next(b for b in te.text_blocks(ws.pdf.doc, 0) if b.text == "Midt på")
+    assert abs((new.bbox.x0 + new.bbox.x1) / 2 - 300) < 1.0
+    panel.align_buttons["right"].click()
+    drag(tool, ws.view, 0, (100, 600), (400, 640))                  # a frame: flush right in it
+    tool.editor.setPlainText("Højre kant")
+    tool.commit()
+    new = next(b for b in te.text_blocks(ws.pdf.doc, 0) if b.text == "Højre kant")
+    assert abs(new.bbox.x1 - 400) < 1.0
+
+
+def test_alignment_change_while_typing_updates_the_editor(ws, qapp):
+    ws.set_tool("edit.add_text")
+    tool = ws.tool
+    tool.set_align("left")
+    tool.mouse_press(ev(ws.view, 0, 300, 500))
+    tool.mouse_release(ev(ws.view, 0, 300, 500, buttons=Qt.MouseButton.NoButton))
+    tool.editor.setPlainText("Skifter justering")
+    assert abs(tool.block.bbox.x0 - 300) < 0.01
+    tool.set_align("right")                                           # point text: now ends at the click
+    assert tool.editor is not None and abs(tool.block.bbox.x1 - 300) < 0.01
+    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignRight
+    tool.commit()
+    new = next(b for b in te.text_blocks(ws.pdf.doc, 0) if b.text == "Skifter justering")
+    assert abs(new.bbox.x1 - 300) < 1.0

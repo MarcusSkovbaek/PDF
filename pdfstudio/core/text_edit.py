@@ -227,6 +227,30 @@ def _build_lines(raw_line: dict, rm: pymupdf.Matrix) -> list[TextLine]:
     return out
 
 
+def _char_positions(chars: list, d) -> list[tuple[float, float]]:
+    """(start, end) of every char along the writing direction ``d``. Char
+    boxes are axis-aligned, so for slanted text (a 30° stamp) the advance is
+    the distance to the next glyph's origin, and for the last glyph it is
+    recovered from its box and the font's height."""
+    if _is_axis(d):
+        return [(_dot(c[1], d), _proj_range(c[2], d)[1]) for c in chars]
+    cos, sin = abs(d[0]), abs(d[1])
+    out = []
+    for k, c in enumerate(chars):
+        s0 = _dot(c[1], d)
+        if k + 1 < len(chars):
+            out.append((s0, max(s0, _dot(chars[k + 1][1], d))))
+            continue
+        x0, y0, x1, y1 = c[2]
+        span = c[3]
+        size = float(span.get("size", 10) or 10)
+        h = size * (float(span.get("ascender", 0.9) or 0.9) - float(span.get("descender", -0.25) or -0.25))
+        # an advance a and height h rotated: box = (a·cos + h·sin) × (a·sin + h·cos)
+        adv = ((x1 - x0) - h * sin) / cos if cos >= sin else ((y1 - y0) - h * cos) / sin
+        out.append((s0, s0 + max(adv, 0.0)))
+    return out
+
+
 def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     first = next((i for i, c in enumerate(chars) if not c[0].isspace()), None)
     if first is None:
@@ -256,7 +280,8 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     raw_bbox = _union(c[2] for c in used)
     raw_origin = (float(used[0][1][0]), float(used[0][1][1]))
     start = _dot(raw_origin, d)
-    end = max(_proj_range(c[2], d)[1] for c in used if not c[0].isspace())
+    char_pos = _char_positions(used, d)
+    end = max(char_pos[i][1] for i, c in enumerate(used) if not c[0].isspace())
 
     span_rects = []
     for sid in span_by_id:
@@ -274,7 +299,6 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     if all(abs(r) < 0.05 for r in char_rises):
         char_rises = [0.0] * len(used)
 
-    char_pos = [(_dot(c[1], d), _proj_range(c[2], d)[1]) for c in used]
     disp_bbox = pymupdf.Rect(raw_bbox) * rm
     disp_origin = pymupdf.Point(raw_origin) * rm
     disp_dir = pymupdf.Point(d) * rm - pymupdf.Point(0, 0) * rm

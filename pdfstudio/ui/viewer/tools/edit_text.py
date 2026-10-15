@@ -209,18 +209,20 @@ class InlineTextEditor(QTextEdit):
         self.textChanged.connect(self._apply_line_height)
 
     def configure(self, font: QFont, color: QColor, background: QColor, line_px: float, wrap_px: int) -> None:
-        self.setFont(font)
-        self.document().setDefaultFont(font)
-        self._line_px = line_px
-        self.setLineWrapColumnOrWidth(max(8, wrap_px))
         sel = T.qcolor("accent")
         sel.setAlpha(70)
+        # style sheet first: (re)polishing resolves the font again
         self.setStyleSheet(
             "QTextEdit#InlineTextEditor { border: none; padding: 0px;"
             f" background: rgba({background.red()},{background.green()},{background.blue()},{background.alpha()});"
             f" color: {color.name()};"
             f" selection-background-color: rgba({sel.red()},{sel.green()},{sel.blue()},{sel.alpha()});"
             f" selection-color: {color.name()}; }}")
+        self.ensurePolished()
+        self.setFont(font)
+        self.document().setDefaultFont(font)
+        self._line_px = line_px
+        self.setLineWrapColumnOrWidth(max(8, wrap_px))
         self._apply_line_height()
 
     def _apply_line_height(self) -> None:
@@ -583,6 +585,9 @@ class FontComboBox(QComboBox):
         popup.show()
         popup.search.setFocus(Qt.FocusReason.PopupFocusReason)
         self.popupShown.emit(popup)
+
+    def wheelEvent(self, ev) -> None:  # noqa: N802 - Qt override
+        ev.ignore()  # scrolling the inspector must not change the font
 
     def hidePopup(self) -> None:  # noqa: N802 - Qt override
         if self.popup is not None:
@@ -1110,6 +1115,7 @@ class EditTextTool(Tool):
             # rotated text: edit it in place, in a proxy rotated with the text
             self.editor = InlineTextEditor(None)
             self.editor.setMinimumSize(8, 8)  # else the proxy keeps QTextEdit's 78 px minimum
+            self.editor.ensurePolished()
             self._proxy = QGraphicsProxyWidget()
             self._proxy.setWidget(self.editor)
             self._proxy.setZValue(36)
@@ -1422,6 +1428,8 @@ class EditTextTool(Tool):
             QRectF(frame.right() - w, frame.bottom() + KEYS_GAP, w, h),     # below, right
             QRectF(frame.left(), frame.top() - KEYS_GAP - h, w, h),         # above, left
             QRectF(frame.left(), frame.bottom() + KEYS_GAP, w, h),          # below, left
+            QRectF(frame.right() + KEYS_GAP, frame.top(), w, h),            # beside, right
+            QRectF(frame.left() - KEYS_GAP - w, frame.top(), w, h),         # beside, left
         ]
         others = []
         for o in self.blocks(b.page):

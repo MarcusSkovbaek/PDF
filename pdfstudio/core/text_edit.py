@@ -341,15 +341,23 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     rm = pg.rotation_matrix
     data = pg.get_text("rawdict", flags=_EXTRACT_FLAGS)
     groups: list[list[TextLine]] = []
+    raw_lines: list[TextLine] = []
     for b in data.get("blocks", ()):
         if b.get("type", 0) != 0:
             continue
         lines = [ln for rl in b.get("lines", ()) for ln in _build_lines(rl, rm)]
+        raw_lines.extend(lines)
         if lines:
             for col in _split_columns(lines):
-                groups.extend(_split_size_changes(col))
+                for part in _split_size_changes(col):
+                    # a wide line above (a heading) can bind side-by-side
+                    # pieces (bullet + list item) into one column: re-split
+                    groups.extend(_split_columns(part) if len(part) < len(col) else [part])
+    items = _list_item_starts(raw_lines)
+    if items:
+        groups = [g for grp in groups for g in _split_list_items(grp, items)]
     if merge:
-        groups = _merge_groups(groups)
+        groups = _merge_groups(groups, items)
     blocks: list[TextBlock] = []
     for lines in groups:
         bbox = pymupdf.Rect(lines[0].bbox)
@@ -379,6 +387,65 @@ def _split_columns(lines: list[TextLine]) -> list[list[TextLine]]:
     if len(clusters) == 1:
         return [lines]
     return [[lines[i] for i in sorted(c)] for c in clusters]
+
+
+_BULLETS = set("•◦▪▫‣⁃●○■□◆◇►▸▹➢➤✓✔–—-*·")
+
+
+def _is_bullet(ln: TextLine) -> bool:
+    t = ln.text.strip()
+    return len(t) == 1 and (t in _BULLETS or 0xE000 <= ord(t) <= 0xF8FF)  # PUA: Symbol/OpenSymbol bullets
+
+
+def _list_item_starts(lines: list[TextLine]) -> dict[int, float]:
+    """``id(line) -> bullet start`` for every text line that starts a list
+    item: a bullet glyph on the same row just left of it (Word/LibreOffice
+    lists, slides). Bullets themselves map to their own start too."""
+    bullets = [ln for ln in lines if _is_axis(ln.dir) and _is_bullet(ln)]
+    if not bullets:
+        return {}
+    out: dict[int, float] = {}
+    for bl in bullets:
+        n = _perp(bl.dir)
+        row = _dot(bl.raw_origin, n)
+        best = None
+        for ln in lines:
+            if ln is bl or ln.dir != bl.dir or _is_bullet(ln):
+                continue
+            gap = ln.extent[0] - bl.extent[1]
+            if abs(_dot(ln.raw_origin, n) - row) <= 0.3 * max(ln.style.size, 1.0) and \
+                    0 <= gap <= 4 * max(ln.style.size, 1.0) and (best is None or gap < best[0]):
+                best = (gap, ln)
+        if best is not None:
+            out[id(best[1])] = bl.extent[0]
+            out[id(bl)] = bl.extent[0]
+    return out
+
+
+def _split_list_items(lines: list[TextLine], items: dict[int, float]) -> list[list[TextLine]]:
+    """Split a block at list items: every bullet is its own block, every
+    item starts a new block, and text after the list (starting left of the
+    item text, at or before the bullet) is a paragraph of its own."""
+    if not any(id(ln) in items for ln in lines):
+        return [lines]
+    out: list[list[TextLine]] = []
+    item_x: float | None = None   # text start of the current item
+    for ln in lines:
+        if id(ln) in items and _is_bullet(ln):
+            out.append([ln])
+            item_x = None
+            continue
+        if id(ln) in items:
+            out.append([ln])
+            item_x = ln.extent[0]
+        elif item_x is not None and ln.extent[0] < item_x - 0.5 * max(ln.style.size, 1.0):
+            out.append([ln])          # back at the margin: the list ended
+            item_x = None
+        elif out and not (len(out[-1]) == 1 and _is_bullet(out[-1][0]) and id(out[-1][0]) in items):
+            out[-1].append(ln)
+        else:
+            out.append([ln])
+    return out
 
 
 def _split_size_changes(lines: list[TextLine]) -> list[list[TextLine]]:
@@ -432,9 +499,12 @@ def _continues(upper: list[TextLine], lower: list[TextLine]) -> bool:
     return hi - lo >= 0.5 * max(shorter, 1.0)
 
 
-def _merge_groups(groups: list[list[TextLine]]) -> list[list[TextLine]]:
+def _merge_groups(groups: list[list[TextLine]], items: dict[int, float] | None = None) -> list[list[TextLine]]:
     """Join blocks that are consecutive lines of one paragraph but were split
-    by content-stream order (typically after an edit appended new text)."""
+    by content-stream order (typically after an edit appended new text).
+    ``items`` (list item starts): a new item never continues the text above
+    it, and text back at the margin does not continue a list item."""
+    items = items or {}
     if len(groups) < 2:
         return groups
     import bisect
@@ -463,7 +533,12 @@ def _merge_groups(groups: list[list[TextLine]]) -> list[list[TextLine]]:
                     lo = bisect.bisect_left(keys, p + 0.85 * last.style.size)
                     hi = bisect.bisect_right(keys, p + 1.65 * last.style.size)
                     for j in range(lo, hi):
-                        if j not in used and _continues(merged, gs[j]):
+                        if j in used or id(gs[j][0]) in items or _is_bullet(gs[j][0]) or _is_bullet(merged[0]):
+                            continue
+                        if id(merged[0]) in items and gs[j][0].extent[0] < \
+                                merged[0].extent[0] - 0.5 * max(gs[j][0].style.size, 1.0):
+                            continue
+                        if _continues(merged, gs[j]):
                             merged = merged + gs[j]
                             used.add(j)
                             changed = True
@@ -1097,6 +1172,11 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         or (n_old >= 3 and sum(full[:-1]) >= 2)
         or (n_old == 2 and stretched(old[0]))
     )
+    # a ragged two-line block (typically a list item that wrapped): only a
+    # paragraph if real body text of its size fixes the column's right edge
+    # (else the widest line would always "fill" its own column)
+    two_line_ragged = align == "left" and n_old == 2 and not paragraph and full[0]
+    paragraph = paragraph or two_line_ragged
     max_width = _available_width(ctx, block, d, align, lmin, rmax, paragraph)
 
     def first_word_width(ln: TextLine) -> float:
@@ -1125,6 +1205,14 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
     column_hi = max([ln.extent[1] for ln in ctx.others
                      if abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3
                      and ln.extent[0] - 2.0 <= lmin <= ln.extent[1]] + [rmax])
+    if two_line_ragged:
+        size = first.style.size or 1.0
+        evidence = [ln for ln in ctx.others
+                    if abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3
+                    and abs(ln.extent[1] - column_hi) <= 2.0 and 0.85 <= (ln.style.size or 0) / size <= 1.18]
+        if len(evidence) < 2:
+            paragraph = False
+            max_width = _available_width(ctx, block, d, align, lmin, rmax, False)
     if paragraph and not any(soft_break_after(i) for i in range(n_old - 1)):
         # "full" lines but no real wrap (a list, an address): independent lines
         # that may grow sideways like point text instead of reflowing

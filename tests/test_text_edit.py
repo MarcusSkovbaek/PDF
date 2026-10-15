@@ -742,3 +742,18 @@ def test_superscript_on_the_same_row_stays_in_its_paragraph():
     pdf = PdfDocument.from_bytes(doc.tobytes())
     texts = [b.text for b in text_blocks(pdf.doc, 0)]
     assert any("Omsætningen" in t and "Norden" in t for t in texts), texts
+
+
+def test_bullet_and_item_below_a_heading_are_separate_blocks():
+    """LibreOffice slides: heading, then "bullet + list item" on one row, all
+    in one MuPDF block. The heading must not glue bullet and item together
+    (the editor showed the private-use bullet glyph as part of the text)."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=960, height=540)
+    p.insert_text((62, 93), "1. Udviklingen i grønne løsninger", fontname="hebo", fontsize=24)
+    p.insert_text((80, 116), "•", fontname="helv", fontsize=18)
+    p.insert_text((98, 116), "Forventer produktionen strategi bestyrelsen", fontname="helv", fontsize=18)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    texts = [b.text for b in text_blocks(pdf.doc, 0)]
+    assert "Forventer produktionen strategi bestyrelsen" in texts, texts
+    assert not any("•" in t and "Forventer" in t for t in texts), texts

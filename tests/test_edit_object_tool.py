@@ -158,7 +158,7 @@ def test_inspector_fields_with_aspect_lock(ws):
     tool = ws.tool
     click(tool, ws.view, 1, CX, CY)
     panel = ws.inspector.scroll.widget()
-    panel.w.setValue(80 / MM)                                        # lock on: height follows
+    panel.w.setValue(80 * MM)                                        # lock on: height follows
     r = images(ws)[0].rect
     assert abs(r.width - 80) < 0.3 and abs(r.height - 60) < 0.3 and abs(r.x0 - 72) < 0.3
     assert panel.h.value() == pytest.approx(60 * MM, abs=0.1)

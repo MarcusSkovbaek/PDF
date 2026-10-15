@@ -397,6 +397,17 @@ def _is_bullet(ln: TextLine) -> bool:
     return len(t) == 1 and (t in _BULLETS or 0xE000 <= ord(t) <= 0xF8FF)  # PUA: Symbol/OpenSymbol bullets
 
 
+_BULLET_SYMBOLS = set("•·◦▪▫‣⁃●○■□◆◇►▸▹➢➤✓✔")
+
+
+def is_list_bullet(block: TextBlock) -> bool:
+    """A block that is nothing but a list bullet glyph (often a private-use
+    Symbol/OpenSymbol character no other font has): editors skip it – its
+    list item next to it is the editable text."""
+    t = block.text.strip()
+    return len(t) == 1 and (t in _BULLET_SYMBOLS or 0xE000 <= ord(t) <= 0xF8FF)
+
+
 def _list_item_starts(lines: list[TextLine]) -> dict[int, float]:
     """``id(line) -> bullet start`` for every text line that starts a list
     item: a bullet glyph on the same row just left of it (Word/LibreOffice

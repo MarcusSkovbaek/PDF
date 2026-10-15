@@ -14,6 +14,64 @@ Branch `claude/happy-wozniak-yin6iu`, everything committed. `python -m pytest` g
 `QT_QPA_PLATFORM=offscreen python main.py --screenshot out.png --size 1440x900 file.pdf` works.
 Read `CLAUDE.md` first – it is the binding architecture/API contract.
 
+## QA status (agent C, 2026-10-15)
+**Verified**: full suite green – 408 tests in ~61 s (was 398 tests in 282 s), no Qt warnings/tracebacks printed,
+clean exit. Offscreen screenshots of home, every mode/tool/inspector (idle + active), font picker, comments panel +
+filter, command palette, toast and all dialogs (merge, images→PDF, split, password, unsaved, error) in light and dark.
+Scenario script: typing T/V/H/… in every inline editor never triggers tool shortcuts; switching tool/mode mid-edit
+commits (text edit, add text, free text), mid-drag cancels (shape, ink, image move) without stale overlays;
+undo/redo of every edit kind, save, reopen (valid, not repaired). Real-world PDFs from LibreOffice (58-page
+Danish report with tables/images/bullets/footers, 14-page landscape slides, 348-page copy): every block edited
+(`tests/stress_edit_all_blocks.py`-style, 98 + 153 blocks, avg 165/36 ms), page ops, comments, images,
+merge/split, save/reopen all OK. Offline: no network-capable module is imported anywhere (now a test), netguard
+is installed first in `main.py`. (PyInstaller part skipped – coordinator owns `packaging/`.)
+
+**Measured** (58 pages): open 180 ms, first render 70 ms, scroll ~30 ms/step; 348 pages: open 280 ms,
+scroll ~70 ms/step; open editor 170–310 ms, commit 110–350 ms, undo 70–180 ms.
+
+**Fixed**
+- Suite slowness (282 s → 61 s): inspector panels of inactive tools were orphaned as hidden top-level
+  widgets (`setParent(None)`) – one per tool and one per comment selection, never freed, restyled on every
+  theme change. Now parked under the inspector / deleted when transient (`workspace.Inspector`,
+  `annotate_select` marks its panels `transientPanel`, `_annot_common` parents unused controls). Real app
+  leak too (each comment click leaked a panel). Regression test `test_closing_leaks_no_windows`.
+  Plus `Pixmap.set_rect` in test helpers (Python per-pixel in PyMuPDF 1.28: 4 s for 1600×900) →
+  `conftest.filled_pixmap`; conftest deletes leftover top-level widgets after each Qt test and filters the
+  offscreen plugin's "does not support" noise; expected MuPDF syntax errors of the tricky-stream test silenced.
+- Deferred `QTimer.singleShot` callbacks now bound to their owner (tracebacks after a tab closed).
+- Text editing on real documents (core `text_edit`): a caption set tight above a paragraph was one block
+  (editor shifted sideways by the centred caption) → split at row size changes; LibreOffice bullets
+  (`\uf095`, •, ·) glued to their item or to the paragraph after the list → list-item-aware grouping (bullet,
+  item, text after the list are separate blocks; bullets not offered for editing); two-line list items now
+  reflow inside the item instead of overflowing/overlapping the next item; first-line-indented paragraphs:
+  editor box starts at the column with only the first line indented.
+- Page pixmap cache: one 320 MB budget for all tabs (was per tab), background tabs evicted first.
+- UI polish: Danish number format everywhere (`QLocale` da_DK: "12,5 mm", "11,0 pt"); compact X/Y/B/H fields in
+  "Markér objekt" no longer clip ("120,0 mm"); dark-theme colour dots/swatches for black ink get a visible ring;
+  split dialog's empty "Hver side" area explains the result; Tekstfelt uses the Aa icon like Tilføj tekst (T);
+  pages "Slet sider" tooltip shows Delete.
+- Shortcuts: shared keys fall back to the neutral *Vis* tool (H in Redigér = Hånd, not Fremhæv); test that no two
+  actions share a key and every pill tooltip shows its shortcut; flushing a pending inspector change before the
+  comment selection changes (it used to land on the new selection).
+- Danish wording: accented imperatives (Redigér, Duplikér), »…« quotes, "fx", "…" without space in
+  placeholders, real plurals instead of "side(r)" (`i18n.tr_n`), sentence-case section labels.
+- README: features per mode/tool, shortcut tables, offline guarantee.
+
+**Remaining (prioritised for the max-effort review)**
+1. Undo snapshots store the whole document; after text edits the un-subset fonts make each step 3–5 MB
+   (60 steps ≈ 200–300 MB). Store font streams once / compress snapshots / diff-based history.
+2. Edited text that grows by a line overlaps the content below (no reflow of following blocks) – at least
+   warn or offer to shrink; same for list items.
+3. Editor open/commit latency 0.2–0.35 s on dense pages (`_page_context` re-extracts the page via
+   `text_blocks(merge=False)` each time) – cache per page/version.
+4. Block grouping heuristics (`_split_size_changes`, list items, `_continues`) need a corpus of Word/LO/InDesign
+   PDFs; hanging indents and numbered lists ("1.", "a)") are not yet treated like bullets.
+5. Search on 76 pages ~0.85 s (synchronous core call) – check the UI keeps it incremental on 500+ pages.
+6. Thumbnail cache is unbounded (≈45 MB at 350 pages).
+7. Font popup is clamped to the (800×600) offscreen screen in screenshots only – verify placement on a real
+   multi-monitor Windows setup.
+8. Split dialog folder field shows the end of long paths without middle elision.
+
 ## Done
 - Foundation: `core/document.py` (edit/undo/redo/atomic save), `history.py`, `security/netguard.py`, i18n.
 - Core engine (tested): `render`, `pages`, `merge`, `images`, `search`, `annotations`.

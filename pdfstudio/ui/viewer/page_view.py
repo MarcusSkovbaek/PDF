@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import bisect
 import time
+import weakref
 from collections import OrderedDict
 
 from PySide6.QtCore import (
@@ -57,7 +58,11 @@ MAX_ZOOM = 8.0
 GAP_PX = 20            # vertical gap between pages (screen px)
 SIDE_PX = 32           # horizontal margin (screen px)
 FULL_PIXELS_CAP = 9_000_000   # full-page renders larger than this use detail tiles
+# Rendered pages are cached up to this many bytes for ALL open documents
+# together (one budget per tab let three big tabs hold ~1 GB); background
+# tabs give their pixmaps back first.
 CACHE_BYTES = 320 * 1024 * 1024
+_VIEWS: "weakref.WeakSet[PageView]" = weakref.WeakSet()
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +194,7 @@ class PageView(QGraphicsView):
         self._tops: list[float] = []
         self._current = 0
         self._lru: OrderedDict[int, int] = OrderedDict()   # page index -> bytes
+        _VIEWS.add(self)
         self._overlays: list[QGraphicsItem] = []
         self._search_hits = []
         self._search_items: list[QGraphicsPathItem] = []
@@ -644,20 +650,42 @@ class PageView(QGraphicsView):
     def _touch(self, i: int, nbytes: int) -> None:
         self._lru.pop(i, None)
         self._lru[i] = nbytes
-        total = sum(self._lru.values())
-        if total <= CACHE_BYTES:
+        views = []
+        for v in list(_VIEWS):
+            try:
+                views.append((v, v.cache_bytes(), v.isVisible()))
+            except RuntimeError:  # C++ side already deleted
+                continue
+        excess = sum(b for _v, b, _vis in views) - CACHE_BYTES
+        if excess <= 0:
             return
-        visible = set(self.visible_pages(extra_px=self.viewport().height()))
+        for v, _b, vis in views:   # hidden (background) tabs first
+            if excess > 0 and v is not self and not vis:
+                excess -= v._evict(excess, set())
+        if excess > 0:
+            excess -= self._evict(excess, set(self.visible_pages(extra_px=self.viewport().height())))
+        for v, _b, vis in views:
+            if excess > 0 and v is not self and vis:
+                excess -= v._evict(excess, set(v.visible_pages()))
+
+    def _evict(self, nbytes: int, keep: set[int]) -> int:
+        """Drop least recently used pixmaps (not ``keep``) until ``nbytes``
+        are freed; returns the bytes freed."""
+        freed = 0
         for j in list(self._lru.keys()):
-            if total <= CACHE_BYTES:
+            if freed >= nbytes:
                 break
-            if j in visible or j >= len(self._items):
+            if j >= len(self._items):          # stale entry (pages were removed)
+                freed += self._lru.pop(j)
+                continue
+            if j in keep:
                 continue
             it = self._items[j]
-            total -= self._lru.pop(j)
+            freed += self._lru.pop(j)
             it.pix = None
             it.detail = None
             it.update()
+        return freed
 
     def cache_bytes(self) -> int:
         return sum(self._lru.values())

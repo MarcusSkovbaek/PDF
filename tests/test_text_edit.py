@@ -757,3 +757,46 @@ def test_bullet_and_item_below_a_heading_are_separate_blocks():
     texts = [b.text for b in text_blocks(pdf.doc, 0)]
     assert "Forventer produktionen strategi bestyrelsen" in texts, texts
     assert not any("•" in t and "Forventer" in t for t in texts), texts
+
+
+def _bulleted_list_doc():
+    """Body text, a bulleted list (a two-line item that wrapped) and body
+    text again, set tight like Word/LibreOffice export it."""
+    doc = pymupdf.open()
+    p = doc.new_page()
+    body = "Omsætningen steg markant i alle regioner, og bestyrelsen forventer fortsat vækst i det kommende"
+    y = 100
+    for t in (body, body, "regnskabsår."):
+        p.insert_text((62, y), t, fontname="helv", fontsize=11)
+        y += 14
+    items = [("Projekter i Århus og Aalborg fortsætter med fuld kraft og nye kunder kommer til hver", "måned."),
+             ("Overskud før skat: 48,2 mio. kr.", None)]
+    for first, second in items:
+        p.insert_text((80, y), "•", fontname="helv", fontsize=11)
+        p.insert_text((98, y), first, fontname="helv", fontsize=11)
+        y += 14
+        if second:
+            p.insert_text((98, y), second, fontname="helv", fontsize=11)
+            y += 14
+    for t in (body, "slut."):
+        p.insert_text((62, y), t, fontname="helv", fontsize=11)
+        y += 14
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def test_bulleted_list_items_are_blocks_of_their_own():
+    from pdfstudio.core import text_edit as te
+
+    pdf = _bulleted_list_doc()
+    texts = [b.text for b in text_blocks(pdf.doc, 0)]
+    item = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Projekter"))
+    assert item.text.endswith("måned.") and len(item.lines) == 2, texts
+    assert "Overskud før skat: 48,2 mio. kr." in texts            # next item: separate
+    assert sum(len(t) == 1 for t in texts) == 2                    # bullets stay apart
+    assert any(t.startswith("Omsætningen") and t.endswith("slut.") for t in texts)  # text after the list
+    info = te.layout_info(pdf.doc, item)
+    assert info.soft_breaks == (0,) and info.wrap_width < 540 - 98
+    replace_block_text(pdf, item, item.text.replace("Projekter", "Nye projekter"))
+    new = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Nye projekter"))
+    assert len(new.lines) == 2 and new.bbox.x1 <= item.bbox.x1 + 1.0   # reflowed inside the item
+    assert all(abs(ln.origin[0] - 98) < 0.5 for ln in new.lines)

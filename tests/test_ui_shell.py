@@ -522,3 +522,55 @@ def test_no_two_actions_share_a_shortcut(win, qapp, sample_pdf_path):
             assert tip.startswith(cls.display_label())
             if cls.shortcut:
                 assert tip.endswith(f"({cls.shortcut})"), tip
+
+
+def test_pixmap_cache_budget_is_shared_by_all_tabs(win, qapp, tmp_path, monkeypatch):
+    """One memory budget for every open document: rendering in the visible
+    tab takes the pixmaps of background tabs first."""
+    from pdfstudio.ui.viewer import page_view
+
+    paths = []
+    for name in ("a.pdf", "b.pdf"):
+        doc = pymupdf.open()
+        for i in range(6):
+            doc.new_page().insert_text((72, 72), f"{name} side {i + 1}")
+        paths.append(str(tmp_path / name))
+        doc.save(paths[-1])
+    ws_a = win.open_path(paths[0])
+    for i in range(6):
+        ws_a.view.go_to_page(i)
+        ws_a.view.render_visible_now()
+    a_bytes = ws_a.view.cache_bytes()
+    assert a_bytes > 0
+    ws_b = win.open_path(paths[1])          # a is a background tab now
+    qapp.processEvents()
+    assert not ws_a.view.isVisible()
+    monkeypatch.setattr(page_view, "CACHE_BYTES", a_bytes)
+    ws_b.view.render_visible_now()
+    assert ws_a.view.cache_bytes() < a_bytes                      # background tab gave memory back
+    assert ws_b.view.cache_bytes() > 0
+    assert ws_a.view.cache_bytes() + ws_b.view.cache_bytes() <= a_bytes
+
+
+def test_no_network_capable_module_is_loaded():
+    """The whole app (every tool, panel and dialog) imports nothing that can
+    talk to the network – on top of the netguard kill switch. Checked in a
+    fresh interpreter: pytest's own plugins import ssl."""
+    import subprocess
+    import sys
+
+    code = (
+        "import os, sys; os.environ['QT_QPA_PLATFORM'] = 'offscreen'\n"
+        "import main\n"
+        "from pdfstudio.ui import app, main_window\n"
+        "from pdfstudio.ui.dialogs import images_dialog, merge_dialog, password, split_dialog\n"
+        "from pdfstudio.ui.viewer.tools.base import ToolRegistry; ToolRegistry.discover()\n"
+        "banned = ('PySide6.QtNetwork', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',"
+        " 'PySide6.QtWebSockets', 'urllib.request', 'http.client', 'requests', 'urllib3', 'ssl', 'ftplib',"
+        " 'smtplib', 'xmlrpc.client')\n"
+        "print([m for m in sys.modules if any(m == b or m.startswith(b + '.') for b in banned)])\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines()[-1] == "[]"

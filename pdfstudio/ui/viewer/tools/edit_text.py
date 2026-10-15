@@ -913,7 +913,9 @@ class EditTextTool(Tool):
     def blocks(self, page: int) -> list[te.TextBlock]:
         if page not in self._blocks:
             try:
-                self._blocks[page] = te.text_blocks(self.ctx.pdf.doc, page)
+                # bullets are not text to edit (their list item next to them is)
+                self._blocks[page] = [b for b in te.text_blocks(self.ctx.pdf.doc, page)
+                                      if not te.is_list_bullet(b)]
             except Exception:
                 self._blocks[page] = []
         return self._blocks[page]

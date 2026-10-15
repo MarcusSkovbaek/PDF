@@ -427,3 +427,18 @@ def test_first_line_indent_paragraph_editor_starts_at_the_column(win, qapp, tmp_
     second = tool.editor.document().begin().layout().lineAt(1)
     assert abs(geo.x() + second.x() - column.x()) <= 1.5
     tool.cancel()
+
+
+def test_list_bullets_are_not_offered_for_editing(win, qapp, tmp_path):  # noqa: F811
+    from tests.test_text_edit import _bulleted_list_doc
+
+    path = str(tmp_path / "list.pdf")
+    with open(path, "wb") as fh:
+        fh.write(_bulleted_list_doc().to_bytes())
+    win.open_path(path)
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    qapp.processEvents()
+    texts = [b.text for b in ws.tool.blocks(0)]
+    assert texts and not any(len(t.strip()) == 1 for t in texts), texts
+    assert any(t.startswith("Projekter") for t in texts)

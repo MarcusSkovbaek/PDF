@@ -23,15 +23,27 @@ der arbejder **100 % lokalt**. Intet sendes, læses eller gemmes online.
   så styresystemet også blokerer programmet.
 - Filer læses og gemmes kun dér, hvor du selv vælger. Indstillinger og "seneste filer" gemmes lokalt.
 
-## Kom i gang (Windows)
-1. Installér Python 3.11 eller nyere fra python.org (sæt flueben ved "Add python.exe to PATH").
-2. Byg programmet:
-   ```bat
-   packaging\build_windows.bat
-   ```
-   Det installerer afhængigheder (kun ved byg – det færdige program bruger aldrig nettet),
-   kører alle tests og bygger `dist\FolioPDF\FolioPDF.exe`.
-3. Start `dist\FolioPDF\FolioPDF.exe`, eller kør direkte fra kildekoden:
+## Installation (Windows)
+**Den nemme vej – færdig installationsfil:**
+1. Hent `FolioPDF-Setup-<version>.exe` (bygges automatisk af GitHub Actions-workflowet
+   *Windows installer*; filen ligger under "Artifacts" på den seneste kørsel).
+2. Dobbeltklik på filen og følg den danske installationsguide. Du kan vælge:
+   - installation kun for dig (kræver ikke administrator) eller for alle brugere,
+   - genvej på skrivebordet,
+   - at Folio PDF åbner PDF-filer som standard,
+   - (som administrator) en Windows Firewall-regel, der blokerer programmet fra nettet.
+3. Programmet findes derefter i Start-menuen og kan afinstalleres under *Indstillinger → Apps*.
+
+Installationsfilen er ikke kodesigneret, så Windows SmartScreen kan vise "Windows beskyttede din pc"
+første gang – vælg *Flere oplysninger → Kør alligevel*.
+
+**Byg selv på din egen pc:**
+1. Installér Python 3.11+ fra python.org (flueben ved "Add python.exe to PATH") og
+   Inno Setup 6 fra jrsoftware.org.
+2. Kør `packaging\build_windows.bat`. Scriptet installerer byggeværktøjerne (kun her bruges nettet),
+   kører alle tests, bygger `dist\FolioPDF\FolioPDF.exe` og derefter installationsfilen
+   `dist\FolioPDF-Setup-<version>.exe`.
+3. Uden installation kan programmet også køres direkte fra kildekoden:
    ```bat
    python -m pip install -r requirements.txt
    python main.py [fil.pdf ...]

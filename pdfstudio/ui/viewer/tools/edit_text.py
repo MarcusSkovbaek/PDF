@@ -1109,6 +1109,7 @@ class EditTextTool(Tool):
         if self.rotated():
             # rotated text: edit it in place, in a proxy rotated with the text
             self.editor = InlineTextEditor(None)
+            self.editor.setMinimumSize(8, 8)  # else the proxy keeps QTextEdit's 78 px minimum
             self._proxy = QGraphicsProxyWidget()
             self._proxy.setWidget(self.editor)
             self._proxy.setZValue(36)
@@ -1182,6 +1183,8 @@ class EditTextTool(Tool):
         pitch = self._block_pitch() * (style.size / max(self.block.style.size, 0.1))
         bg = self._editor_background()
         width_px = int(round(self._wrap_width() * ppp))
+        if self._proxy is not None:
+            self._proxy.setFont(font)  # a proxy propagates its own font to the widget
         self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
         align = self._layout.align if self._layout is not None else "left"
         if align == "left" and self._layout is not None and self._layout.justified:
@@ -1365,6 +1368,7 @@ class EditTextTool(Tool):
         w = ed.lineWrapColumnOrWidth() + 2
         h = max(ed._line_px or fm.height(), ed.content_height()) + 2
         ed.resize(int(w), int(round(h)))
+        self._proxy.resize(ed.size())
         bx, by = ed.first_baseline()
         left = self._box_left(ed.lineWrapColumnOrWidth() / ppp)
         ax = bx if left is None else -left * ppp     # widget x that lies on the first origin
@@ -1377,15 +1381,16 @@ class EditTextTool(Tool):
         self._proxy.setTransform(t)
         if self._frame is not None:
             # the frame lives in the editor's own (rotated) pixel space too;
-            # it encloses the editor and the original paragraph
+            # it encloses the editor and the original lines (their extent
+            # along the text, ascender to descender across it)
             u, v = _unit(b)
             inv_x, inv_y = [], []
-            for px, py in ((b.bbox.x0, b.bbox.y0), (b.bbox.x1, b.bbox.y0), (b.bbox.x0, b.bbox.y1),
-                           (b.bbox.x1, b.bbox.y1)):
-                du = (px - ox) * u[0] + (py - oy) * u[1]
-                dv = (px - ox) * v[0] + (py - oy) * v[1]
-                inv_x.append(ax + du * ppp)
-                inv_y.append(by + dv * ppp)
+            for ln in b.lines:
+                du = (ln.origin[0] - ox) * u[0] + (ln.origin[1] - oy) * u[1]
+                dv = (ln.origin[0] - ox) * v[0] + (ln.origin[1] - oy) * v[1]
+                size = ln.style.size
+                inv_x += [ax + du * ppp, ax + (du + ln.extent[1] - ln.extent[0]) * ppp]
+                inv_y += [by + (dv - ln.ascender * size) * ppp, by + (dv - ln.descender * size) * ppp]
             pad = EDIT_PAD * ppp
             rect = QRectF(min([0.0] + inv_x) - pad, min([0.0] + inv_y) - pad, 0, 0)
             rect.setRight(max([w - 2] + inv_x) + pad)

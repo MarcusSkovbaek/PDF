@@ -360,6 +360,8 @@ class EditTextTool(Tool):
         self._panel: EditTextPanel | None = None
         self._committing = False
         self._layout: te.LayoutInfo | None = None
+        self._shown_text = ""
+        self._soft_positions: list[int] = []
 
     # -- lifecycle ---------------------------------------------------------
     def activate(self, ctx) -> None:
@@ -401,7 +403,7 @@ class EditTextTool(Tool):
         base, ppp = self.block.style, self._px_per_pt()
         doc = self.editor.document()
         cur = QTextCursor(doc)
-        if doc.toPlainText() != self.block.text:
+        if doc.toPlainText() != self._shown_text:
             return  # the user already typed: offsets no longer match
         self.editor.blockSignals(True)  # formatting is not typing (keeps the key hint)
         try:
@@ -552,7 +554,8 @@ class EditTextTool(Tool):
         self.editor.nextRequested.connect(self.commit_and_next)
         self.editor.previousRequested.connect(lambda: self.commit_and_next(-1))
         self.editor.textChanged.connect(self._reposition)
-        self.editor.setPlainText(block.text)
+        self._shown_text, self._soft_positions = self._display_text(block)
+        self.editor.setPlainText(self._shown_text)
         self._keys = QLabel(tr("edit.text.keys"), view.viewport())
         # the key hint may cover the next paragraph: drop it once typing starts
         self.editor.textChanged.connect(self._keys.hide)
@@ -594,8 +597,11 @@ class EditTextTool(Tool):
         width_px = int(round(self._wrap_width() * ppp))
         self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
         align = self._layout.align if self._layout is not None and not self.block.rotation else "left"
+        if align == "left" and self._layout is not None and self._layout.justified:
+            align = "justify"
         self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
-                                   "right": Qt.AlignmentFlag.AlignRight}.get(align, Qt.AlignmentFlag.AlignLeft))
+                                   "right": Qt.AlignmentFlag.AlignRight,
+                                   "justify": Qt.AlignmentFlag.AlignJustify}.get(align, Qt.AlignmentFlag.AlignLeft))
         self._reposition()
 
     def _editor_background(self) -> QColor:
@@ -623,6 +629,39 @@ class EditTextTool(Tool):
             return 100.0
         return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
 
+    def _display_text(self, block: te.TextBlock) -> tuple[str, list[int]]:
+        """Editor text: lines joined with a space where the original line
+        merely wrapped (soft break), so Qt reflows/justifies the paragraph like
+        the PDF; hard breaks stay newlines. Returns (text, soft break offsets)."""
+        soft = set(self._layout.soft_breaks) if self._layout is not None else set()
+        parts, positions, pos = [], [], 0
+        for i, line in enumerate(block.lines):
+            parts.append(line.text)
+            pos += len(line.text)
+            if i < len(block.lines) - 1:
+                if i in soft:
+                    parts.append(" ")
+                    positions.append(pos)
+                else:
+                    parts.append("\n")
+                pos += 1
+        return "".join(parts), positions
+
+    @staticmethod
+    def _restore_soft_breaks(shown: str, soft: list[int], text: str) -> str:
+        """Put the original line breaks back where the text before them is
+        unchanged: those lines stay pixel-identical; the rest reflows."""
+        common = 0
+        for a, c in zip(shown, text):
+            if a != c:
+                break
+            common += 1
+        chars = list(text)
+        for p in soft:
+            if p < common and p < len(chars) and chars[p] == " ":
+                chars[p] = "\n"
+        return "".join(chars)
+
     def _layout_for(self, block: te.TextBlock) -> te.LayoutInfo:
         """How the core will lay out this block (alignment, wrap width)."""
         return te.layout_info(self.ctx.pdf.doc, block)
@@ -635,6 +674,8 @@ class EditTextTool(Tool):
         if b.rotation:
             return max(b.bbox.width, b.bbox.height) + 2
         slack = max(2.0, 0.3 * b.style.size)
+        if self._layout is not None and self._layout.justified:
+            slack = 0.5  # justified lines are stretched to the box: it must be the column
         wrap = self._layout.wrap_width if self._layout is not None else b.bbox.width
         if wrap <= 0:
             wrap = self.ctx.pdf.page(b.page).rect.width - b.bbox.x0
@@ -716,9 +757,11 @@ class EditTextTool(Tool):
         if self.editor is None or self.block is None or self._committing:
             return False
         block, text, style = self.block, self.editor.toPlainText(), self.style_override
+        shown, soft = self._shown_text, self._soft_positions
         self._teardown()
-        if text == block.text and style is None:
+        if text == shown and style is None:
             return False
+        text = self._restore_soft_breaks(shown, soft, text)
         self._committing = True
         try:
             self._write(block, text, style)

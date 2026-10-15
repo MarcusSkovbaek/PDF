@@ -537,3 +537,43 @@ def test_saving_subsets_fonts_added_by_edits(sample_pdf, tmp_path):
     assert os.path.getsize(out) < unsubset
     d = pymupdf.open(out)
     assert "ÆØÅ æøå" in d[0].get_text() and not d.is_repaired
+
+
+def _list_and_paragraph_doc():
+    import pymupdf
+
+    from pdfstudio.core import PdfDocument
+
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    body = ("Kvartalets resultat viser en markant fremgang i omsætningen, og bestyrelsen forventer, at "
+            "udviklingen fortsætter i næste regnskabsår. ") * 3
+    pg.insert_textbox(pymupdf.Rect(72, 72, 523, 200), body, fontname="helv", fontsize=11, align=3)
+    y = 230
+    for item in ("Omsætning steg med 12 %", "Overskud før skat: 48,2 mio. kr.", "Medarbejdere: 312"):
+        pg.insert_text((100, y), item, fontname="helv", fontsize=11)
+        y += 15
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def test_list_items_are_hard_breaks_and_do_not_merge():
+    from pdfstudio.core import text_edit as te
+
+    pdf = _list_and_paragraph_doc()
+    lst = next(b for b in te.text_blocks(pdf.doc, 0) if b.text.startswith("Omsætning"))
+    info = te.layout_info(pdf.doc, lst)
+    assert info.soft_breaks == () and not info.justified
+    te.replace_block_text(pdf, lst, lst.text.replace("12 %", "12 % i forhold til sidste år, over forventning"))
+    new = next(b for b in te.text_blocks(pdf.doc, 0) if b.text.startswith("Omsætning"))
+    lines = new.text.split("\n")
+    assert lines[0].endswith("over forventning")          # grew sideways in the column
+    assert lines[1].startswith("Overskud") and lines[2].startswith("Medarbejdere")
+
+
+def test_justified_paragraph_reports_soft_breaks():
+    from pdfstudio.core import text_edit as te
+
+    pdf = _list_and_paragraph_doc()
+    par = next(b for b in te.text_blocks(pdf.doc, 0) if b.text.startswith("Kvartalets"))
+    info = te.layout_info(pdf.doc, par)
+    assert info.justified and info.soft_breaks == tuple(range(len(par.lines) - 1))

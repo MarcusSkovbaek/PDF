@@ -80,6 +80,11 @@ Read `CLAUDE.md` first – it is the binding architecture/API contract.
    bold/italic runs and colours preserved, undo exact. Open: when a changed line contains a wide gap
    (table cells close enough to be one block, e.g. "2025   2026"), the re-laid line uses normal spaces –
    keep original glyph positions for the unchanged prefix/suffix of a changed line.
+   FIXED: list items / addresses were treated as one reflowing paragraph (a lengthened item flowed into
+   the next one) – soft breaks now use the classic reflow test against the real column width; blocks
+   without soft breaks grow sideways. Justified paragraphs are shown in the editor as one Qt-justified
+   paragraph (line breaks match the PDF); on commit the soft breaks before the first change are restored
+   so earlier lines stay pixel-identical (`layout_info().justified/soft_breaks`, `_restore_soft_breaks`).
    FIXED: saving now subsets fonts (`PdfDocument._subset_fonts`) – editing all 18 blocks grew the file
    62 KB → 1.6 MB before, 217 KB now.
 

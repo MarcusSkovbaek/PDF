@@ -764,6 +764,8 @@ class _Plan:
     runs: list[TextRun]
     align: str = "left"          # left | center | right (justified counts as left)
     wrap_width: float = 0.0      # max line width before wrapping (pt); 0 = never wraps
+    justified: bool = False      # lines that continue the paragraph are stretched
+    soft_breaks: tuple = ()      # old line i wraps into line i+1 (same paragraph)
 
 
 @dataclass
@@ -1031,11 +1033,37 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
     )
     max_width = _available_width(ctx, block, d, align, lmin, rmax, paragraph)
 
+    def first_word_width(ln: TextLine) -> float:
+        """Approximate width of the first word of ``ln`` (pt)."""
+        text = ln.text.lstrip()
+        word = text.split(" ", 1)[0] if text else ""
+        if not word or not ln.text:
+            return 0.0
+        return (ln.extent[1] - ln.extent[0]) * len(word) / max(len(ln.text), 1)
+
     def soft_break_after(i: int) -> bool:
-        """Did old line ``i`` wrap into line ``i + 1`` (same paragraph)?"""
+        """Did old line ``i`` wrap into line ``i + 1`` (same paragraph)?
+        Classic reflow test: only if the next line's first word would *not*
+        have fitted on line ``i`` – list items and short lines are hard breaks."""
         if i >= n_old - 1 or not paragraph:
             return False
-        return full[i] and abs(old[i + 1].extent[0] - lmin) <= 1.0
+        if not (full[i] and abs(old[i + 1].extent[0] - lmin) <= 1.0):
+            return False
+        used = old[i].extent[1] - lmin
+        space = 0.25 * old[i].style.size
+        return used + space + first_word_width(old[i + 1]) > column_hi - lmin - 0.5
+
+    # the column the block sits in: other lines on the same axis that span
+    # the block's left edge end at the column's right edge (one-column page:
+    # the margin; two columns: only lines of the same column qualify)
+    column_hi = max([ln.extent[1] for ln in ctx.others
+                     if abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3
+                     and ln.extent[0] - 2.0 <= lmin <= ln.extent[1]] + [rmax])
+    if paragraph and not any(soft_break_after(i) for i in range(n_old - 1)):
+        # "full" lines but no real wrap (a list, an address): independent lines
+        # that may grow sideways like point text instead of reflowing
+        paragraph = False
+        max_width = _available_width(ctx, block, d, align, lmin, rmax, False)
 
     # -- lay out lines (wrap + reflow into the paragraph's next lines) -------
     layout: list[tuple[list, int, bool]] = []  # (rich, paragraph index, paragraph continues)
@@ -1108,7 +1136,9 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         runs.extend(_emit_line(rich, origin, ld, em, extra, font_of))
     for j in range(len(layout), n_old):
         remove.append(old[j])
-    return _Plan(remove=remove, runs=runs, align=align, wrap_width=max_width)
+    soft = tuple(i for i in range(n_old) if soft_break_after(i))
+    return _Plan(remove=remove, runs=runs, align=align, wrap_width=max_width,
+                 justified=bool(justified_block), soft_breaks=soft)
 
 
 def _wrap_rich(rich, width: float, measure) -> list[list]:
@@ -1187,15 +1217,18 @@ class LayoutInfo:
 
     align: str          # "left" | "center" | "right"
     wrap_width: float   # pt along the text direction; 0 = lines never wrap
+    justified: bool = False          # paragraph lines are stretched to the column
+    soft_breaks: tuple = ()          # indices i: line i flows on into line i+1
 
 
 def layout_info(doc: pymupdf.Document, block: TextBlock) -> LayoutInfo:
-    """Alignment and wrap width that editing ``block`` will use."""
+    """Alignment, wrap width, justification and soft line breaks that
+    editing ``block`` will use."""
     try:
         plan = _plan(doc[block.page], block, block.text, None)
     except Exception:  # never let a UI hint break editing
         return LayoutInfo("left", float(block.bbox.width))
-    return LayoutInfo(plan.align, float(plan.wrap_width))
+    return LayoutInfo(plan.align, float(plan.wrap_width), plan.justified, plan.soft_breaks)
 
 
 def replace_block_text(pdf, block: TextBlock, new_text: str, style: SpanStyle | None = None) -> None:

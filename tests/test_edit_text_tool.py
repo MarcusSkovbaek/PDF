@@ -199,3 +199,31 @@ def test_display_font_name():
     assert d("Times-Roman") == "Times"
     assert d("ArialMT") == "Arial"
     assert d("TimesNewRomanPS-BoldMT") == "Times New Roman Bold"
+
+
+def test_soft_breaks_restored_before_the_change():
+    from pdfstudio.ui.viewer.tools.edit_text import EditTextTool
+
+    shown = "aaa bbb ccc ddd"          # three soft breaks at 3, 7, 11
+    soft = [3, 7, 11]
+    edited = "aaa bbb cXc ddd"
+    assert EditTextTool._restore_soft_breaks(shown, soft, edited) == "aaa\nbbb\ncXc ddd"
+    assert EditTextTool._restore_soft_breaks(shown, soft, "Xaa bbb ccc ddd") == "Xaa bbb ccc ddd"
+
+
+def test_justified_paragraph_shown_as_one_justified_paragraph(win, qapp, tmp_path):  # noqa: F811
+    from tests.test_text_edit import _list_and_paragraph_doc
+
+    pdf = _list_and_paragraph_doc()
+    path = str(tmp_path / "j.pdf")
+    pdf.save(path)
+    win.open_path(path)
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    tool = ws.tool
+    par = next(b for b in tool.blocks(0) if b.text.startswith("Kvartalets"))
+    tool.start_edit(par)
+    assert "\n" not in tool.editor.toPlainText()
+    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignJustify
+    tool.commit()                                    # unchanged -> no undo step
+    assert not ws.pdf.history.can_undo

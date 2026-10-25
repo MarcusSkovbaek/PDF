@@ -4,6 +4,8 @@
   a content area (``self.body`` layout) and a right-aligned button row.
 * :func:`ask_save_changes` – "Gem / Gem ikke / Annullér" prompt.
 * :func:`show_error`, :func:`confirm` – simple message dialogs.
+* :func:`ask_file_changed`, :func:`ask_unwritable`, :func:`ask_recover` –
+  the questions around saving.
 """
 
 from __future__ import annotations
@@ -113,6 +115,69 @@ def confirm(parent: QWidget | None, title: str, text: str, ok_text: str, *, dang
         return _AUTO["confirm"] == "ok"
     dlg.exec()
     return dlg.choice == "ok"
+
+
+def ask_file_changed(parent: QWidget | None, name: str) -> str:
+    """The file was changed by another program. ``"overwrite"``,
+    ``"save_as"`` or ``"cancel"``."""
+    if _AUTO.get("file_changed"):
+        return _AUTO["file_changed"]
+    dlg = FolioDialog(parent, tr("save.changed.title", name=name), tr("save.changed.text"),
+                      icon_name="warning", icon_role="warning", width=470)
+    dlg.choice = "cancel"
+    over = dlg.add_button(tr("save.changed.overwrite"), "ghost", "overwrite")
+    dlg.buttons.insertWidget(0, over)
+    dlg.buttons.insertStretch(1, 1)
+    dlg.add_button(tr("shell.dirty.cancel"), "secondary", "cancel")
+    dlg.add_button(tr("save.save_as"), "primary", "save_as", default=True)
+    dlg.exec()
+    return dlg.choice
+
+
+def ask_unwritable(parent: QWidget | None, name: str, reason: str) -> str:
+    """The file cannot be written (``reason`` from
+    :func:`pdfstudio.core.document.check_writable`). ``"save_as"`` or ``"cancel"``."""
+    if _AUTO.get("unwritable"):
+        return _AUTO["unwritable"]
+    dlg = FolioDialog(parent, tr("save.unwritable.title", name=name), tr(f"save.unwritable.{reason}"),
+                      icon_name="lock-simple", icon_role="warning", width=470)
+    dlg.choice = "cancel"
+    dlg.add_button(tr("shell.dirty.cancel"), "secondary", "cancel")
+    dlg.add_button(tr("save.save_as"), "primary", "save_as", default=True)
+    dlg.exec()
+    return dlg.choice
+
+
+def ask_recover(parent: QWidget | None, entries) -> str:
+    """Unsaved work from a crash: ``"restore"``, ``"discard"`` or ``"later"``."""
+    if _AUTO.get("recover"):
+        return _AUTO["recover"]
+    from ..panels.comments import format_when
+
+    dlg = FolioDialog(parent, tr("save.recover.title"), tr("save.recover.text"),
+                      icon_name="clock-counter-clockwise", width=480)
+    box = QFrame()
+    box.setObjectName("Card")
+    bl = QVBoxLayout(box)
+    bl.setContentsMargins(14, 10, 14, 10)
+    bl.setSpacing(6)
+    for e in entries[:8]:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(ThemedIconLabel("lock-key" if e.protected else "file-pdf", 16, "text_muted"))
+        row.addWidget(label(e.title, None), 1)
+        when = format_when(e.saved_at)
+        row.addWidget(label(tr("save.recover.when", time=when[:1].lower() + when[1:]), "caption"))
+        bl.addLayout(row)
+    dlg.body.addWidget(box)
+    dlg.choice = "later"
+    discard = dlg.add_button(tr("save.recover.discard"), "ghost", "discard")
+    dlg.buttons.insertWidget(0, discard)
+    dlg.buttons.insertStretch(1, 1)
+    dlg.add_button(tr("save.recover.later"), "secondary", "later")
+    dlg.add_button(tr("save.recover.restore"), "primary", "restore", default=True)
+    dlg.exec()
+    return dlg.choice
 
 
 # Test hook: pre-answer dialogs (e.g. ``_AUTO["save_changes"] = "discard"``).

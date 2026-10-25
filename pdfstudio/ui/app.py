@@ -35,6 +35,20 @@ def settings() -> QSettings:
     return QSettings(APP_ORG, APP_NAME)
 
 
+def recovery_dir() -> str:
+    """Where autosave copies go: next to the settings in tests / portable
+    mode (``FOLIO_RECOVERY_DIR`` overrides), else the per-user local folder."""
+    env = os.environ.get("FOLIO_RECOVERY_DIR")
+    if env:
+        return env
+    d = _configured_dir or os.environ.get("FOLIO_SETTINGS_DIR")
+    if d:
+        return os.path.join(d, "Gendannelse")
+    from ..core.recovery import default_folder
+
+    return default_folder()
+
+
 def recent_files() -> list[str]:
     val = settings().value(RECENT_KEY, [])
     if isinstance(val, str):
@@ -151,6 +165,8 @@ def run(argv: list[str] | None = None) -> int:
     if args.files:
         win.open_files([os.path.abspath(f) for f in args.files])
     _apply_debug_state(win, args)
+    if not args.screenshot:
+        QTimer.singleShot(400, win.saver.check_recovery)  # unsaved work from a crash?
     if args.screenshot:
         def shoot() -> None:
             app.processEvents()

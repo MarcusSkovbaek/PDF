@@ -123,6 +123,9 @@ class MainWindow(QMainWindow):
 
         self.actions = ActionRegistry(self)
         self.theme = theme_manager()
+        from .saving import SaveController
+
+        self.saver = SaveController(self)
 
         root = QWidget()
         root.setObjectName("AppRoot")
@@ -140,6 +143,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.stack, 1)
         self.statusbar = self._build_statusbar()
         v.addWidget(self.statusbar)
+        self.saver.busyChanged.connect(self._on_save_busy)
 
         self.toasts = ToastHost(root, bottom_margin=T.STATUSBAR_H + 20)
         self.palette = CommandPalette(root, self.actions)
@@ -284,6 +288,16 @@ class MainWindow(QMainWindow):
         self.hint = label("", "caption")
         h.addWidget(self.hint_icon)
         h.addWidget(self.hint, 1)
+        self.busy = QFrame()
+        self.busy.setObjectName("Badge")
+        bl = QHBoxLayout(self.busy)
+        bl.setContentsMargins(8, 2, 10, 2)
+        bl.setSpacing(6)
+        bl.addWidget(ThemedIconLabel("floppy-disk", 13, "accent_text"))
+        self.busy_text = label("", "caption")
+        bl.addWidget(self.busy_text)
+        self.busy.hide()
+        h.addWidget(self.busy)
         self.zoom = ZoomControl()
         self.zoom.zoomRequested.connect(lambda z: self._with_ws(lambda ws: ws.view.set_zoom(z, animate=True)))
         self.zoom.zoomInRequested.connect(lambda: self.actions.trigger("view.zoom_in"))
@@ -313,6 +327,14 @@ class MainWindow(QMainWindow):
           handler=lambda: self.save(), enabled=has_ws, category=cat_file, order=30)
         r("file.save_as", tr("shell.file.save_as"), icon="floppy-disk-back", shortcut="Ctrl+Shift+S",
           handler=lambda: self.save_as(), enabled=has_ws, category=cat_file, order=40)
+        r("file.save_copy", tr("save.copy"), icon="copy-simple", handler=lambda: self.save_copy(),
+          enabled=has_ws, category=cat_file, order=42)
+        r("file.security", tr("security.action"), icon="lock-key", handler=self.edit_security,
+          enabled=has_ws, category=cat_file, order=44)
+        r("file.reduce", tr("reduce.action"), icon="arrows-in", handler=self.reduce_size,
+          enabled=has_ws, category=cat_file, order=46)
+        r("app.settings", tr("settings.action"), icon="gear-six", shortcut="Ctrl+,", handler=self.open_settings,
+          category=cat_file, order=85)
         r("file.print", tr("shell.file.print"), icon="printer", shortcut="Ctrl+P", handler=self.print_document,
           enabled=has_ws, category=cat_file, order=50)
         r("file.print_plain", tr("shell.file.print_plain"), icon="printer", handler=lambda: self.print_document(False),
@@ -520,8 +542,8 @@ class MainWindow(QMainWindow):
         add(m_file, ["file.new", "file.open"])
         self.recent_menu = m_file.addMenu(icon("clock-counter-clockwise"), tr("shell.file.recent"))
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
-        add(m_file, [None, "file.save", "file.save_as", None, "file.export_images", "file.print",
-                     "file.print_plain", None, "file.close_tab"])
+        add(m_file, [None, "file.save", "file.save_as", "file.save_copy", None, "file.security", "file.reduce",
+                     None, "file.export_images", "file.print", "file.print_plain", None, "file.close_tab"])
         extras(m_file, "file", set())
         add(m_file, [None, "file.quit"])
 
@@ -553,6 +575,7 @@ class MainWindow(QMainWindow):
         for e in self.actions.for_menu("tools"):
             m_tools.addAction(e.action)
 
+        add(menu, [None, "app.settings"])
         m_help = menu.addMenu(tr("shell.menu.help"))
         add(m_help, ["help.about"])
         extras(m_help, "help", {"help.about"})
@@ -699,6 +722,7 @@ class MainWindow(QMainWindow):
         if w is not None:
             self.stack.removeWidget(w)
             if isinstance(w, DocumentWorkspace):
+                self.saver.forget(w)
                 w.close_document()
             w.deleteLater()
 
@@ -706,6 +730,8 @@ class MainWindow(QMainWindow):
         if i < 0 or i >= self.tabs.count():
             return False
         w = self._widgets.get(self.tabs.tabData(i))
+        if isinstance(w, DocumentWorkspace) and self.saver.is_saving(w):
+            return False
         if isinstance(w, DocumentWorkspace) and w.pdf.is_dirty:
             self.tabs.setCurrentIndex(i)
             if not self._resolve_dirty(w):
@@ -811,47 +837,47 @@ class MainWindow(QMainWindow):
     # ============================================================= saving
     def save(self, ws: DocumentWorkspace | None = None) -> bool:
         ws = ws or self.current_workspace()
-        if ws is None:
-            return False
-        if not ws.pdf.path:
-            return self.save_as(ws)
-        return self._save_to(ws, ws.pdf.path)
+        return ws is not None and self.saver.save(ws)
 
     def save_as(self, ws: DocumentWorkspace | None = None, path: str | None = None) -> bool:
         ws = ws or self.current_workspace()
+        return ws is not None and self.saver.save_as(ws, path)
+
+    def save_copy(self, ws: DocumentWorkspace | None = None, path: str | None = None) -> bool:
+        ws = ws or self.current_workspace()
+        return ws is not None and self.saver.save_copy(ws, path)
+
+    def _on_save_busy(self, text: str) -> None:
+        self.busy_text.setText(text)
+        self.busy.setVisible(bool(text))
+
+    def edit_security(self) -> None:
+        ws = self.current_workspace()
         if ws is None:
-            return False
-        if path is None:
-            from .app import last_dir
+            return
+        from .dialogs.security_dialog import ask_security
 
-            base = ws.pdf.path or os.path.join(last_dir(), ws.pdf.display_name)
-            path, _ = QFileDialog.getSaveFileName(self, tr("shell.file.save_as_title"), base, tr("shell.filter.pdf"))
-            if not path:
-                return False
-            if not path.lower().endswith(".pdf"):
-                path += ".pdf"
-        return self._save_to(ws, path)
-
-    def _save_to(self, ws: DocumentWorkspace, path: str) -> bool:
-        try:
-            written = ws.pdf.save(path)
-        except DocumentError as exc:
-            from .dialogs.common import show_error
-
-            show_error(self, tr("shell.error.save_title"), tr("shell.error.save", err=str(exc)))
-            return False
-        except Exception as exc:  # noqa: BLE001
-            from .dialogs.common import show_error
-
-            show_error(self, tr("shell.error.save_title"), tr("shell.error.save", err=str(exc)))
-            return False
-        from .app import add_recent, set_last_dir
-
-        add_recent(written)
-        set_last_dir(os.path.dirname(written))
-        self.toast(tr("shell.saved", name=os.path.basename(written)), "success")
+        result = ask_security(self, ws.pdf.security)
+        if result is None:
+            return
+        security = result[1]
+        ws.pdf.set_security(security)
+        self.toast(tr("security.set") if security is not None and security.needs_password
+                   else tr("security.removed"), "success")
         self._update_tab(ws)
-        return True
+
+    def reduce_size(self) -> None:
+        ws = self.current_workspace()
+        if ws is None:
+            return
+        from .dialogs.reduce_dialog import ReduceDialog
+
+        ReduceDialog(self, ws).exec()
+
+    def open_settings(self) -> None:
+        from .dialogs.settings_dialog import SettingsDialog
+
+        SettingsDialog(self).exec()
 
     # ============================================================ editing
     def undo(self) -> None:
@@ -1187,6 +1213,10 @@ class MainWindow(QMainWindow):
 
     # ============================================================= close
     def closeEvent(self, ev) -> None:  # noqa: N802
+        if self.saver.busy:  # a file is being written: close when it is done
+            ev.ignore()
+            QTimer.singleShot(150, self.close)
+            return
         for ws in self.workspaces():
             if ws.pdf.is_dirty:
                 self.tabs.setCurrentIndex(self.tabs.index_of(self._key_of(ws)))
@@ -1200,4 +1230,5 @@ class MainWindow(QMainWindow):
             pass
         for ws in self.workspaces():
             ws.close_document()
+        self.saver.shutdown()
         ev.accept()

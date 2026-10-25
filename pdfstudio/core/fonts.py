@@ -897,8 +897,7 @@ def _embedded_covers(font: pymupdf.Font, text: str, pairs: dict[int, int]) -> bo
     return True
 
 
-_EMBEDDED_CACHE: "OrderedDict[tuple, list]" = None  # type: ignore[assignment]
-_EMBEDDED_CACHE_MAX = 32
+_EMBEDDED_CACHE_MAX = 64
 
 
 def _page_key(page: pymupdf.Page) -> bytes:
@@ -918,7 +917,6 @@ def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyl
     """``(font, pairs)`` for embedded fonts of the page that are proven to
     map unicode -> glyph exactly like the PDF does (cached per page content:
     proving it means tracing the page's text)."""
-    global _EMBEDDED_CACHE
     from collections import OrderedDict
 
     want = _loose(style.font)
@@ -928,17 +926,29 @@ def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyl
         page = doc[page_index]
     except Exception:
         return []
-    if _EMBEDDED_CACHE is None:
-        _EMBEDDED_CACHE = OrderedDict()
-    key = (_page_key(page), want)
-    hit = _EMBEDDED_CACHE.get(key)
+    # The proof depends on the embedded font programs, not on the rest of
+    # the page: cache per document object, page and the page's font list (an
+    # edit that adds text keeps it valid; undo starts a fresh document).
+    cache = getattr(doc, "_folio_embedded", None)
+    if cache is None:
+        cache = OrderedDict()
+        try:
+            doc._folio_embedded = cache
+        except Exception:
+            pass
+    try:
+        fonts_sig = tuple((f[0], f[3]) for f in page.get_fonts(full=False))
+    except Exception:
+        fonts_sig = ()
+    key = (page_index, want, fonts_sig)
+    hit = cache.get(key)
     if hit is not None:
-        _EMBEDDED_CACHE.move_to_end(key)
+        cache.move_to_end(key)
         return hit
     found = list(_find_embedded(doc, page, want))
-    _EMBEDDED_CACHE[key] = found
-    while len(_EMBEDDED_CACHE) > _EMBEDDED_CACHE_MAX:
-        _EMBEDDED_CACHE.popitem(last=False)
+    cache[key] = found
+    while len(cache) > _EMBEDDED_CACHE_MAX:
+        cache.popitem(last=False)
     return found
 
 

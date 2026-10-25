@@ -351,6 +351,68 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     )
 
 
+def _join_fragments(lines: list[TextLine]) -> set[int]:
+    """Pieces of one text line that MuPDF reports as separate lines (text
+    written out of order – e.g. words in another font of an edited line are
+    written after the rest) are joined: same direction and baseline, and the
+    gap between them no wider than a word space. Returns the ids of the
+    lines that were merged into others."""
+    gone: set[int] = set()
+    cand = [ln for ln in lines if _is_axis(ln.dir) and len(ln.char_pos) == len(ln.text)]
+    if len(cand) < 2:
+        return gone
+    rows: dict[tuple, list[TextLine]] = {}
+    for ln in cand:
+        n = _perp(ln.dir)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+    for row in rows.values():
+        if len(row) < 2:
+            continue
+        row.sort(key=lambda ln: ln.extent[0])
+        cur = row[0]
+        for ln in row[1:]:
+            size = max(cur.style.size, ln.style.size, 1.0)
+            n = _perp(cur.dir)
+            gap = ln.extent[0] - cur.extent[1]
+            if (-0.5 <= gap <= 0.5 * size and abs(_dot(ln.raw_origin, n) - _dot(cur.raw_origin, n)) <= 0.35
+                    and not _is_bullet(cur) and not _is_bullet(ln)):
+                _absorb(cur, ln, gap)
+                gone.add(id(ln))
+            else:
+                cur = ln
+    return gone
+
+
+def _absorb(a: TextLine, b: TextLine, gap: float) -> None:
+    """Append line ``b`` (to the right of ``a`` on its baseline) to ``a``."""
+    size = max(a.style.size, 1.0)
+    space = gap > 0.12 * size
+    sa = a.char_styles or [a.style] * len(a.text)
+    sb = b.char_styles or [b.style] * len(b.text)
+    ra = a.char_rises or [0.0] * len(a.text)
+    rb = b.char_rises or [0.0] * len(b.text)
+    a.text = a.text + (" " if space else "") + b.text
+    a.char_styles = sa + ([sa[-1]] if space else []) + sb
+    a.char_rises = ra + ([0.0] if space else []) + rb
+    a.char_pos = a.char_pos + ([(a.extent[1], b.extent[0])] if space else []) + b.char_pos
+    a.char_rects = a.char_rects + b.char_rects
+    a.span_rects = a.span_rects + b.span_rects
+    a.raw_bbox = pymupdf.Rect(a.raw_bbox) | b.raw_bbox
+    a.bbox = pymupdf.Rect(a.bbox) | b.bbox
+    a.extent = (a.extent[0], max(a.extent[1], b.extent[1]))
+    for k, v in b.decor.items():
+        a.decor.setdefault(k, v)
+    a.decor_rects = a.decor_rects + b.decor_rects
+    counts: dict[int, int] = {}
+    by_id: dict[int, SpanStyle] = {}
+    for ch, st in zip(a.text, a.char_styles):
+        if not ch.isspace():
+            counts[id(st)] = counts.get(id(st), 0) + 1
+            by_id[id(st)] = st
+    if counts:
+        a.style = by_id[max(counts, key=counts.get)]
+
+
 def _dominant_style(lines: list[TextLine]) -> SpanStyle:
     weights: dict[tuple, int] = {}
     styles: dict[tuple, SpanStyle] = {}
@@ -381,28 +443,43 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     pg = doc[page]
     if _BLOCK_CACHE is None:
         _BLOCK_CACHE = OrderedDict()
-    key = (_page_key(pg), merge, tuple(pg.rect))
+    page_key = (_page_key(pg), tuple(pg.rect))
+    key = page_key + (merge,)
     hit = _BLOCK_CACHE.get(key)
     if hit is not None:
         _BLOCK_CACHE.move_to_end(key)
         return list(hit)
-    blocks = _extract_blocks(pg, page, merge)
+    # the merged and the unmerged view share one extraction
+    base = _BLOCK_CACHE.get(page_key + ("groups",))
+    if base is None:
+        base = _extract_groups(pg)
+        _BLOCK_CACHE[page_key + ("groups",)] = base
+    blocks = _extract_blocks(pg, page, merge, base)
     _BLOCK_CACHE[key] = blocks
     while len(_BLOCK_CACHE) > _BLOCK_CACHE_MAX:
         _BLOCK_CACHE.popitem(last=False)
     return list(blocks)
 
 
-def _extract_blocks(pg: pymupdf.Page, page: int, merge: bool) -> list[TextBlock]:
+def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, float]]:
+    """Lines of the page grouped into PyMuPDF's blocks (split at columns,
+    size changes and list items), before paragraphs are merged."""
     rm = pg.rotation_matrix
     data = pg.get_text("rawdict", flags=_EXTRACT_FLAGS)
     groups: list[list[TextLine]] = []
     raw_lines: list[TextLine] = []
+    per_block = []
     for b in data.get("blocks", ()):
         if b.get("type", 0) != 0:
             continue
         lines = [ln for rl in b.get("lines", ()) for ln in _build_lines(rl, rm)]
+        per_block.append(lines)
         raw_lines.extend(lines)
+    gone = _join_fragments(raw_lines)
+    if gone:
+        raw_lines = [ln for ln in raw_lines if id(ln) not in gone]
+        per_block = [[ln for ln in lines if id(ln) not in gone] for lines in per_block]
+    for lines in per_block:
         if lines:
             for col in _split_columns(lines):
                 for part in _split_size_changes(col):
@@ -413,6 +490,12 @@ def _extract_blocks(pg: pymupdf.Page, page: int, merge: bool) -> list[TextBlock]
     items = _list_item_starts(raw_lines)
     if items:
         groups = [g for grp in groups for g in _split_list_items(grp, items)]
+    return groups, items
+
+
+def _extract_blocks(pg: pymupdf.Page, page: int, merge: bool, base=None) -> list[TextBlock]:
+    groups, items = base if base is not None else _extract_groups(pg)
+    groups = [list(g) for g in groups]
     if merge:
         groups = _merge_groups(groups, items)
     blocks: list[TextBlock] = []
@@ -525,9 +608,16 @@ def _split_columns(lines: list[TextLine]) -> list[list[TextLine]]:
 _BULLETS = set("•◦▪▫‣⁃●○■□◆◇►▸▹➢➤✓✔–—-*·")
 
 
+_MARKER_ONLY = re.compile(r"^\(?(?:\d{1,3}|[a-zA-Z]|[ivxlcIVXLC]{1,6})[.)]$")
+
+
 def _is_bullet(ln: TextLine) -> bool:
+    """A bullet glyph, or a list number standing apart from its item ("a." set
+    with a tab before the text)."""
     t = ln.text.strip()
-    return len(t) == 1 and (t in _BULLETS or 0xE000 <= ord(t) <= 0xF8FF)  # PUA: Symbol/OpenSymbol bullets
+    if len(t) == 1 and (t in _BULLETS or 0xE000 <= ord(t) <= 0xF8FF):  # PUA: Symbol/OpenSymbol bullets
+        return True
+    return bool(_MARKER_ONLY.match(t))
 
 
 _BULLET_SYMBOLS = set("•·◦▪▫‣⁃●○■□◆◇►▸▹➢➤✓✔")
@@ -541,14 +631,30 @@ def is_list_bullet(block: TextBlock) -> bool:
     return len(t) == 1 and (t in _BULLET_SYMBOLS or 0xE000 <= ord(t) <= 0xF8FF)
 
 
+#: A list marker at the start of a line, followed by a space: "1." "2)" "a."
+#: "b)" "iv." "(3)" "•" "–" … (numbered lists keep the number in the line).
+_MARKER = re.compile(r"^(?:\(?(?:\d{1,3}|[a-zA-Z]|[ivxlcIVXLC]{1,6})[.)]|[•◦▪▫‣⁃●○■□◆◇►▸▹➢➤✓✔–—*·-])\s+\S")
+
+
+def marker_end(text: str) -> int:
+    """Index of the first character after a leading list marker and its
+    spaces (0 when the line does not start with one)."""
+    m = _MARKER.match(text)
+    return m.end() - 1 if m else 0
+
+
 def _list_item_starts(lines: list[TextLine]) -> dict[int, float]:
     """``id(line) -> bullet start`` for every text line that starts a list
     item: a bullet glyph on the same row just left of it (Word/LibreOffice
-    lists, slides). Bullets themselves map to their own start too."""
+    lists, slides), or a marker at the start of the line itself ("1. …",
+    "a) …", "• …"). Bullets themselves map to their own start too."""
+    out: dict[int, float] = {}
+    for ln in lines:
+        if _is_axis(ln.dir) and not _is_bullet(ln) and marker_end(ln.text):
+            out[id(ln)] = ln.extent[0]
     bullets = [ln for ln in lines if _is_axis(ln.dir) and _is_bullet(ln)]
     if not bullets:
-        return {}
-    out: dict[int, float] = {}
+        return out
     for bl in bullets:
         n = _perp(bl.dir)
         row = _dot(bl.raw_origin, n)
@@ -1502,6 +1608,15 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
     lmin = min(ln.extent[0] for ln in old)
     rmax = max(ln.extent[1] for ln in old)
     at_right = [abs(ln.extent[1] - rmax) <= 1.0 for ln in old]
+    # where continuation lines start: the column edge, the text after a list
+    # marker ("1. Første …" wraps under "Første"), or a hanging indent
+    cont_x = lmin
+    if n_old >= 2:
+        rest = sorted(ln.extent[0] for ln in old[1:])
+        if rest[-1] - rest[0] <= 1.0:
+            cont_x = rest[0]
+    elif marker_end(first.text) and len(first.char_pos) == len(first.text):
+        cont_x = first.char_pos[marker_end(first.text)][0]
 
     def stretched(ln: TextLine) -> bool:
         """Is this line wider than its natural width (justified text)?"""
@@ -1552,11 +1667,10 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         have fitted on line ``i`` – list items and short lines are hard breaks."""
         if i >= n_old - 1 or not paragraph:
             return False
-        if not (full[i] and abs(old[i + 1].extent[0] - lmin) <= 1.0):
+        if not (full[i] and abs(old[i + 1].extent[0] - cont_x) <= 1.0):
             return False
-        used = old[i].extent[1] - lmin
         space = 0.25 * old[i].style.size
-        return used + space + first_word_width(old[i + 1]) > column_hi - lmin - 0.5
+        return old[i].extent[1] + space + first_word_width(old[i + 1]) > column_hi - 0.5
 
     # the column the block sits in: other lines on the same axis that span
     # the block's left edge end at the column's right edge (one-column page:
@@ -1577,6 +1691,25 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         # that may grow sideways like point text instead of reflowing
         paragraph = False
         max_width = _available_width(ctx, block, d, align, lmin, rmax, False)
+    if not paragraph and n_old == 1 and _is_axis(d) and max_width > 0:
+        # a single line (a table cell, a label) grows sideways only until the
+        # next text on its row: beyond that it would print over its neighbour
+        row = _dot(first.raw_origin, n)
+        size = first.style.size or 10.0
+        same_row = [ln for ln in ctx.others if abs(ln.dir[0] - d[0]) < 1e-3 and abs(ln.dir[1] - d[1]) < 1e-3
+                    and abs(_dot(ln.raw_origin, n) - row) <= 0.5 * size]
+        right = min([ln.extent[0] for ln in same_row if ln.extent[0] >= rmax - 0.5] + [math.inf])
+        left = max([ln.extent[1] for ln in same_row if ln.extent[1] <= lmin + 0.5] + [-math.inf])
+        gap = 0.3 * size
+        if align == "right":
+            limit = rmax - (left + gap)
+        elif align == "center":
+            c = (lmin + rmax) / 2
+            limit = 2 * min(c - (left + gap), (right - gap) - c)
+        else:
+            limit = (right - gap) - lmin
+        if limit < max_width:
+            max_width = max(limit, rmax - lmin)
     frame = (lmin, max(rmax, column_hi)) if paragraph else (lmin, rmax)
     if align_override is not None:
         # an explicit alignment re-typesets the block inside its column
@@ -1601,6 +1734,20 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
             carry = []
         if unchanged(i, rich) or not rich:
             pieces = [rich]
+        elif align == "left" and max_width > 0 and _is_axis(d):
+            # each line may run to the column's right edge from where it starts
+            # (an indented first line, a hanging indent, the text after "1.")
+            j0 = len(layout)
+            right = lmin + max_width
+
+            def width_of(k: int, j0=j0, carried=carried) -> float:
+                j = j0 + k
+                start = old[j].extent[0] if j < n_old and not (relayout and align_override) else cont_x
+                if j < n_old and k == 0 and not carried:
+                    start = old[j].extent[0]
+                return max(right - start, 4.0 * (first.style.size or 10.0))
+
+            pieces = _wrap_rich(rich, width_of, lambda r, i=i: measure(r, space_em(i)))
         else:
             pieces = _wrap_rich(rich, max_width, lambda r, i=i: measure(r, space_em(i)))
         if len(pieces) > 1 and soft_break_after(i) and i + 1 < len(paragraphs) \
@@ -1628,6 +1775,9 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
             last = old[-1].raw_origin
             k = j - n_old + 1
             base = (last[0] + n[0] * spacing * k, last[1] + n[1] * spacing * k)
+            if align == "left":  # continuation lines start at the continuation edge
+                shift = cont_x - _dot(base, d)
+                base = (base[0] + d[0] * shift, base[1] + d[1] * shift)
             ld = old[-1].dir
             start_j, end_j = (_dot(base, d), _dot(base, d) + (rmax - lmin))
             if align == "right":
@@ -1664,7 +1814,7 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         elif align == "center":
             target = (start_j + end_j) / 2 - width / 2
         else:
-            target = _dot(base, ld) if j < n_old else _dot(old[-1].raw_origin, ld)
+            target = _dot(base, ld) if j < n_old else cont_x
         extra = 0.0
         n_spaces = sum(1 for c in rich if c[0] == " ")
         if align_override == "justify":
@@ -1703,10 +1853,12 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
                  substitutions=substitutions, others=ctx.others, dir=d)
 
 
-def _wrap_rich(rich, width: float, measure) -> list[list]:
-    """Greedy word wrap of rich text to ``width`` (0 = never wrap)."""
-    tol = 1.5 + 0.01 * width
-    if width <= 0 or measure(rich) <= width + tol:
+def _wrap_rich(rich, width, measure) -> list[list]:
+    """Greedy word wrap of rich text to ``width`` (0 = never wrap) – a
+    number, or a function giving the width of the n-th line."""
+    width_of = width if callable(width) else (lambda _k, w=width: w)
+    first = width_of(0)
+    if first <= 0 or measure(rich) <= first + 1.5 + 0.01 * first:
         return [rich]
     tokens: list[tuple[list, list]] = []  # (separator, word)
     sep: list = []
@@ -1723,17 +1875,22 @@ def _wrap_rich(rich, width: float, measure) -> list[list]:
         tokens.append((sep, word))
     lines: list[list] = []
     cur: list = []
+
+    def limit() -> float:
+        w = width_of(len(lines))
+        return w + 1.5 + 0.01 * w
+
     for sep, word in tokens:
         cand = cur + sep + word if (cur or not lines) else word
-        if measure(cand) <= width + tol:
+        if measure(cand) <= limit():
             cur = cand
             continue
         if cur:
             lines.append(cur)
             cur = []
-        while word and measure(word) > width + tol:
+        while word and measure(word) > limit():
             k = len(word)
-            while k > 1 and measure(word[:k]) > width + tol:
+            while k > 1 and measure(word[:k]) > limit():
                 k -= 1
             lines.append(word[:k])
             word = word[k:]

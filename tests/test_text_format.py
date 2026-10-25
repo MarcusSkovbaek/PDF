@@ -206,3 +206,76 @@ def test_double_spaced_paragraph_stays_one_block_after_editing():
     te.replace_block_text(pdf, b, b.text, line_spacing=2.4)
     again = _block(pdf, "Selskabet")
     assert len(again.lines) == n >= 3            # still one paragraph to edit
+
+
+# -- lists and indents (A10) ------------------------------------------------------------
+ITEM2 = ("2. Andet punkt som er langt nok til at blive ombrudt over flere linjer, sådan som et tekstbehandlings"
+         "program ville gøre det med en hængende indrykning")
+
+
+def _wrap_item(text: str, x_text: float, right: float, size: float = 11) -> list[str]:
+    """Break ``text`` like a word processor: a word goes on the next line
+    only when it does not fit (continuation lines start at ``x_text``)."""
+    lines, cur, x0 = [], "", 72.0
+    for word in text.split():
+        cand = f"{cur} {word}" if cur else word
+        if cur and x0 + pymupdf.get_text_length(cand, "helv", size) > right:
+            lines.append(cur)
+            cur, x0 = word, x_text
+        else:
+            cur = cand
+    return lines + [cur]
+
+
+def _list_doc():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    # a body paragraph sets the column (72 … 520) like in a real document
+    page.insert_textbox(pymupdf.Rect(72, 30, 520, 80), "Brødtekst der fylder hele spalten ud. " * 6,
+                        fontname="helv", fontsize=11)
+    y = 80
+    page.insert_text((72, y), "Indledning til listen herunder.", fontname="helv", fontsize=11)
+    y += 18
+    page.insert_text((72, y), "1. Første punkt i listen", fontname="helv", fontsize=11)
+    y += 14
+    x_text = 72 + pymupdf.get_text_length("2. ", "helv", 11)
+    for k, line in enumerate(_wrap_item(ITEM2, x_text, 520)):
+        page.insert_text((72 if k == 0 else x_text, y), line, fontname="helv", fontsize=11)
+        y += 14
+    for it in ("3. Tredje punkt", "a) Bogstavpunkt"):
+        page.insert_text((72, y), it, fontname="helv", fontsize=11)
+        y += 14
+    page.insert_text((72, y + 10), "Afsnit efter listen.", fontname="helv", fontsize=11)
+    return PdfDocument(pymupdf.open("pdf", doc.tobytes()))
+
+
+def test_numbered_items_are_separate_blocks():
+    pdf = _list_doc()
+    texts = [b.text for b in te.text_blocks(pdf.doc, 0)]
+    assert "1. Første punkt i listen" in texts
+    assert any(t.startswith("2. Andet") and t.replace("\n", " ") == ITEM2 for t in texts)
+    assert "3. Tredje punkt" in texts and "a) Bogstavpunkt" in texts
+    assert te.marker_end("12. Punkt") == 4 and te.marker_end("iv) x") == 4 and te.marker_end("Normal") == 0
+
+
+def test_wrapped_list_item_keeps_its_hanging_indent():
+    pdf = _list_doc()
+    b = _block(pdf, "2.")
+    longer = b.text.replace("\n", " ") + " Og så kommer der endnu mere tekst, som skal have sin egen linje i punktet."
+    te.replace_block_text(pdf, b, longer)
+    nb = _block(pdf, "2.")
+    assert len(nb.lines) >= 3
+    x_text = 72 + pymupdf.get_text_length("2. ", "helv", 11)
+    assert all(abs(ln.extent[0] - x_text) < 0.6 for ln in nb.lines[1:])   # under the text, not the number
+    below = _block(pdf, "3.")
+    assert below.lines[0].raw_origin[1] > nb.lines[-1].raw_origin[1] + 10  # the next item moved down
+
+
+def test_single_line_item_wraps_under_its_text():
+    pdf = _list_doc()
+    b = _block(pdf, "1.")
+    te.replace_block_text(pdf, b, b.text + " med en tilføjelse som gør punktet så langt at det må ombrydes til en ny linje")
+    nb = _block(pdf, "1.")
+    assert len(nb.lines) == 2
+    start_text = nb.lines[0].char_pos[3][0]   # "F" of "Første"
+    assert abs(nb.lines[1].extent[0] - start_text) < 0.6

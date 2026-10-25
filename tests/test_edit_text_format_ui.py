@@ -163,3 +163,20 @@ def test_overflow_offers_shrink_to_fit(win, qapp, tmp_path):  # noqa: F811
     assert nb.style.size < size_before
     assert max(ln.bbox.y1 for ln in nb.lines) <= 152
     assert any("formindsket" in t for t in win.toasts.visible_messages())
+
+
+def test_editor_shows_list_item_hanging_indent(win, qapp, tmp_path):  # noqa: F811
+    from tests.test_text_format import _list_doc
+    path = str(tmp_path / "liste.pdf")
+    _list_doc().doc.save(path)
+    ws = win.open_path(path)
+    ws.set_mode("edit")
+    tool = ws.tool
+    for start in ("2.", "1."):   # wrapped item, single-line item
+        tool.start_edit(_block(tool, start))
+        qapp.processEvents()
+        fmt = tool.editor.document().begin().blockFormat()
+        x_text = pymupdf.get_text_length(start + " ", "helv", 11)
+        assert abs(tool._hanging_indent() - x_text) < 0.8
+        assert fmt.leftMargin() > 0 and abs(fmt.textIndent() + fmt.leftMargin()) < 0.01
+        tool.cancel()

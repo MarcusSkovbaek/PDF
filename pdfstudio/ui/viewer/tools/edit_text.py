@@ -275,6 +275,19 @@ class InlineTextEditor(QTextEdit):
         QTextCursor(block).setBlockFormat(fmt)
         self.blockSignals(False)
 
+    def set_hanging_indent(self, px: float) -> None:
+        """Lines after the first start ``px`` further right (a list item's
+        text after "1.", a hanging indent)."""
+        block = self.document().begin()
+        fmt = block.blockFormat()
+        if abs(fmt.leftMargin() - px) < 0.01 and abs(fmt.textIndent() + px) < 0.01:
+            return
+        fmt.setLeftMargin(px)
+        fmt.setTextIndent(-px)
+        self.blockSignals(True)
+        QTextCursor(block).setBlockFormat(fmt)
+        self.blockSignals(False)
+
     def set_alignment(self, align: Qt.AlignmentFlag) -> None:
         opt = self.document().defaultTextOption()
         opt.setAlignment(align)
@@ -1403,7 +1416,11 @@ class EditTextTool(Tool):
         self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
                                    "right": Qt.AlignmentFlag.AlignRight,
                                    "justify": Qt.AlignmentFlag.AlignJustify}.get(align, Qt.AlignmentFlag.AlignLeft))
-        self.editor.set_first_line_indent(self._first_line_indent() * ppp)
+        hang = self._hanging_indent()
+        if hang > 0:
+            self.editor.set_hanging_indent(hang * ppp)
+        else:
+            self.editor.set_first_line_indent(self._first_line_indent() * ppp)
         self._reposition()
 
     def _first_line_indent(self) -> float:
@@ -1416,6 +1433,25 @@ class EditTextTool(Tool):
             return 0.0
         indent = b.lines[0].origin[0] - min(ln.origin[0] for ln in b.lines)
         return indent if indent > 0.5 else 0.0
+
+    def _hanging_indent(self) -> float:
+        """How much further right than the first line the following lines
+        start (pt): a wrapped list item ("1. Første …" continues under
+        "Første") or a hanging indent; 0 when there is none."""
+        b, lay = self.block, self._layout
+        if self.rotated() or not b.lines or (lay is not None and lay.align != "left") \
+                or self.align_override not in (None, "left", "justify"):
+            return 0.0
+        first = b.lines[0]
+        if len(b.lines) >= 2:
+            rest = [ln.origin[0] for ln in b.lines[1:]]
+            if max(rest) - min(rest) <= 1.0 and min(rest) - first.origin[0] > 1.0:
+                return min(rest) - first.origin[0]
+            return 0.0
+        k = te.marker_end(first.text)
+        if k and len(first.char_pos) == len(first.text) and abs(first.dir[1]) < 1e-3 and first.dir[0] > 0:
+            return max(0.0, first.char_pos[k][0] - first.extent[0])
+        return 0.0
 
     def _editor_background(self) -> QColor:
         """Opaque page colour: hides the original text while it is edited."""
@@ -1441,7 +1477,7 @@ class EditTextTool(Tool):
                 self._shrink_to_fit(block, text, style, formats, align, line_spacing)
 
             self.ctx.toast(tr("edit.text.overflow"), "warning", action_text=tr("edit.text.overflow.fit"),
-                           on_action=shrink)
+                           on_action=shrink, duration_ms=12000)
 
     def _shrink_to_fit(self, block, text, style, formats, align, line_spacing) -> None:
         """"Formindsk så den passer": redo the edit with a smaller text size."""

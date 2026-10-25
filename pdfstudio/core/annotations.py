@@ -6,7 +6,13 @@ converted on the way in and out. Annotations are identified by their PDF
 ``xref``, which is stable across undo/redo (snapshots are byte-identical
 serialisations without garbage collection).
 
-No personal data is written: the annotation author (``/T``) is left empty.
+New annotations carry the author (``/T``: the Windows user's name, see
+:mod:`pdfstudio.core.identity`), creation and modification dates and a
+unique ``/NM`` – like Acrobat, so comment lists show who wrote what when.
+Replies, review states and group members (annotations with ``/IRT``) belong
+to their parent's thread (:mod:`pdfstudio.core.comments`) and are left out
+of :func:`list_annotations` / :func:`annotation_at`; deleting a parent
+deletes them too.
 
 Group operations (:func:`update_annotations`, :func:`move_annotations`,
 :func:`delete_annotations`) change several annotations as one undo step;
@@ -16,6 +22,7 @@ Group operations (:func:`update_annotations`, :func:`move_annotations`,
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -23,6 +30,7 @@ import pymupdf
 
 from ..i18n import tr
 from .document import CONTENT, PdfDocument
+from .identity import current_author, pdf_date
 from .render import (
     DocLike,
     PointLike,
@@ -36,6 +44,7 @@ from .render import (
 )
 
 Color = tuple[float, float, float]
+AnnotRef = tuple[int, int]  # (page, xref)
 
 MARKUP_KINDS = ("highlight", "underline", "strikeout", "squiggly")
 SHAPE_KINDS = ("rect", "ellipse", "line", "arrow")
@@ -69,6 +78,7 @@ _TYPE_KINDS = {
     pymupdf.PDF_ANNOT_POLYGON: "polygon",
     pymupdf.PDF_ANNOT_POLY_LINE: "polyline",
     pymupdf.PDF_ANNOT_STAMP: "stamp",
+    pymupdf.PDF_ANNOT_CARET: "caret",
 }
 _MARKUP_TYPES = {
     pymupdf.PDF_ANNOT_HIGHLIGHT,
@@ -251,11 +261,67 @@ def _load(page: pymupdf.Page, xref: int) -> pymupdf.Annot:
     return annot
 
 
+def stamp_new(annot: pymupdf.Annot) -> None:
+    """Author, dates and a unique name of a newly created annotation."""
+    now = pdf_date()
+    annot.set_info(title=current_author(), creationDate=now, modDate=now)
+    annot.parent.parent.xref_set_key(annot.xref, "NM", pymupdf.get_pdf_str(uuid.uuid4().hex))
+
+
 def _finish(annot: pymupdf.Annot, opacity: float) -> int:
     if opacity < 1.0:
         annot.set_opacity(opacity)
+    stamp_new(annot)
     annot.update()
     return annot.xref
+
+
+def is_thread_child(annot: pymupdf.Annot) -> bool:
+    """Replies, review states and group members (``/IRT``)."""
+    try:
+        return bool(annot.irt_xref)
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def thread_children(page: pymupdf.Page) -> dict[int, list[pymupdf.Annot]]:
+    """``{parent xref: [annotations with /IRT -> parent]}`` of a page."""
+    out: dict[int, list[pymupdf.Annot]] = {}
+    for a in page.annots():
+        if is_thread_child(a):
+            out.setdefault(a.irt_xref, []).append(a)
+    return out
+
+
+def thread_descendants(page: pymupdf.Page, xref: int) -> list[int]:
+    """Every annotation whose /IRT chain leads to ``xref``, deepest first."""
+    kids = thread_children(page)
+    out: list[int] = []
+    seen = {xref}
+
+    def walk(x: int) -> None:
+        for a in kids.get(x, []):
+            if a.xref not in seen:
+                seen.add(a.xref)
+                walk(a.xref)
+                out.append(a.xref)
+
+    walk(xref)
+    return out
+
+
+def _delete_with_thread(page: pymupdf.Page, xref: int) -> None:
+    """Delete an annotation with its replies, states and group members."""
+    for child in thread_descendants(page, xref):
+        try:
+            page.delete_annot(page.load_annot(child))
+        except Exception:
+            pass  # already removed together with its own parent
+    page.delete_annot(_load(page, xref))
+
+
+def _top_annots(page: pymupdf.Page) -> list[pymupdf.Annot]:
+    return [a for a in page.annots() if not is_thread_child(a)]
 
 
 # -- text markup ---------------------------------------------------------------------
@@ -354,37 +420,54 @@ def add_text_markup(
         return _finish(annot, opacity)
 
 
-def add_markup_lines(
+Selection = Mapping[int, Sequence[RectLike]]  # {page: [display rect per text line]}
+
+
+def add_markup(
     pdf: PdfDocument,
-    page: int,
     kind: str,
-    line_rects: Sequence[RectLike],
+    selection: Selection,
     color: Color,
     opacity: float = 1.0,
-) -> int | None:
-    """Like :func:`add_text_markup`, but for an explicit flow selection: one
-    quad per given display-space rect (typically the union of the selected
-    words of one text line). Returns the xref, or ``None`` if nothing given."""
+    *,
+    contents: str = "",
+    label: str | None = None,
+) -> list[AnnotRef]:
+    """Mark an explicit flow selection (``{page: [line rect, ...]}``,
+    display space; one quad per rect – typically one per text line, see
+    :func:`pdfstudio.core.textsel.selection_rects`) – one annotation per
+    page, all in one undo step. ``contents`` (the comment) goes on the first
+    page's annotation. Returns ``[(page, xref), ...]`` (empty: nothing
+    changed)."""
     if kind not in MARKUP_KINDS:
         raise ValueError(tr("core.err.annot_kind", kind=kind))
     stroke = _check_color(color)
     opacity = _check_opacity(opacity)
-    pg = pdf.page(page)
-    quads = [display_to_page_rect(pg, r).quad for r in line_rects]
-    quads = [q for q in quads if not q.rect.is_empty]
-    if not quads:
-        return None
-    with pdf.edit(tr(f"core.undo.{kind}"), CONTENT, (page,)):
+    plan: dict[int, list[pymupdf.Quad]] = {}
+    for page in sorted(selection):
         pg = pdf.page(page)
-        adder = {
-            "highlight": pg.add_highlight_annot,
-            "underline": pg.add_underline_annot,
-            "strikeout": pg.add_strikeout_annot,
-            "squiggly": pg.add_squiggly_annot,
-        }[kind]
-        annot = adder(quads=quads)
-        annot.set_colors(stroke=stroke)
-        return _finish(annot, opacity)
+        quads = [display_to_page_rect(pg, r).quad for r in selection[page]]
+        quads = [q for q in quads if not q.rect.is_empty]
+        if quads:
+            plan[page] = quads
+    if not plan:
+        return []
+    out: list[AnnotRef] = []
+    with pdf.edit(label or tr(f"core.undo.{kind}"), CONTENT, tuple(plan)):
+        for page, quads in plan.items():
+            pg = pdf.page(page)
+            adder = {
+                "highlight": pg.add_highlight_annot,
+                "underline": pg.add_underline_annot,
+                "strikeout": pg.add_strikeout_annot,
+                "squiggly": pg.add_squiggly_annot,
+            }[kind]
+            annot = adder(quads=quads)
+            annot.set_colors(stroke=stroke)
+            if contents and not out:
+                annot.set_info(content=str(contents))
+            out.append((page, _finish(annot, opacity)))
+    return out
 
 
 # -- notes, ink, shapes ----------------------------------------------------------------
@@ -589,7 +672,7 @@ def list_annotations(doc: DocLike, page: int) -> list[AnnotInfo]:
     """All annotations of a page (no links / form fields / popups), in
     drawing order (last = topmost)."""
     pg = as_document(doc)[page]
-    return [_info(annot, pg, page) for annot in pg.annots()]
+    return [_info(annot, pg, page) for annot in _top_annots(pg)]
 
 
 def _segment_distance(p: pymupdf.Point, a: pymupdf.Point, b: pymupdf.Point) -> float:
@@ -637,7 +720,7 @@ def annotation_at(doc: DocLike, page: int, point: PointLike, tolerance: float = 
     """
     pg = as_document(doc)[page]
     target = display_to_page_point(pg, point)
-    for annot in reversed(list(pg.annots())):
+    for annot in reversed(_top_annots(pg)):
         if _hits(annot, target, tolerance):
             return _info(annot, pg, page)
     return None
@@ -749,6 +832,7 @@ def _apply_props(doc: pymupdf.Document, pg: pymupdf.Page, xref: int, props: Mapp
     if "contents" in props:
         text = str(props["contents"] or "")
         annot.set_info(content=_clean_text(text) if free_text else text)
+    annot.set_info(modDate=pdf_date())
     annot.update(**appearance)
 
 
@@ -771,15 +855,14 @@ def update_annotation(pdf: PdfDocument, page: int, xref: int, **props: Any) -> N
 
 
 def delete_annotation(pdf: PdfDocument, page: int, xref: int) -> None:
-    """Remove an annotation (and its popup)."""
+    """Remove an annotation with its popup and its whole thread (replies,
+    review states, group members)."""
     _load(pdf.page(page), xref)
     with pdf.edit(tr("core.undo.delete_annot"), CONTENT, (page,)):
-        pg = pdf.page(page)
-        pg.delete_annot(_load(pg, xref))
+        _delete_with_thread(pdf.page(page), xref)
 
 
 # -- group operations (one undo step each) ---------------------------------------------
-AnnotRef = tuple[int, int]  # (page, xref)
 
 
 def _refs(items: Iterable[Sequence[int]]) -> list[AnnotRef]:
@@ -833,7 +916,8 @@ def delete_annotations(pdf: PdfDocument, items: Iterable[Sequence[int]]) -> None
     with pdf.edit(label, CONTENT, tuple(sorted({p for p, _ in refs}))):
         for p, x in refs:
             pg = pdf.page(p)
-            pg.delete_annot(_load(pg, x))
+            if any(a.xref == x for a in pg.annots()):  # may have gone with a deleted parent
+                _delete_with_thread(pg, x)
 
 
 # -- previews ----------------------------------------------------------------------------
@@ -886,14 +970,18 @@ __all__ = [
     "HIT_TOLERANCE",
     "MARKUP_KINDS",
     "SHAPE_KINDS",
+    "Selection",
     "add_free_text",
     "add_ink",
-    "add_markup_lines",
+    "add_markup",
     "add_note",
     "add_shape",
     "add_text_markup",
     "annotation_at",
     "annotations_in_rect",
+    "is_thread_child",
+    "thread_children",
+    "thread_descendants",
     "delete_annotation",
     "delete_annotations",
     "free_text_size",

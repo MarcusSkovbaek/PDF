@@ -1,6 +1,6 @@
 # Kravspecifikation – Tekstredigering, Gem og Kommentarer på tekst
 
-Version 1.0 · 2026-10-24 · Folio PDF 1.0 → 1.1 · Status: **til godkendelse**
+Version 1.0 · 2026-10-24 · Folio PDF 1.0 → 1.1 · Status: **godkendt 2026-10-25** (med afklaringerne i afsnit F)
 
 Prioritet: **SKAL** = indgår og testes. **BØR** = indgår, medmindre det viser sig at stride mod en SKAL
 (fx størrelse/stabilitet), og det meldes i så fald. **KAN** = kun hvis der er tid. Alle krav har et ID, så du
@@ -38,7 +38,7 @@ må vokse mærkbart. Mål: **+0 MB** i nye afhængigheder; alt bygges på PyMuPD
 | A3 | SKAL | **Justering og linjeafstand for eksisterende afsnit.** Venstre, centreret, højre og lige margener samt linjeafstand (1,0 / 1,15 / 1,5 / 2,0 / præcis). | Et venstrestillet afsnit centreres og får 1,5 i linjeafstand. Efter gem og genåbning er resultatet det samme. |
 | A4 | SKAL | **Ingen overlap, når et afsnit vokser.** Hvis det redigerede afsnit fylder mere eller mindre end før, flyttes indholdet direkte under i samme spalte op eller ned (tekst, og billeder hvor det er sikkert), så længe der er plads til sidens bund. Er der ikke plads, får man et tydeligt valg i inspektøren: *Formindsk teksten, så den passer* eller *Behold (overlapper)*. | Et afsnit, der vokser med 2 linjer, skubber de 3 afsnit under sig ned uden overlap. Ved sidens bund vises valget. Det hele er ét fortryd-trin. |
 | A5 | SKAL | **Søg og erstat (Ctrl+H)** i hele dokumentet eller i en markering. Tekst erstattes i samme skrifttype. *Erstat*, *Erstat alle*, forhåndsvisning af antal og samme indstillinger som søgning (forskel på store og små bogstaver, hele ord). | "Kunde" erstattes med "Klient" i 40 forekomster på 12 sider i ét trin. Linjerne ombrydes korrekt, og ét Ctrl+Z gendanner alt. |
-| A6 | BØR | **Stavekontrol i editoren** med rød bølgelinje og forslag ved højreklik. Den bruger **Windows' indbyggede stavekontrol** (dansk og engelsk, offline, 0 MB ekstra). Kun for tekst, man redigerer. | Et fejlstavet dansk ord understreges, og der vises forslag. Uden stavekontrol i Windows sker der intet, og der kommer ingen fejl. |
+| ~~A6~~ | UDGÅR | **Stavekontrol i editoren** med rød bølgelinje og forslag ved højreklik. Den bruger **Windows' indbyggede stavekontrol** (dansk og engelsk, offline, 0 MB ekstra). Kun for tekst, man redigerer. | Et fejlstavet dansk ord understreges, og der vises forslag. Uden stavekontrol i Windows sker der intet, og der kommer ingen fejl. |
 | A7 | SKAL | **Hurtigere.** Editoren åbner på under 100 ms og gemmer på under 150 ms på en tæt side (58-siders testrapport), takket være en tekst-cache pr. side. | Målt i den automatiske test. |
 | A8 | SKAL | **Manglende tegn.** Kan dokumentets skrifttype ikke vise et tegn (fx "ø" i en subset-skrift), henter programmet det fra en lignende skrifttype og fortæller diskret hvilken. Der kommer aldrig tomme firkanter. | Test med en subset-skrift uden "æøå". |
 | A9 | SKAL | **Indsæt.** Indsat tekst fra andre programmer kommer ind som ren tekst i afsnittets format. Kopiering inde i editoren bevarer formatet. Ctrl+Z virker tegn for tegn i editoren og bagefter som ét dokument-trin. | UI-test. |
@@ -71,13 +71,13 @@ må vokse mærkbart. Mål: **+0 MB** i nye afhængigheder; alt bygges på PyMuPD
 | C1 | SKAL | **Præcis tekstmarkering på tegnniveau**, i læserækkefølge, også hen over linjer, spalter og sider. Dobbeltklik markerer et ord, tredobbeltklik et afsnit, og Shift+klik udvider. Mellemrum og linjeskift kopieres korrekt. Fungerer på roterede sider. | "markér fra midt i ord A til midt i ord B" giver præcis den tekst. Test på 2-spaltet og på 90°-roteret side. |
 | C2 | SKAL | **Flydende mini-værktøjslinje ved markering** (Acrobat-stil) og det samme i højreklik-menuen: **Kommentér**, Fremhæv, Understreg, Gennemstreg, *Erstat tekst* (gennemstreg + forslag), *Indsæt tekst her* (indsættelsesmærke), Kopiér. | Markér → klik "Kommentér" → skriv → Enter. Det er 2 klik og ingen skift af værktøj. |
 | C3 | SKAL | **Kommentar på en markering = én standard PDF-kommentar:** en fremhævning (farve kan vælges) med kommentartekst, forfatter, oprettelses- og ændringstidspunkt og den markerede tekst som citat. Ét fortryd-trin. Kommentarfeltet får fokus med det samme. Genvej **Ctrl+Alt+M** (som Word). | Kommentaren ses med tekst, forfatter og dato i Adobe Acrobat/Reader, Edge og Chrome (kontrolleres i test mod PDF-standardens felter og ved manuel kontrol). |
-| C4 | SKAL | **Kommentarpanel til højre** med et kort pr. kommentar i dokumentrækkefølge. Kortet viser forfatterens initialer i en farvet cirkel, navn og tidspunkt ("for 5 min. siden"), citat af den markerede tekst, kommentarteksten, som kan redigeres direkte, svar og status. Panelets kort kan placeres ud for deres sted på siden som Word-bobler, med en tynd forbindelseslinje til markeringen, når der er plads. Ellers vises de som liste. Klik på kort ↔ markering vælger begge, scroller og pulserer kort. | UI-test plus skærmbilleder i lys og mørk. Hver kommentar kan nås og redigeres uden at forlade panelet. |
+| C4 | SKAL | **Kommentarpanel til højre (kun liste, Acrobat-stil)** med et kort pr. kommentar i dokumentrækkefølge. Kortet viser forfatterens initialer i en farvet cirkel, navn og tidspunkt ("for 5 min. siden"), citat af den markerede tekst, kommentarteksten, som kan redigeres direkte, svar og status. Klik på kort ↔ markering vælger begge, scroller og pulserer kort. | UI-test plus skærmbilleder i lys og mørk. Hver kommentar kan nås og redigeres uden at forlade panelet. |
 | C5 | SKAL | **Svar i tråde.** *Svar* under et kort. Svar gemmes som standard PDF-svar, så Acrobat viser dem som svar, og svar skrevet i Acrobat vises som tråd i Folio. | Rundtur: en PDF med Acrobat-svar vises korrekt. Folios svar har de felter, Acrobat bruger. |
 | C6 | SKAL | **Status.** *Markér som løst* og *Genåbn* (Word), samt Acrobats gennemgangsstatus *Accepteret / Afvist / Annulleret / Fuldført*, gemt på Acrobats standardmåde. Løste kommentarer vises nedtonet og kan skjules. | Rundtur Folio ↔ Acrobat-format i test. |
 | C7 | SKAL | **Filtrér, sortér og søg** i kommentarer: på type, forfatter, status (åben/løst) og side, med fritekstsøgning i kommentartekst og citat. Sortering efter side, dato eller forfatter. Antal vises. | UI-test. |
 | C8 | SKAL | **Navigation:** *Næste/forrige kommentar* (F8/Shift+F8 og knapper i panelet). Panelet åbner automatisk, når man laver en kommentar. | – |
 | C9 | SKAL | **Redigér og slet:** sletning af en kommentar sletter også dens svar (efter bekræftelse, hvis der er svar). Tekst skrevet i et kort er ét fortryd-trin, når kortet forlades eller med Ctrl+Enter, og Esc fortryder. Flyt markeringen ved at markere ny tekst og vælge *Flyt kommentar hertil* (BØR). | Test af alle handlinger plus fortryd og annuller fortryd. |
-| C10 | SKAL | **Forfatternavn:** spørges om én gang ved første kommentar, forudfyldt med Windows-brugerens navn (læses lokalt). Det gemmes lokalt og kan ændres i Indstillinger. "Reducér størrelse" (B7) kan fjerne det igen. | – |
+| C10 | SKAL | **Forfatternavn:** altid Windows-brugerens navn (læses lokalt), uden at spørge. "Reducér størrelse" (B7) kan fjerne det igen. | – |
 | C11 | SKAL | **Alle kommentartyper får kort, svar og status**, også eksisterende noter, figurer, frihåndstegning og tekstfelter, ikke kun tekstmarkeringer. | – |
 | C12 | BØR | **Opsummér kommentarer:** eksportér en PDF med en oversigt over alle kommentarer (side, citat, forfatter, dato, svar, status), og udskriv med eller uden kommentarer. | Den genererede oversigt kan åbnes og har ét afsnit pr. kommentar. |
 | C13 | KAN | Importér og eksportér kommentarer som FDF/XFDF-fil (udveksling med Acrobat uden at sende hele PDF'en). | – |
@@ -86,8 +86,7 @@ må vokse mærkbart. Mål: **+0 MB** i nye afhængigheder; alt bygges på PyMuPD
 
 ## D. Arkitektur og størrelse (hvordan det passer ind)
 
-* **Ingen nye afhængigheder.** Stavekontrollen (A6) bruger Windows' egen COM-API via `ctypes`, som er
-  standardbiblioteket. Er den ikke tilgængelig, er funktionen bare slået fra.
+* **Ingen nye afhængigheder.**
 * **Kerne (`pdfstudio/core`, uden Qt, fuldt unit-testet):**
   * `core/comments.py` (ny): tråde, svar, status, forfatter og tidspunkt. Bygger på `annotations.py` og
     duplikerer det ikke. Selve tegningen af fremhævning, understregning osv. bliver i `annotations.py`.
@@ -134,10 +133,9 @@ Fejler et krav, rettes det og testes igen, før næste del går i gang.
 
 Jeg pusher løbende og melder status efter hver del.
 
-## F. Afklaringer (mine forslag står først)
+## F. Afklaringer (besluttet 2026-10-25)
 
-1. **Forfatternavn på kommentarer (C10):** *spørg én gang, forudfyldt med Windows-navnet* · altid Windows-navnet
-   uden at spørge · intet navn (anonymt).
-2. **Kommentarvisning (C4):** *kort ud for deres sted, Word-stil, med liste som reserve* · kun liste (Acrobat-stil).
-3. **Stavekontrol (A6):** *med, via Windows (0 MB)* · udelad.
-4. **Autogem (B2):** *hvert 2. minut, slået til* · andet interval · slået fra som standard.
+1. Forfatternavn (C10): **altid Windows-navnet, uden at spørge.**
+2. Kommentarvisning (C4): **kun liste i højre panel (Acrobat-stil).**
+3. Stavekontrol (A6): **udelades.**
+4. Autogem (B2): **hvert 2. minut, slået til som standard.**

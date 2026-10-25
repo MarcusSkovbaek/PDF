@@ -820,6 +820,15 @@ class PageView(QGraphicsView):
         tev = self._make_event(ev)
         if kind == "double":
             tev.click_count = 2
+            self._last_double = (time.monotonic(), QPointF(ev.position()))
+        elif kind == "press" and getattr(self, "_last_double", None) is not None:
+            t0, p0 = self._last_double
+            from PySide6.QtWidgets import QApplication
+
+            interval = QApplication.styleHints().mouseDoubleClickInterval() / 1000.0
+            if time.monotonic() - t0 <= interval and (QPointF(ev.position()) - p0).manhattanLength() <= 6:
+                tev.click_count = 3  # triple click (Qt reports no such event)
+            self._last_double = None
         fn = {"press": tool.mouse_press, "move": tool.mouse_move,
               "release": tool.mouse_release, "double": tool.mouse_double_click}[kind]
         fn(tev)
@@ -863,6 +872,22 @@ class PageView(QGraphicsView):
     def mouseDoubleClickEvent(self, ev) -> None:  # noqa: N802
         if not self._dispatch("double", ev):
             super().mouseDoubleClickEvent(ev)
+
+    def contextMenuEvent(self, ev) -> None:  # noqa: N802
+        tool = self._tool
+        if tool is None or not hasattr(tool, "context_menu"):
+            super().contextMenuEvent(ev)
+            return
+        vp = QPointF(ev.pos())
+        sp = self.viewport_to_scene(vp)
+        idx, local = self.page_at(sp)
+        tev = ToolMouseEvent(page=idx, pos=local, scene_pos=sp, view_pos=vp,
+                             buttons=Qt.MouseButton.RightButton, button=Qt.MouseButton.RightButton,
+                             modifiers=ev.modifiers(), view=self)
+        if tool.context_menu(tev, ev.globalPos()):
+            ev.accept()
+            return
+        super().contextMenuEvent(ev)
 
     def wheelEvent(self, ev) -> None:  # noqa: N802
         if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:

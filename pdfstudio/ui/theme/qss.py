@@ -96,6 +96,7 @@ QToolButton[variant="row"]:disabled { color: @text_subtle; }
 QToolButton[variant="icon"] { padding: 0px; min-width: 32px; min-height: 32px; max-width: 32px; max-height: 32px; }
 QToolButton[variant="icon"]:checked { background: @hover; color: @text; }
 QToolButton[variant="icon-sm"] { padding: 0px; min-width: 26px; min-height: 26px; max-width: 26px; max-height: 26px; border-radius: 6px; }
+QToolButton[variant="icon-xs"] { padding: 0px; min-width: 20px; min-height: 20px; max-width: 20px; max-height: 20px; border-radius: 5px; }
 QToolButton[variant="tool"] { padding: 0px; min-width: 36px; min-height: 36px; max-width: 36px; max-height: 36px; border-radius: 9px; }
 QToolButton[variant="tool"]:checked { background: @accent; color: @text_on_accent; }
 QToolButton[variant="pill"] { padding: 0px 10px; min-height: 30px; border-radius: 8px; color: @text; }
@@ -252,6 +253,25 @@ QListWidget#ImageGrid { background: @surface_raised; border: 1px solid @border; 
 QFrame#RecentRow { background: transparent; border-radius: 8px; border: 1px solid transparent; }
 QFrame#RecentRow:hover { background: @hover; }
 QFrame#EmptyState { background: transparent; }
+/* ---------- comments ---------- */
+QFrame#CommentCard { background: @surface_raised; border: 1px solid @border; border-radius: 10px; }
+QFrame#CommentCard:hover { border: 1px solid @border_strong; }
+QFrame#CommentCard[selected="true"] { border: 1px solid @accent; background: @card_hover; }
+QLabel#CommentAuthor { font-size: 12px; font-weight: 600; color: @text; }
+QLabel#CommentText { color: @text; }
+QLabel#CommentText[placeholder="true"] { color: @text_subtle; }
+QFrame#CommentCard[resolved="true"] { background: @surface; }
+QFrame#CommentCard[resolved="true"] QLabel, QFrame#CommentCard[resolved="true"] QLabel#CommentText,
+QFrame#CommentCard[resolved="true"] QLabel#CommentQuote { color: @text_subtle; }
+QFrame#CommentCard[resolved="true"] QLabel#CommentAuthor { color: @text_muted; }
+QLabel#CommentQuote { font-style: italic; font-size: 12px; }
+QPlainTextEdit#CommentEditor { padding: 2px 4px; }
+QLabel#StatusChip { border-radius: 8px; padding: 1px 7px; font-size: 11px; font-weight: 600; }
+QLabel#StatusChip[chip="success"] { background: @success_soft; color: @success; }
+QLabel#StatusChip[chip="danger"] { background: @danger_soft; color: @danger; }
+QLabel#StatusChip[chip="accent"] { background: @accent_soft; color: @accent_text; }
+QLabel#StatusChip[chip="muted"] { background: @hover; color: @text_muted; }
+QPushButton[size="sm"] { min-height: 26px; padding: 0px 10px; font-size: 12px; }
 """
 
 _PLACEHOLDER = re.compile(r"@([a-z_]+)")

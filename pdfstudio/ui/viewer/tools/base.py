@@ -121,6 +121,11 @@ class Tool(QObject):
     def key_press(self, ev: QKeyEvent) -> bool:
         return False
 
+    def context_menu(self, ev: ToolMouseEvent, global_pos) -> bool:
+        """Right click: show a menu at ``global_pos`` and return True, or
+        return False for none."""
+        return False
+
     def properties_widget(self) -> QWidget | None:
         return None
 

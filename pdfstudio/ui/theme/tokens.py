@@ -30,7 +30,7 @@ HEADER_H = 48
 MODEBAR_H = 48
 STATUSBAR_H = 34
 SIDEBAR_W = 264
-INSPECTOR_W = 280
+INSPECTOR_W = 300
 ANIM_MS = 150
 
 
@@ -191,6 +191,23 @@ def set_current(name_or_tokens) -> Tokens:
 def with_accent(tokens: Tokens, accent: str) -> Tokens:
     """Return a copy using another accent colour (for future personalisation)."""
     return replace(tokens, accent=accent)
+
+
+#: Avatar circles of comment authors (picked by a stable hash of the name).
+AVATARS = {
+    "light": ("#5B5BD6", "#23946A", "#C2410C", "#B4237A", "#0E7490", "#7C3AED", "#A16207", "#BE123C"),
+    "dark": ("#7C7CF0", "#3DBE8B", "#F07A3E", "#E25CA8", "#38B2CF", "#A57CF5", "#D7A533", "#F0607C"),
+}
+
+
+def avatar_color(name: str, tokens: Tokens | None = None):
+    import zlib
+
+    from PySide6.QtGui import QColor
+
+    pal = AVATARS["dark" if (tokens or _current).is_dark else "light"]
+    r, g, b, a = rgba(pal[zlib.crc32((name or "?").encode("utf-8")) % len(pal)])
+    return QColor(r, g, b, a)
 
 
 # --- conversion helpers -----------------------------------------------------

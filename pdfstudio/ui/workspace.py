@@ -189,31 +189,59 @@ class ElideLabel(QLabel):
 
 
 class Inspector(QWidget):
-    """Right panel: active tool's properties, else document information."""
+    """Right panel with two tabs: *Egenskaber* (the active tool's properties,
+    else document information) and *Kommentarer* (the comment list)."""
+
+    TABS = ("props", "comments")
 
     def __init__(self, workspace) -> None:
         super().__init__()
+        from .panels.comments import CommentsPanel
+
         self.workspace = workspace
         self.setObjectName("Inspector")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
+        tabs_row = QWidget()
+        tabs_row.setObjectName("PanelHeader")
+        tl = QHBoxLayout(tabs_row)
+        tl.setContentsMargins(10, 10, 10, 2)
+        self.tabs = SegmentedControl(
+            [Segment("props", tr("shell.inspector.tab.props"), "sliders-horizontal", tr("shell.inspector.tab.props")),
+             Segment("comments", tr("comments.tab"), "chat-circle-text", tr("comments.tab"))],
+            height=30, expand=True, min_seg=60)
+        self.tabs.currentChanged.connect(self.show_tab)
+        tl.addWidget(self.tabs, 1)
+        lay.addWidget(tabs_row)
+        self.stack = QStackedWidget()
+        lay.addWidget(self.stack, 1)
+
+        props = QWidget()
+        pl = QVBoxLayout(props)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
         head = QWidget()
         head.setObjectName("PanelHeader")
         hl = QHBoxLayout(head)
-        hl.setContentsMargins(16, 12, 10, 8)
+        hl.setContentsMargins(16, 10, 10, 6)
         self.head_icon = ThemedIconLabel("sliders-horizontal", 16, "text_muted")
         self.head_title = label(tr("shell.inspector.title"), "heading")
         hl.addWidget(self.head_icon)
         hl.addSpacing(4)
         hl.addWidget(self.head_title, 1)
-        lay.addWidget(head)
+        pl.addWidget(head)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        lay.addWidget(self.scroll, 1)
+        pl.addWidget(self.scroll, 1)
+        self.stack.addWidget(props)
+        self.comments = CommentsPanel(workspace)
+        self.comments.countChanged.connect(self._comment_count)
+        self.stack.addWidget(self.comments)
+
         self._tool_widget: QWidget | None = None
         self._pages_panel: QWidget | None = None
         # Tools cache their panels; a panel that is not shown is parked here
@@ -224,6 +252,31 @@ class Inspector(QWidget):
         self._parking.hide()
         self.doc_info = self._build_doc_info()
         self.scroll.setWidget(self.doc_info)
+        from PySide6.QtCore import QSettings
+
+        if QSettings().value("inspector/tab", "props") == "comments":
+            self.show_tab("comments")
+
+    def current_tab(self) -> str:
+        return self.TABS[self.stack.currentIndex()]
+
+    def show_tab(self, key: str) -> None:
+        if key not in self.TABS:
+            return
+        if self.tabs.current_key() != key:
+            self.tabs.set_current_key(key, animate=self.isVisible())
+        self.stack.setCurrentIndex(self.TABS.index(key))
+        from PySide6.QtCore import QSettings
+
+        QSettings().setValue("inspector/tab", key)
+
+    def _comment_count(self, n: int) -> None:
+        seg = self.tabs._segments[1]
+        text = tr("comments.tab.count", n=n) if n else tr("comments.tab")
+        if seg.text != text:
+            seg.text = text
+            self.tabs.updateGeometry()
+            self.tabs.update()
 
     def _build_doc_info(self) -> QWidget:
         w = QWidget()
@@ -365,8 +418,7 @@ class Sidebar(QWidget):
         self.tabs = SegmentedControl(
             [Segment("pages", "", "squares-four", tr("shell.side.pages")),
              Segment("outline", "", "bookmarks-simple", tr("shell.side.outline")),
-             Segment("search", "", "magnifying-glass", tr("shell.side.search")),
-             Segment("comments", "", "chat-circle-text", tr("comments.tab"))],
+             Segment("search", "", "magnifying-glass", tr("shell.side.search"))],
             height=30, expand=True, min_seg=40)
         hl.addWidget(self.tabs, 1)
         lay.addWidget(head)
@@ -374,15 +426,12 @@ class Sidebar(QWidget):
         self.thumbs = ThumbnailsPanel(workspace)
         self.outline = OutlinePanel(workspace)
         self.search = SearchPanel(workspace)
-        from .panels.comments import CommentsPanel
-
-        self.comments = CommentsPanel(workspace)
-        for w in (self.thumbs, self.outline, self.search, self.comments):
+        for w in (self.thumbs, self.outline, self.search):
             self.stack.addWidget(w)
         lay.addWidget(self.stack, 1)
         self.tabs.currentChanged.connect(self._on_tab)
 
-    KEYS = ("pages", "outline", "search", "comments")
+    KEYS = ("pages", "outline", "search")
 
     def _on_tab(self, key: str) -> None:
         self.stack.setCurrentIndex(self.KEYS.index(key))
@@ -442,7 +491,8 @@ class DocumentWorkspace(QWidget):
         self.center.installEventFilter(self)
 
         self.inspector = Inspector(self)
-        self.inspector.setMinimumWidth(240)
+        self.inspector.setMinimumWidth(260)
+        self.comments = self.inspector.comments
 
         self.splitter.addWidget(self.sidebar)
         self.splitter.addWidget(self.center)
@@ -611,6 +661,39 @@ class DocumentWorkspace(QWidget):
     def set_inspector_visible(self, on: bool) -> None:
         self.inspector.setVisible(on)
 
+    def show_comments(self, page: int | None = None, xref: int | None = None, *, edit: bool = False) -> None:
+        """Open the comment list in the right panel – optionally on one
+        comment, with its text editor focused (new comments)."""
+        if not self.inspector.isVisible():
+            win = self.window_
+            if win is not None and hasattr(win, "toggle_inspector"):
+                win.toggle_inspector(True)
+            else:
+                self.set_inspector_visible(True)
+        self.inspector.show_tab("comments")
+        self.comments.ensure_loaded()
+        if page is not None and xref is not None:
+            self.comments.focus_comment(page, xref, edit=edit)
+
+    def comment_selection(self) -> bool:
+        """Ctrl+Alt+M: comment the selected text (like Word). Without a text
+        selection the Note tool is picked so a click places a note."""
+        tool = self.tool
+        if tool is not None and tool.has_selection() and hasattr(tool, "run_selection_action"):
+            return tool.run_selection_action("comment")
+        win = self.window_
+        if win is not None and hasattr(win, "activate_tool"):
+            win.activate_tool("annotate.note")   # keeps the mode bar in sync
+        else:
+            self.set_tool("annotate.note")
+        self.toast(tr("sel.comment.hint"), "info")
+        return False
+
+    def step_comment(self, delta: int) -> bool:
+        """F8 / Shift+F8: show the next / previous comment."""
+        self.show_comments()
+        return self.comments.step(delta)
+
     def show_search(self) -> None:
         if self.mode == "pages":
             self.set_mode("view")
@@ -670,7 +753,7 @@ class DocumentWorkspace(QWidget):
                 except Exception:
                     pass
             self.search.document_changed()
-            self.sidebar.comments.document_changed()
+            self.comments.document_changed(ev)
         self.inspector.refresh_doc()
         self.titleChanged.emit()
         self.stateChanged.emit()

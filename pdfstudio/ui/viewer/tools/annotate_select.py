@@ -8,6 +8,9 @@
   1 pt (Shift: 10 pt) – a burst of nudges is one undo step.
 * Delete / Backspace removes the selection, Esc clears it.
 * Double-click (or Enter) edits a note's text or a text box in place.
+* Dragging over text that is not a comment selects the text (characters,
+  double click: word, triple click: paragraph) and shows the mini toolbar
+  (Kommentér, Fremhæv, …) – like Acrobat's comment tool.
 * The inspector shows the selection's common style; changes apply to all
   selected comments as one undo step, and hovering a colour previews it on
   the page before anything is written.
@@ -40,6 +43,8 @@ from ._annot_common import (
     ask_note,
     same_color,
 )
+from ..text_selection import TextSelection
+from ._text_actions import SelectionUI
 from .annotate_freetext import FreeTextSession, is_auto_width, style_of
 from .base import Tool, ToolMouseEvent, ToolRegistry
 
@@ -94,6 +99,8 @@ class AnnotSelectTool(Tool):
         self._nudge_timer.setSingleShot(True)
         self._nudge_timer.setInterval(NUDGE_BURST_MS)
         self._nudge_timer.timeout.connect(self._end_burst)
+        self.sel = TextSelection(self)
+        self.sel_ui = SelectionUI(self, self.sel)
 
     # -- selection API ----------------------------------------------------------
     @property
@@ -238,7 +245,13 @@ class AnnotSelectTool(Tool):
         self.set_selection(fresh, emit=emit or lost)
 
     # -- lifecycle -----------------------------------------------------------------
+    def activate(self, ctx) -> None:
+        super().activate(ctx)
+        self.sel_ui.attach()
+
     def deactivate(self) -> None:
+        self.sel.clear()
+        self.sel_ui.detach()
         self._flush_panel()
         self.end_session()
         self._clear_preview()
@@ -251,6 +264,9 @@ class AnnotSelectTool(Tool):
         super().deactivate()
 
     def document_changed(self, event) -> None:
+        self.sel.invalidate()
+        self.sel.clear()
+        self.sel_ui.hide_bar()
         if not self._own_change:
             self._end_burst()  # something else changed: the next nudge is a new step
         if self.session is not None:
@@ -269,6 +285,9 @@ class AnnotSelectTool(Tool):
 
     # -- mouse ---------------------------------------------------------------------
     def mouse_move(self, ev: ToolMouseEvent) -> None:
+        if self.sel.dragging:
+            self.sel.drag(ev)
+            return
         if self._resize is not None and self.selected is not None and self._frame is not None:
             p = ev.pos_on(self.selected.page)
             r = QRectF(self._resize, p).normalized()
@@ -293,13 +312,20 @@ class AnnotSelectTool(Tool):
             self.ctx.view.set_tool_cursor(diag)
             return
         hit = ev.page >= 0 and core_annots.annotation_at(self.ctx.pdf.doc, ev.page, (ev.pos.x(), ev.pos.y()))
-        self.ctx.view.set_tool_cursor(Qt.CursorShape.SizeAllCursor if hit else Qt.CursorShape.ArrowCursor)
+        if hit:
+            cursor = Qt.CursorShape.SizeAllCursor
+        elif self.sel.over_text(ev.page, ev.pos):
+            cursor = Qt.CursorShape.IBeamCursor
+        else:
+            cursor = Qt.CursorShape.ArrowCursor
+        self.ctx.view.set_tool_cursor(cursor)
 
     def mouse_press(self, ev: ToolMouseEvent) -> None:
         if ev.button != Qt.MouseButton.LeftButton:
             return
         if self.session is not None:  # a click outside the text box finishes it
             self.end_session()
+        self.sel_ui.hide_bar()
         self._collapse_to = None
         corner = self.handle_at(ev.page, ev.pos)
         if corner >= 0:  # resize: the opposite corner of the annotation stays put
@@ -314,10 +340,14 @@ class AnnotSelectTool(Tool):
         if info is None:
             if not additive and self.selection:
                 self.select(None)
+            self._press = None
+            if (not additive or self.sel.has_selection()) and self.sel.press(ev, on_text=True):
+                return  # selecting text (Shift extends a text selection)
+            self.sel.clear()
             if ev.page >= 0:
                 self._start_band(ev, additive)
-            self._press = None
             return
+        self.sel.clear()
         if additive:
             self.toggle(info)
         elif not self.is_selected(info):
@@ -327,6 +357,11 @@ class AnnotSelectTool(Tool):
         self._press = (ev.page, QPointF(ev.pos)) if self.is_selected(info) else None
 
     def mouse_release(self, ev: ToolMouseEvent) -> None:
+        if self.sel.dragging:
+            self.sel.release(ev)
+            if self.sel.has_selection():
+                self.sel_ui.show_bar()
+            return
         if self._resize is not None and self.selected is not None:
             anchor, self._resize = self._resize, None
             r = QRectF(anchor, ev.pos_on(self.selected.page)).normalized()
@@ -359,6 +394,8 @@ class AnnotSelectTool(Tool):
             if ev.page >= 0 else None
         if info is not None:
             self.edit(info)
+        elif ev.page >= 0:
+            self.sel.press(ev, on_text=True)  # a word
 
     # -- rubber band -------------------------------------------------------------------
     def _start_band(self, ev: ToolMouseEvent, additive: bool) -> None:
@@ -440,8 +477,25 @@ class AnnotSelectTool(Tool):
     def _end_burst(self) -> None:
         self._nudge_burst = False
 
+    # -- text selection ----------------------------------------------------------------
+    def has_selection(self) -> bool:
+        return self.sel.has_selection()
+
+    def copy(self) -> bool:
+        return self.sel_ui.copy()
+
+    def run_selection_action(self, key: str) -> bool:
+        return self.sel_ui.run(key)
+
+    def context_menu(self, ev: ToolMouseEvent, global_pos) -> bool:
+        return self.sel_ui.context_menu(ev, global_pos)
+
     # -- keys ------------------------------------------------------------------------
     def key_press(self, ev: QKeyEvent) -> bool:
+        if ev.key() == Qt.Key.Key_Escape and self.sel.has_selection():
+            self.sel.clear()
+            self.sel_ui.hide_bar()
+            return True
         if not self.selection:
             return False
         key = ev.key()
@@ -465,6 +519,12 @@ class AnnotSelectTool(Tool):
         if not self.selection:
             return
         refs = [_key(a) for a in self.selection]
+        from ...panels.comments import confirm_delete
+        from ....core import comments as core_comments
+
+        threads = [c for p, x in refs if (c := core_comments.comment(self.ctx.pdf.doc, p, x)) is not None]
+        if not confirm_delete(self.ctx.view.window(), threads):
+            return
         self.select(None)
         core_annots.delete_annotations(self.ctx.pdf, refs)
 

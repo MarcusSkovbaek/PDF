@@ -68,7 +68,9 @@ def test_highlight_marks_whole_words_in_rect(sample_pdf):
     assert marked.x0 <= hello.x0 + 0.5 and marked.x1 >= world.x1 - 0.5
     skrifttype = word_rect(sample_pdf, 0, "skrifttype:")
     assert marked.x0 > skrifttype.x1 - 1
-    assert annot.info["title"] == ""  # no personal data
+    from pdfstudio.core.identity import current_author
+
+    assert annot.info["title"] == current_author()  # the Windows user (decision for 1.1)
 
 
 def test_highlight_multiple_lines_one_quad_per_line(sample_pdf):
@@ -364,24 +366,60 @@ def test_thin_drag_along_a_line_selects_its_words(sample_pdf):
     assert marked.x0 <= hello.x0 + 0.5 and marked.x1 >= world.x1 - 0.5
 
 
-def test_add_markup_lines_flow_selection(sample_pdf):
-    from pdfstudio.core.annotations import add_markup_lines, list_annotations
+def test_add_markup_flow_selection(sample_pdf):
+    from pdfstudio.core.annotations import add_markup, list_annotations
 
     page = sample_pdf.page(0)
     lines = [r for r in (page.search_for("broedtekst"), page.search_for("Anden linje")) for r in r]
-    xref = add_markup_lines(sample_pdf, 0, "highlight", lines, (1, 0.85, 0.2), 0.5)
+    refs = add_markup(sample_pdf, "highlight", {0: lines}, (1, 0.85, 0.2), 0.5)
     infos = list_annotations(sample_pdf.doc, 0)
-    assert xref and infos[-1].kind == "highlight" and abs(infos[-1].opacity - 0.5) < 0.01
-    assert add_markup_lines(sample_pdf, 0, "underline", [], (0, 0, 0)) is None
+    assert refs == [(0, infos[-1].xref)] and infos[-1].kind == "highlight" and abs(infos[-1].opacity - 0.5) < 0.01
+    assert len(sample_pdf.page(0).load_annot(refs[0][1]).vertices) == 8  # one quad per line
+    assert add_markup(sample_pdf, "underline", {0: []}, (0, 0, 0)) == []
 
 
-def test_add_markup_lines_rotated_page(sample_pdf):
-    from pdfstudio.core.annotations import add_markup_lines, list_annotations
+def test_add_markup_spanning_pages_is_one_undo_step(sample_pdf):
+    from pdfstudio.core.annotations import add_markup, list_annotations
+
+    a = sample_pdf.page(0).search_for("Kvartalsrapport")
+    b = sample_pdf.page(1).search_for("Venstre kolonne.")[:1]
+    steps = len(sample_pdf.history._undo)
+    refs = add_markup(sample_pdf, "underline", {1: b, 0: a}, (0, 0, 1), contents="Se her")
+    assert [p for p, _ in refs] == [0, 1] and len(sample_pdf.history._undo) == steps + 1
+    assert list_annotations(sample_pdf.doc, 0)[-1].contents == "Se her"
+    assert list_annotations(sample_pdf.doc, 1)[-1].contents == ""
+    sample_pdf.undo()
+    assert not list_annotations(sample_pdf.doc, 0) and not list_annotations(sample_pdf.doc, 1)
+
+
+def test_new_annotations_carry_author_dates_and_unique_name(sample_pdf):
+    from pdfstudio.core import identity
+    from pdfstudio.core.annotations import add_note, list_annotations, update_annotation
+
+    identity.set_author("Test Person")
+    try:
+        x1 = add_note(sample_pdf, 0, (300, 300), "a", (1, 1, 0))
+        x2 = add_note(sample_pdf, 0, (320, 300), "b", (1, 1, 0))
+    finally:
+        identity.set_author(None)
+    doc = sample_pdf.doc
+    assert list_annotations(doc, 0)[-1].author == "Test Person"
+    names = {doc.xref_get_key(x, "NM")[1] for x in (x1, x2)}
+    assert len(names) == 2
+    created = doc.xref_get_key(x1, "CreationDate")[1]
+    assert identity.parse_pdf_date(created) is not None
+    doc.xref_set_key(x1, "M", "(D:20000101000000Z)")
+    update_annotation(sample_pdf, 0, x1, contents="ny")
+    assert identity.parse_pdf_date(sample_pdf.doc.xref_get_key(x1, "M")[1]).year > 2000
+
+
+def test_add_markup_rotated_page(sample_pdf):
+    from pdfstudio.core.annotations import add_markup, list_annotations
     from pdfstudio.core.render import page_display_size
 
     page = sample_pdf.page(2)
     hit = page.search_for("Roteret")[0] * page.rotation_matrix  # display space
-    add_markup_lines(sample_pdf, 2, "highlight", [hit], (1, 1, 0))
+    add_markup(sample_pdf, "highlight", {2: [hit]}, (1, 1, 0))
     info = list_annotations(sample_pdf.doc, 2)[-1]
     w, h = page_display_size(sample_pdf.doc, 2)
     assert info.rect.intersects(hit) and info.rect.x1 <= w + 1 and info.rect.y1 <= h + 1

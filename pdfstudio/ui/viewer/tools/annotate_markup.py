@@ -1,8 +1,9 @@
 """Text markup tools: Fremhæv / Understreg / Gennemstreg.
 
-They reuse the select tool's flowing word selection (across lines and
-pages) and preview it in the markup colour; releasing the mouse creates one
-annotation per page with one quad per text line.
+They reuse the select tool's character-precise selection (across lines
+and pages) and preview it in the markup colour; releasing the mouse marks
+it – one annotation per page with one quad per text line, one undo step.
+A double click marks a word, a triple click a paragraph.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from ....core import annotations as core_annots
 from ....i18n import tr
 from ...widgets.color_button import to_qcolor
 from ._annot_common import PRESETS, AnnotStyle, AnnotStylePanel
-from .base import ToolMouseEvent, ToolRegistry
+from .base import ToolRegistry
 from .select import SelectTool
 
 
@@ -22,6 +23,7 @@ class MarkupTool(SelectTool):
     kind = "highlight"
     mode = "annotate"
     cursor = Qt.CursorShape.IBeamCursor
+    shows_bar = False
     default_style = AnnotStyle(PRESETS[0], 1.0)
 
     def __init__(self, parent=None) -> None:
@@ -44,22 +46,11 @@ class MarkupTool(SelectTool):
         self.style = style
         style.save(self.id)
 
-    def mouse_release(self, ev: ToolMouseEvent) -> None:
-        super().mouse_release(ev)
-        lines = self.line_rects()
-        if not lines:
-            return
-        pdf = self.ctx.pdf
-        # one undo step per page: the selection may span several pages
-        for page, rects in sorted(lines.items()):
-            core_annots.add_markup_lines(pdf, page, self.kind, [r.getCoords() for r in rects],
-                                         self.style.color, self.style.opacity)
+    def selection_finished(self) -> None:
+        rects = self.line_rects()
         self.clear_selection()
-
-    def mouse_double_click(self, ev: ToolMouseEvent) -> None:
-        # double-click marks a single word, like dragging over it
-        super().mouse_double_click(ev)
-        self.mouse_release(ev)
+        if rects:
+            core_annots.add_markup(self.ctx.pdf, self.kind, rects, self.style.color, self.style.opacity)
 
 
 @ToolRegistry.register

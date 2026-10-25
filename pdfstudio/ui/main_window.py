@@ -315,6 +315,8 @@ class MainWindow(QMainWindow):
           handler=lambda: self.save_as(), enabled=has_ws, category=cat_file, order=40)
         r("file.print", tr("shell.file.print"), icon="printer", shortcut="Ctrl+P", handler=self.print_document,
           enabled=has_ws, category=cat_file, order=50)
+        r("file.print_plain", tr("shell.file.print_plain"), icon="printer", handler=lambda: self.print_document(False),
+          enabled=has_ws, category=cat_file, order=55)
         r("file.export_images", tr("shell.file.export_images"), icon="image", handler=self.export_images,
           enabled=has_ws, category=cat_file, order=60)
         r("file.close_tab", tr("shell.file.close_tab"), icon="x", shortcut="Ctrl+W",
@@ -417,6 +419,19 @@ class MainWindow(QMainWindow):
           enabled=lambda: bool(self.current_pdf() and self.current_pdf().page_count > 1),
           menu="pages", mode="pages", category=cat_pages, order=70)
 
+        # -- comments
+        cat_comments = tr("shell.cat.comments")
+        r("comments.new", tr("shell.comments.new"), icon="chat-circle-text", shortcut="Ctrl+Alt+M",
+          handler=pw(lambda ws: ws.comment_selection()), enabled=has_ws, category=cat_comments, order=10)
+        r("comments.show", tr("shell.comments.show"), icon="chats-circle",
+          handler=pw(lambda ws: ws.show_comments()), enabled=has_ws, category=cat_comments, order=20)
+        r("comments.next", tr("comments.next"), icon="caret-down", shortcut="F8",
+          handler=pw(lambda ws: ws.step_comment(1)), enabled=has_ws, category=cat_comments, order=30)
+        r("comments.prev", tr("comments.prev"), icon="caret-up", shortcut="Shift+F8",
+          handler=pw(lambda ws: ws.step_comment(-1)), enabled=has_ws, category=cat_comments, order=40)
+        r("comments.summary", tr("shell.comments.summary"), icon="list-checks", handler=self.summarize_comments,
+          enabled=has_ws, category=cat_comments, order=50)
+
         # -- tools (dialogs from other modules, imported lazily)
         r("tools.merge", tr("shell.tools.merge"), icon="stack", handler=self.open_merge_dialog,
           menu="tools", category=cat_tools, order=10)
@@ -505,8 +520,8 @@ class MainWindow(QMainWindow):
         add(m_file, ["file.new", "file.open"])
         self.recent_menu = m_file.addMenu(icon("clock-counter-clockwise"), tr("shell.file.recent"))
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
-        add(m_file, [None, "file.save", "file.save_as", None, "file.export_images", "file.print", None,
-                     "file.close_tab"])
+        add(m_file, [None, "file.save", "file.save_as", None, "file.export_images", "file.print",
+                     "file.print_plain", None, "file.close_tab"])
         extras(m_file, "file", set())
         add(m_file, [None, "file.quit"])
 
@@ -523,6 +538,10 @@ class MainWindow(QMainWindow):
 
         m_nav = m_view.addMenu(tr("shell.menu.nav"))
         add(m_nav, ["nav.first_page", "nav.prev_page", "nav.next_page", "nav.last_page", None, "nav.goto"])
+
+        m_comments = menu.addMenu(tr("shell.menu.comments"))
+        add(m_comments, ["comments.new", "comments.show", None, "comments.next", "comments.prev", None,
+                         "comments.summary"])
 
         m_pages = menu.addMenu(tr("shell.menu.pages"))
         for e in self.actions.for_menu("pages"):
@@ -1032,7 +1051,7 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     # ============================================================ output
-    def print_document(self) -> None:
+    def print_document(self, comments: bool = True) -> None:
         ws = self.current_workspace()
         if ws is None:
             return
@@ -1050,9 +1069,39 @@ class MainWindow(QMainWindow):
         dlg.setMinMax(1, n)
         if dlg.exec() != QPrintDialog.DialogCode.Accepted:
             return
-        self._print_to(printer, ws.pdf)
+        self._print_to(printer, ws.pdf, annots=comments)
 
-    def _print_to(self, printer, pdf) -> None:
+    def summarize_comments(self, path: str | None = None) -> str | None:
+        """Save a PDF summarising all comments (Acrobat's "Opsummér kommentarer")
+        and open it in a new tab."""
+        ws = self.current_workspace()
+        if ws is None:
+            return None
+        from ..core import comments as core_comments
+
+        if not core_comments.comments(ws.pdf.doc):
+            self.toast(tr("shell.comments.summary.none"), "info")
+            return None
+        stem = os.path.splitext(ws.pdf.display_name)[0]
+        if path is None:
+            base = os.path.join(os.path.dirname(ws.pdf.path) if ws.pdf.path else os.path.expanduser("~"),
+                                tr("shell.comments.summary.file", name=stem) + ".pdf")
+            path, _ = QFileDialog.getSaveFileName(self, tr("shell.comments.summary"), base, tr("shell.filter.pdf"))
+            if not path:
+                return None
+        try:
+            data = core_comments.summary_pdf(ws.pdf.doc, ws.pdf.display_name)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        except Exception as exc:  # noqa: BLE001 - shown to the user
+            from .dialogs.common import show_error
+
+            show_error(self, tr("shell.error.save_title"), tr("shell.error.save", err=str(exc)))
+            return None
+        self.open_path(path)
+        return path
+
+    def _print_to(self, printer, pdf, annots: bool = True) -> None:
         from PySide6.QtCore import QRect
 
         from .viewer.render_util import render_qimage
@@ -1076,7 +1125,7 @@ class MainWindow(QMainWindow):
                     break
                 if k:
                     printer.newPage()
-                img = render_qimage(pdf.doc, i, dpi / 72.0)
+                img = render_qimage(pdf.doc, i, dpi / 72.0, annots=annots)
                 area = painter.viewport()
                 landscape_page = img.width() > img.height()
                 landscape_paper = area.width() > area.height()

@@ -171,10 +171,11 @@ def test_select_tool_copies_text(win, qapp, sample_pdf_path):
     text = QGuiApplication.clipboard().text()
     assert "Kvartalsrapport" in text
     assert "Roteret side" in text
-    # rotated page words are mapped to display coordinates (inside the page)
-    words = ws.tool.words(2)
+    # rotated page text is mapped to display coordinates (inside the page)
+    chars = ws.tool.sel.page_text(2).chars
     item = ws.view.page_item(2)
-    assert words and all(0 <= w.rect.center().x() <= item.w and 0 <= w.rect.center().y() <= item.h for w in words)
+    assert chars and all(0 <= (g.rect.x0 + g.rect.x1) / 2 <= item.w and 0 <= (g.rect.y0 + g.rect.y1) / 2 <= item.h
+                         for g in chars)
 
 
 def test_save_as_and_recent(win, qapp, sample_pdf_path, tmp_path):
@@ -355,11 +356,12 @@ def test_mouse_text_selection_and_wheel_zoom(win, qapp, sample_pdf_path):
     view = ws.view
     view.go_to_page(0)
     pump(qapp)
-    words = ws.tool.words(0)
-    first = next(w for w in words if w.text == "Kvartalsrapport")
-    last = next(w for w in words if w.text == "2026")
-    a = view.page_to_viewport(0, first.rect.center()).toPoint()
-    b = view.page_to_viewport(0, last.rect.center()).toPoint()
+    pt = ws.tool.sel.page_text(0)
+    full = "".join(g.c for g in pt.chars)
+    first = pt.chars[full.index("Kvartalsrapport")].rect   # left edge of the K
+    last = pt.chars[full.index("2026") + 3].rect             # right edge of the last 6
+    a = view.page_to_viewport(0, QPointF(first.x0 + 0.5, (first.y0 + first.y1) / 2)).toPoint()
+    b = view.page_to_viewport(0, QPointF(last.x1 - 0.2, (last.y0 + last.y1) / 2)).toPoint()
     vp = view.viewport()
     QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, a)
     QTest.mouseMove(vp, QPoint((a.x() + b.x()) // 2, a.y()))
@@ -367,6 +369,7 @@ def test_mouse_text_selection_and_wheel_zoom(win, qapp, sample_pdf_path):
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, b)
     assert ws.tool.selected_text() == "Kvartalsrapport 2026"
     assert ws.can_copy()
+    assert ws.tool.sel_ui.bar is not None and ws.tool.sel_ui.bar.isVisible()   # mini toolbar
     # Ctrl+wheel zoom keeps the point under the cursor fixed
     anchor = QPointF(b)
     before_idx, before_pt = view.page_at(view.viewport_to_scene(anchor))

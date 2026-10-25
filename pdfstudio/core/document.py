@@ -67,6 +67,8 @@ class PdfDocument:
         self._dirty = False
         self._listeners: list[Listener] = []
         self._edit_depth = 0
+        #: increases with every change event – a cheap cache key for views
+        self.revision = 0
 
     # -- construction ----------------------------------------------------
     @classmethod
@@ -156,6 +158,7 @@ class PdfDocument:
         return unsubscribe
 
     def _emit(self, event: ChangeEvent) -> None:
+        self.revision += 1
         for cb in list(self._listeners):
             cb(event)
 

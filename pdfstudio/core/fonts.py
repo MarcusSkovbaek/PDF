@@ -64,6 +64,8 @@ class SpanStyle:
     italic: bool = False
     serif: bool = False
     mono: bool = False
+    underline: bool = False   # drawn as a line under the text (PDF has no such font attribute)
+    strike: bool = False      # line through the text
 
 
 @dataclass
@@ -167,6 +169,18 @@ def family_key(name: str) -> str:
             continue
         break
     return "".join(toks)
+
+
+def styled_font_name(name: str, bold: bool, italic: bool) -> str:
+    """``name`` with its weight/slant words replaced: ``("Arial-BoldMT",
+    False, True)`` -> ``"Arial-Italic"``. Used when a user makes text bold or
+    italic, so the regular embedded font is not picked for it."""
+    toks = _tokens(name)
+    while len(toks) > 1 and toks[-1].lower() in _STYLE_WORDS:
+        toks.pop()
+    base = "".join(toks) if len(toks) > 1 else (toks[0] if toks else clean_font_name(name))
+    suffix = "BoldItalic" if bold and italic else "Bold" if bold else "Italic" if italic else "Regular"
+    return f"{base}-{suffix}"
 
 
 def _is_bold_name(name: str) -> bool:
@@ -883,16 +897,55 @@ def _embedded_covers(font: pymupdf.Font, text: str, pairs: dict[int, int]) -> bo
     return True
 
 
-def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyle):
-    """Yield ``(font, pairs)`` for embedded fonts of the page that are proven
-    to map unicode -> glyph exactly like the PDF does."""
+_EMBEDDED_CACHE: "OrderedDict[tuple, list]" = None  # type: ignore[assignment]
+_EMBEDDED_CACHE_MAX = 32
+
+
+def _page_key(page: pymupdf.Page) -> bytes:
+    """Identifies a page's content (and so the fonts it uses) – equal bytes
+    on equal pages, also across undo (which replaces the document object)."""
+    import hashlib
+
     try:
-        page = doc[page_index]
-        fonts = page.get_fonts(full=True)
+        data = page.read_contents()
+        fonts = str(page.get_fonts(full=False)).encode()
     except Exception:
-        return
+        data, fonts = b"", b""
+    return hashlib.blake2b(data + fonts + str((page.number, page.rotation)).encode(), digest_size=16).digest()
+
+
+def _embedded_candidates(doc: pymupdf.Document, page_index: int, style: SpanStyle):
+    """``(font, pairs)`` for embedded fonts of the page that are proven to
+    map unicode -> glyph exactly like the PDF does (cached per page content:
+    proving it means tracing the page's text)."""
+    global _EMBEDDED_CACHE
+    from collections import OrderedDict
+
     want = _loose(style.font)
     if not want:
+        return []
+    try:
+        page = doc[page_index]
+    except Exception:
+        return []
+    if _EMBEDDED_CACHE is None:
+        _EMBEDDED_CACHE = OrderedDict()
+    key = (_page_key(page), want)
+    hit = _EMBEDDED_CACHE.get(key)
+    if hit is not None:
+        _EMBEDDED_CACHE.move_to_end(key)
+        return hit
+    found = list(_find_embedded(doc, page, want))
+    _EMBEDDED_CACHE[key] = found
+    while len(_EMBEDDED_CACHE) > _EMBEDDED_CACHE_MAX:
+        _EMBEDDED_CACHE.popitem(last=False)
+    return found
+
+
+def _find_embedded(doc: pymupdf.Document, page: pymupdf.Page, want: str):
+    try:
+        fonts = page.get_fonts(full=True)
+    except Exception:
         return
     spans = None
     seen = set()

@@ -362,6 +362,8 @@ class MainWindow(QMainWindow):
           handler=lambda: self._with_ws(lambda ws: ws.select_all()), enabled=has_ws, category=cat_edit, order=40)
         r("edit.find", tr("shell.edit.find"), icon="magnifying-glass", shortcut="Ctrl+F",
           handler=lambda: self._with_ws(lambda ws: ws.show_search()), enabled=has_ws, category=cat_edit, order=50)
+        r("edit.replace", tr("replace.action"), icon="swap", shortcut="Ctrl+H",
+          handler=lambda: self._with_ws(self.open_find_replace), enabled=has_ws, category=cat_edit, order=55)
 
         # -- view
         r("view.palette", tr("shell.view.palette"), icon="command", shortcut="Ctrl+K", handler=self.palette.open,
@@ -548,7 +550,7 @@ class MainWindow(QMainWindow):
         add(m_file, [None, "file.quit"])
 
         m_edit = menu.addMenu(tr("shell.menu.edit"))
-        add(m_edit, ["edit.undo", "edit.redo", None, "edit.copy", "edit.select_all", None, "edit.find"])
+        add(m_edit, ["edit.undo", "edit.redo", None, "edit.copy", "edit.select_all", None, "edit.find", "edit.replace"])
         extras(m_edit, "edit", set())
 
         m_view = menu.addMenu(tr("shell.menu.view"))
@@ -873,6 +875,14 @@ class MainWindow(QMainWindow):
         from .dialogs.reduce_dialog import ReduceDialog
 
         ReduceDialog(self, ws).exec()
+
+    def open_find_replace(self, ws=None):
+        ws = ws or self.current_workspace()
+        if ws is None:
+            return None
+        from .dialogs.find_replace import open_find_replace
+
+        return open_find_replace(self, ws)
 
     def open_settings(self) -> None:
         from .dialogs.settings_dialog import SettingsDialog

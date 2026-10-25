@@ -7,7 +7,7 @@ import pymupdf
 
 from .document import CONTENT
 from .fonts import SpanStyle, resolve_font, style_from_span, text_width
-from .text_edit import TextRun, _label, _wrap, write_runs
+from .text_edit import _apply_formats, _emit_line, _font_key, _label, _rich_text, _runs, _wrap_rich, write_runs
 
 __all__ = ["document_text_style", "add_text_box", "add_image", "ALIGNMENTS"]
 
@@ -62,11 +62,14 @@ def _display_to_raw(page: pymupdf.Page):
     return m, (ex.x, ex.y)
 
 
-def add_text_box(pdf, page: int, rect, text: str, style: SpanStyle, align: str = "left") -> None:
+def add_text_box(pdf, page: int, rect, text: str, style: SpanStyle, align: str = "left", *,
+                 formats=None) -> None:
     """Write ``text`` (``\\n`` separates paragraphs) wrapped to the width of
     the display-space ``rect``, first baseline at the rect's top + ascender.
     Text that does not fit vertically continues below the rect (never
-    dropped). Upright on rotated pages."""
+    dropped). Upright on rotated pages. ``formats`` formats parts of the text
+    like :func:`pdfstudio.core.text_edit.replace_block_text` does (bold,
+    italic, underline, strike-through, colour, size, font)."""
     if align not in ALIGNMENTS:
         raise ValueError(f"align: {align!r}")
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    ")
@@ -74,39 +77,61 @@ def add_text_box(pdf, page: int, rect, text: str, style: SpanStyle, align: str =
         return
     rect = pymupdf.Rect(rect)
     doc = pdf.doc
-    choice = resolve_font(doc, page, style, text)
-    font = choice.font
+    rich = _apply_formats([(c, style, 0.0) for c in text], formats)
+    by_key: dict[tuple, SpanStyle] = {}
+    texts: dict[tuple, list[str]] = {}
+    for ch, st, _r in rich:
+        if ch != "\n":
+            by_key.setdefault(_font_key(st), st)
+            texts.setdefault(_font_key(st), []).append(ch)
+    fonts = {k: resolve_font(doc, page, by_key[k], "".join(v)).font for k, v in texts.items()}
+
+    def font_of(st: SpanStyle) -> pymupdf.Font:
+        return fonts[_font_key(st)]
+
+    def measure(r) -> float:
+        return sum(text_width(font_of(st), t, st.size) for t, st, _rise in _runs(r))
+
+    base_font = font_of(style) if _font_key(style) in fonts else next(iter(fonts.values()))
     size = float(style.size)
-    asc = float(getattr(font, "ascender", 0.9) or 0.9)
-    desc = float(getattr(font, "descender", -0.25) or -0.25)
+    asc = float(getattr(base_font, "ascender", 0.9) or 0.9)
+    desc = float(getattr(base_font, "descender", -0.25) or -0.25)
     line_h = size * max(1.15, asc - desc)
     width = max(rect.width, size)
 
-    lines: list[str] = []
-    for para in text.split("\n"):
-        para = para.rstrip()
-        lines.extend(_wrap(para, font, size, width) if para else [""])
-    while lines and not lines[-1].strip():
+    lines: list[list] = []
+    para: list = []
+    for c in rich + [("\n", style, 0.0)]:
+        if c[0] != "\n":
+            para.append(c)
+            continue
+        while para and para[-1][0].isspace():
+            para.pop()
+        lines.extend(_wrap_rich(para, width, measure) if para else [[]])
+        para = []
+    while lines and not _rich_text(lines[-1]).strip():
         lines.pop()
 
     with pdf.edit(_label("core.undo.add_text", "Tilføj tekst"), CONTENT, (page,)):
         pg = pdf.doc[page]
         m, d = _display_to_raw(pg)
         runs = []
-        for i, line in enumerate(lines):
-            if not line.strip():
+        y = rect.y0 + asc * size
+        for line in lines:
+            tallest = max([st.size for _c, st, _r in line] + [size])
+            if line is not lines[0]:
+                y += line_h * tallest / size
+            if not _rich_text(line).strip():
                 continue
-            w = text_width(font, line, size)
+            w = measure(line)
             if align == "center":
                 x = rect.x0 + (rect.width - w) / 2
             elif align == "right":
                 x = rect.x1 - w
             else:
                 x = rect.x0
-            y = rect.y0 + asc * size + i * line_h
             p = pymupdf.Point(x, y) * m
-            runs.append(TextRun(text=line, font=font, size=size, color=tuple(style.color),
-                                origin=(p.x, p.y), dir=d))
+            runs.extend(_emit_line(line, (p.x, p.y), d, None, 0.0, font_of))
         write_runs(pg, runs)
 
 

@@ -42,6 +42,8 @@ from PySide6.QtGui import (
     QTextBlockFormat,
     QTextCharFormat,
     QTextCursor,
+    QTextDocumentFragment,
+    QTextFormat,
     QTransform,
 )
 from PySide6.QtWidgets import (
@@ -83,6 +85,17 @@ KEYS_GAP = 6         # px between the edit frame and the key-hint chip
 RECENT_FONTS_KEY = "edit/recentFonts"
 RECENT_FONTS_MAX = 5
 SHOW_BOXES_KEY = "edit/showAllTextBoxes"
+
+# Character formatting the user applied in the editor is stored as custom
+# properties on the characters (Qt keeps them through typing, copy and
+# undo); commit turns them into core ``formats``. Unformatted characters keep
+# the style they inherit from the original text.
+_P = int(QTextFormat.Property.UserProperty)
+FORMAT_PROPS = {"bold": _P + 1, "italic": _P + 2, "underline": _P + 3, "strike": _P + 4,
+                "color": _P + 5, "size": _P + 6, "font": _P + 7}
+#: Line spacing presets (× "single" = 1.2 × the text size).
+LINE_SPACINGS = (1.0, 1.15, 1.5, 2.0)
+SINGLE = 1.2
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +205,9 @@ class InlineTextEditor(QTextEdit):
     cancelRequested = Signal()
     nextRequested = Signal()
     previousRequested = Signal()
+    formatRequested = Signal(str)   # Ctrl+B / Ctrl+I / Ctrl+U: "bold" | "italic" | "underline"
+
+    _clip: tuple[str, QTextDocumentFragment] | None = None  # last copy made in an editor (rich)
 
     def __init__(self, viewport: QWidget | None) -> None:
         super().__init__(viewport)
@@ -229,12 +245,23 @@ class InlineTextEditor(QTextEdit):
         if self._line_px <= 0:
             return
         doc = self.document()
+        fixed = QTextBlockFormat.LineHeightTypes.FixedHeight.value
+        block = doc.begin()
+        while block.isValid():  # only touch the format when a paragraph lacks it:
+            bf = block.blockFormat()  # every change is an undo step of its own
+            if bf.lineHeightType() != fixed or abs(bf.lineHeight() - self._line_px) > 0.01:
+                break
+            block = block.next()
+        else:
+            return
         cur = QTextCursor(doc)
         cur.select(QTextCursor.SelectionType.Document)
         fmt = QTextBlockFormat()
-        fmt.setLineHeight(self._line_px, QTextBlockFormat.LineHeightTypes.FixedHeight.value)
+        fmt.setLineHeight(self._line_px, fixed)
         self.blockSignals(True)
+        cur.joinPreviousEditBlock()   # one Ctrl+Z undoes the typing and this together
         cur.mergeBlockFormat(fmt)
+        cur.endEditBlock()
         self.blockSignals(False)
 
     def set_first_line_indent(self, px: float) -> None:
@@ -283,8 +310,37 @@ class InlineTextEditor(QTextEdit):
             block = block.next()
         return n
 
+    # -- clipboard: rich inside Folio, plain text from elsewhere ------------
+    def createMimeDataFromSelection(self):  # noqa: N802 - Qt override
+        mime = super().createMimeDataFromSelection()
+        cur = self.textCursor()
+        if cur.hasSelection():
+            InlineTextEditor._clip = (cur.selection().toPlainText(), cur.selection())
+        return mime
+
+    def canInsertFromMimeData(self, source) -> bool:  # noqa: N802 - Qt override
+        return source.hasText() or super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802 - Qt override
+        """Text from other programs comes in as plain text in the format at
+        the cursor; text copied inside an editor keeps its formatting."""
+        text = source.text() if source.hasText() else ""
+        clip = InlineTextEditor._clip
+        cur = self.textCursor()
+        if clip is not None and text and text == clip[0]:
+            cur.insertFragment(clip[1])
+        elif text:
+            cur.insertText(text.replace("\r\n", "\n").replace("\r", "\n").replace("\t", "    "),
+                           self.currentCharFormat())
+        self.setTextCursor(cur)
+
     def keyPressEvent(self, ev: QKeyEvent) -> None:  # noqa: N802
         key, mods = ev.key(), ev.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier and not mods & Qt.KeyboardModifier.ShiftModifier \
+                and key in (Qt.Key.Key_B, Qt.Key.Key_I, Qt.Key.Key_U):
+            ev.accept()
+            self.formatRequested.emit({Qt.Key.Key_B: "bold", Qt.Key.Key_I: "italic", Qt.Key.Key_U: "underline"}[key])
+            return
         if key == Qt.Key.Key_Escape:
             ev.accept()
             self.cancelRequested.emit()
@@ -308,6 +364,15 @@ class InlineTextEditor(QTextEdit):
         if ev.type() == QEvent.Type.KeyPress and ev.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
             self.keyPressEvent(ev)
             return True
+        if ev.type() == QEvent.Type.ShortcutOverride:
+            # editing keys belong to the editor, not to window shortcuts
+            # (Ctrl+Z undoes typing here; the document undo comes after commit)
+            mods = ev.modifiers()
+            if mods & Qt.KeyboardModifier.ControlModifier and ev.key() in (
+                    Qt.Key.Key_Z, Qt.Key.Key_Y, Qt.Key.Key_B, Qt.Key.Key_I, Qt.Key.Key_U, Qt.Key.Key_A,
+                    Qt.Key.Key_C, Qt.Key.Key_X, Qt.Key.Key_V):
+                ev.accept()
+                return True
         return super().event(ev)
 
 
@@ -659,16 +724,26 @@ class EditTextPanel(QWidget):
         row.setSpacing(6)
         self.color = ColorButton(title=tr("edit.text.color_title"))
         self.color.colorChanged.connect(self._changed)
-        self.bold = IconButton("text-bolder", tr("edit.text.bold"), variant="icon", checkable=True)
-        self.italic = IconButton("text-italic", tr("edit.text.italic"), variant="icon", checkable=True)
-        self.bold.toggled.connect(self._changed)
-        self.italic.toggled.connect(self._changed)
+        self.bold = IconButton("text-bolder", tr("edit.text.bold"), variant="icon", checkable=True, shortcut="Ctrl+B")
+        self.italic = IconButton("text-italic", tr("edit.text.italic"), variant="icon", checkable=True,
+                                 shortcut="Ctrl+I")
+        self.underline = IconButton("text-underline", tr("edit.text.underline"), variant="icon", checkable=True,
+                                    shortcut="Ctrl+U")
+        self.strike = IconButton("text-strikethrough", tr("edit.text.strike"), variant="icon", checkable=True)
+        for b, key in ((self.bold, "bold"), (self.italic, "italic"), (self.underline, "underline"),
+                       (self.strike, "strike")):
+            b.setAccessibleName(f"format.{key}")
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # keep the editor's selection
+            b.clicked.connect(lambda _c=False, k=key: self._toggle(k))
         row.addWidget(self.color)
-        row.addWidget(self.bold)
-        row.addWidget(self.italic)
+        row.addSpacing(4)
+        for b in (self.bold, self.italic, self.underline, self.strike):
+            row.addWidget(b)
         row.addStretch(1)
         form.addRow(tr("edit.text.color"), row)
         fv.addLayout(form)
+        self.scope = label("", "caption", wrap=True)
+        fv.addWidget(self.scope)
         self.reset = QPushButton(tr("edit.text.reset"))
         self.reset.setProperty("variant", "ghost")
         self.reset.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -677,6 +752,41 @@ class EditTextPanel(QWidget):
         self.rotated_note = label(tr("edit.text.rotated"), "caption", wrap=True)
         fv.addWidget(self.rotated_note)
         v.addWidget(self.format_box)
+
+        # alignment + line spacing of an existing paragraph ("Redigér tekst")
+        self.para_box = QWidget()
+        pv = QVBoxLayout(self.para_box)
+        pv.setContentsMargins(0, 6, 0, 0)
+        pv.setSpacing(8)
+        pv.addWidget(label(tr("edit.text.section.paragraph"), "section"))
+        pr = QHBoxLayout()
+        pr.setSpacing(4)
+        self.para_align: dict[str, IconButton] = {}
+        for key, ic in (("left", "text-align-left"), ("center", "text-align-center"),
+                        ("right", "text-align-right"), ("justify", "text-align-justify")):
+            b = IconButton(ic, tr(f"edit.text.align.{key}"), variant="icon", checkable=True)
+            b.setAccessibleName(f"paragraph.{key}")
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda _c=False, k=key: self.tool.set_paragraph(align=k))
+            pr.addWidget(b)
+            self.para_align[key] = b
+        pr.addStretch(1)
+        pv.addLayout(pr)
+        sform = QFormLayout()
+        sform.setSpacing(8)
+        self.spacing = QComboBox()
+        self.spacing.addItem(tr("edit.text.spacing.original"), None)
+        for factor in LINE_SPACINGS:
+            self.spacing.addItem(f"{factor:g}".replace(".", ","), factor)
+        self.spacing.activated.connect(self._spacing_chosen)
+        sform.addRow(tr("edit.text.spacing"), self.spacing)
+        pv.addLayout(sform)
+        self.para_reset = QPushButton(tr("edit.text.paragraph.reset"))
+        self.para_reset.setProperty("variant", "ghost")
+        self.para_reset.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.para_reset.clicked.connect(lambda: self.tool.set_paragraph(align=None, spacing=None))
+        pv.addWidget(self.para_reset, 0, Qt.AlignmentFlag.AlignLeft)
+        v.addWidget(self.para_box)
 
         # alignment of new text ("Tilføj tekst")
         self.align_box = QWidget()
@@ -719,6 +829,8 @@ class EditTextPanel(QWidget):
         block, style = self.tool.block, self.tool.current_style()
         editing = block is not None and style is not None
         self.format_box.setVisible(editing)
+        self.para_box.setVisible(editing and bool(getattr(self.tool, "supports_paragraph", False))
+                                 and not self.tool.rotated())
         self._loading = True
         try:
             self.show_boxes.setChecked(self.tool.show_all_boxes)
@@ -742,13 +854,77 @@ class EditTextPanel(QWidget):
             self.color.set_color(tuple(style.color))
             self.bold.setChecked(style.bold)
             self.italic.setChecked(style.italic)
+            self.underline.setChecked(style.underline)
+            self.strike.setChecked(style.strike)
             self.reset.setEnabled(self.tool.style_override is not None)
             self.rotated_note.setVisible(self.tool.rotated())
+            lay = self.tool._layout
+            current = self.tool.align_override or (
+                "justify" if lay is not None and lay.justified else (lay.align if lay is not None else "left"))
+            for key, b in self.para_align.items():
+                b.setChecked(key == current)
+            idx = self.spacing.findData(self.tool.spacing_override) if self.tool.spacing_override else 0
+            self.spacing.setCurrentIndex(max(0, idx))
+            if lay is not None and lay.line_spacing and not self.tool.spacing_override:
+                self.spacing.setItemText(0, tr("edit.text.spacing.original_n",
+                                               n=f"{lay.line_spacing / SINGLE:.2f}".rstrip("0").rstrip(".").replace(".", ",")))
+            else:
+                self.spacing.setItemText(0, tr("edit.text.spacing.original"))
+            self.para_reset.setEnabled(self.tool.align_override is not None or self.tool.spacing_override is not None)
+        finally:
+            self._loading = False
+        self.refresh_selection()
+
+    def refresh_selection(self) -> None:
+        """Show the selection's formatting (or the paragraph's) and say
+        which one the controls change."""
+        if self.tool.block is None or self.tool.editor is None:
+            return
+        selected = self.tool.has_text_selection()
+        self.scope.setText(tr("edit.text.scope.selection") if selected else tr("edit.text.scope.paragraph"))
+        if not selected:
+            return  # the toggles show the paragraph's style (refresh)
+        state = self.tool.format_state()
+        self._loading = True
+        try:
+            for b, key in ((self.bold, "bold"), (self.italic, "italic"), (self.underline, "underline"),
+                           (self.strike, "strike")):
+                b.setChecked(state[key])
         finally:
             self._loading = False
 
+    def _toggle(self, key: str) -> None:
+        """Bold / italic / underline / strike: the selected text, or – with
+        nothing selected – the whole paragraph (Ctrl+B etc. in the editor
+        format what is typed next instead, like Word)."""
+        if self._loading or self.tool.block is None:
+            return
+        if self.tool.has_text_selection():
+            self.tool.toggle_format(key)
+        else:
+            self._changed()
+
+    def _spacing_chosen(self, index: int) -> None:
+        if self._loading:
+            return
+        value = self.spacing.itemData(index)
+        self.tool.set_paragraph(spacing=float(value) if value else None)
+
     def _changed(self, *_a) -> None:
         if self._loading or self.tool.block is None:
+            return
+        if self.tool.has_text_selection():
+            # font / size / colour of the selected text only
+            sender = self.sender()
+            if sender is self.font:
+                family = self.font.currentData() or self.tool.block.style.font
+                if self.font.currentIndex() > 0:
+                    remember_font(family)
+                self.tool.apply_char_format({"font": family})
+            elif sender is self.size:
+                self.tool.apply_char_format({"size": float(self.size.value())})
+            elif sender is self.color:
+                self.tool.apply_char_format({"color": tuple(self.color.color())})
             return
         base = self.tool.block.style
         family = self.font.currentData() or base.font
@@ -761,6 +937,8 @@ class EditTextPanel(QWidget):
             color=tuple(self.color.color()),
             bold=self.bold.isChecked(),
             italic=self.italic.isChecked(),
+            underline=self.underline.isChecked(),
+            strike=self.strike.isChecked(),
         ))
         self.reset.setEnabled(self.tool.style_override is not None)
 
@@ -782,6 +960,7 @@ class EditTextTool(Tool):
     idle_text_key = "edit.text.idle.text"
     supports_box_outlines = True    # "Vis alle tekstbokse"
     supports_alignment = False      # alignment buttons (new text only)
+    supports_paragraph = True       # alignment + line spacing of an existing paragraph
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -795,6 +974,8 @@ class EditTextTool(Tool):
         self._keys_covers_text = False
         self.block: te.TextBlock | None = None
         self.style_override: core_fonts.SpanStyle | None = None
+        self.align_override: str | None = None           # "left" | "center" | "right" | "justify"
+        self.spacing_override: float | None = None       # × SINGLE (1.0, 1.15, 1.5, 2.0)
         self._panel: EditTextPanel | None = None
         self._committing = False
         self._layout: te.LayoutInfo | None = None
@@ -848,6 +1029,7 @@ class EditTextTool(Tool):
         if self.editor is not None:
             self._apply_editor_style()
             self._apply_rich_formats()
+            self._rescale_user_sizes()
         self._schedule_box_outlines()
 
     def _on_pages_reset(self) -> None:
@@ -1118,6 +1300,8 @@ class EditTextTool(Tool):
         view = self.ctx.view
         self.block = block
         self.style_override = None
+        self.align_override = None
+        self.spacing_override = None
         self._layout = self._layout_for(block)
         # make sure the paragraph is on screen (Tab may jump below the fold)
         r = block.bbox
@@ -1140,6 +1324,8 @@ class EditTextTool(Tool):
         self.editor.nextRequested.connect(self.commit_and_next)
         self.editor.previousRequested.connect(lambda: self.commit_and_next(-1))
         self.editor.textChanged.connect(self._reposition)
+        self.editor.formatRequested.connect(self.toggle_format)
+        self.editor.cursorPositionChanged.connect(self._selection_moved)
         self._shown_text, self._soft_positions = self._display_text(block)
         self.editor.setPlainText(self._shown_text)
         self._keys = QLabel(self._keys_html(), view.viewport())
@@ -1195,11 +1381,15 @@ class EditTextTool(Tool):
         font.setPixelSize(max(1, round(style.size * ppp)))
         font.setBold(style.bold)
         font.setItalic(style.italic)
+        font.setUnderline(style.underline)
+        font.setStrikeOut(style.strike)
         font.setKerning(True)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         if self.style_override is None or self.style_override.font == self.block.style.font:
             font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, self._spacing_fix(font, ppp))
         pitch = self._block_pitch() * (style.size / max(self.block.style.size, 0.1))
+        if self.spacing_override:
+            pitch = self.spacing_override * SINGLE * style.size
         bg = self._editor_background()
         width_px = int(round(self._wrap_width() * ppp))
         if self._proxy is not None:
@@ -1208,6 +1398,8 @@ class EditTextTool(Tool):
         align = self._layout.align if self._layout is not None else "left"
         if align == "left" and self._layout is not None and self._layout.justified:
             align = "justify"
+        if self.align_override:
+            align = self.align_override
         self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
                                    "right": Qt.AlignmentFlag.AlignRight,
                                    "justify": Qt.AlignmentFlag.AlignJustify}.get(align, Qt.AlignmentFlag.AlignLeft))
@@ -1219,7 +1411,8 @@ class EditTextTool(Tool):
         the others (first-line indent): the editor's box starts at the column
         edge and only its first line is indented – like the core lays it out."""
         b, lay = self.block, self._layout
-        if self.rotated() or len(b.lines) < 2 or (lay is not None and lay.align != "left"):
+        if self.rotated() or len(b.lines) < 2 or (lay is not None and lay.align != "left") \
+                or self.align_override not in (None, "left", "justify"):
             return 0.0
         indent = b.lines[0].origin[0] - min(ln.origin[0] for ln in b.lines)
         return indent if indent > 0.5 else 0.0
@@ -1232,9 +1425,45 @@ class EditTextTool(Tool):
         """Baseline-to-baseline distance (pt) the editor should use."""
         return _line_pitch(self.block)
 
-    def _write(self, block: te.TextBlock, text: str, style: core_fonts.SpanStyle | None) -> None:
-        """Put the edited text into the PDF (one undo step)."""
-        te.replace_block_text(self.ctx.pdf, block, text, style)
+    def _write(self, block: te.TextBlock, text: str, style: core_fonts.SpanStyle | None, *,
+               formats=None, align: str | None = None, line_spacing: float | None = None) -> None:
+        """Put the edited text into the PDF (one undo step); tell the user
+        when it runs into what is below or a font lacked characters."""
+        pdf = self.ctx.pdf
+        res = te.replace_block_text(pdf, block, text, style, formats=formats, align=align,
+                                    line_spacing=line_spacing)
+        if res.substitutions:
+            orig, used = res.substitutions[0]
+            self.ctx.toast(tr("edit.text.substituted", font=display_font_name(orig), used=display_font_name(used)),
+                           "info")
+        if res.overflow > 0:
+            def shrink() -> None:
+                self._shrink_to_fit(block, text, style, formats, align, line_spacing)
+
+            self.ctx.toast(tr("edit.text.overflow"), "warning", action_text=tr("edit.text.overflow.fit"),
+                           on_action=shrink)
+
+    def _shrink_to_fit(self, block, text, style, formats, align, line_spacing) -> None:
+        """"Formindsk så den passer": redo the edit with a smaller text size."""
+        pdf = self.ctx.pdf
+        label = pdf.history.undo_label
+        if label != tr("core.undo.edit_text") and label != "Redigér tekst":
+            return
+        pdf.undo()  # the document is now exactly as ``block`` was read from it
+        try:
+            scale = te.fit_scale(pdf.doc, block, text, style, formats=formats, align=align,
+                                 line_spacing=line_spacing)
+            base = style or block.style
+            st = replace(base, size=round(base.size * scale, 2))
+            sized = [(a, b, {**c, "size": round(c["size"] * scale, 2)} if "size" in c else c)
+                     for a, b, c in (formats or [])]
+            te.replace_block_text(pdf, block, text, st, formats=sized or None, align=align,
+                                  line_spacing=line_spacing)
+        except Exception as exc:  # noqa: BLE001
+            pdf.redo()
+            self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
+            return
+        self.ctx.toast(tr("edit.text.overflow.done", pct=round(scale * 100)), "success")
 
     def _spacing_fix(self, font: QFont, ppp: float) -> float:
         """Letter spacing (%) that makes the on-screen font as wide as the
@@ -1284,8 +1513,10 @@ class EditTextTool(Tool):
         return "".join(chars)
 
     def _layout_for(self, block: te.TextBlock) -> te.LayoutInfo:
-        """How the core will lay out this block (alignment, wrap width)."""
-        return te.layout_info(self.ctx.pdf.doc, block)
+        """How the core will lay out this block (alignment, wrap width) –
+        with the alignment / line spacing chosen in the inspector."""
+        spacing = self.spacing_override * SINGLE if self.spacing_override else None
+        return te.layout_info(self.ctx.pdf.doc, block, align=self.align_override, line_spacing=spacing)
 
     def _text_extent(self) -> tuple[float, float]:
         """(start, end) of the paragraph along its own direction, relative to
@@ -1324,6 +1555,8 @@ class EditTextTool(Tool):
         if self._layout is not None and self._layout.justified:
             slack = 0.5  # justified lines are stretched to the box: it must be the column
         wrap = self._layout.wrap_width if self._layout is not None else b.bbox.width
+        if self.align_override and self._layout is not None and self._layout.frame and not self.rotated():
+            return max(wrap, self._layout.frame[1] - self._layout.frame[0]) + slack
         if self.rotated():
             start, end = self._text_extent()
             if wrap <= 0:
@@ -1337,6 +1570,8 @@ class EditTextTool(Tool):
         """Left edge (pt) of the editor for centred/right-aligned text, or
         None for left-aligned text (positioned by its first glyph)."""
         b, lay = self.block, self._layout
+        if self.align_override and lay is not None and lay.frame and not self.rotated():
+            return lay.frame[0]  # an explicit alignment: the editor spans the column
         if lay is None or lay.align == "left":
             return None
         if self.rotated():  # along the text, relative to the first line's origin
@@ -1493,6 +1728,8 @@ class EditTextTool(Tool):
         self._proxy_drag = False
         self.block = None
         self.style_override = None
+        self.align_override = None
+        self.spacing_override = None
         if page is not None and self.show_all_boxes:
             self._refresh_page_outline(page)
         if self._panel is not None:
@@ -1511,13 +1748,19 @@ class EditTextTool(Tool):
             return False
         block, text, style = self.block, self.editor.toPlainText(), self.style_override
         shown, soft = self._shown_text, self._soft_positions
+        formats = self.collect_formats()
+        align = self.align_override
+        spacing = self.spacing_override * SINGLE if self.spacing_override else None
         self._teardown()
-        if text == shown and style is None:
+        if text == shown and style is None and not formats and align is None and spacing is None:
             return False
         text = self._restore_soft_breaks(shown, soft, text)
         self._committing = True
         try:
-            self._write(block, text, style)
+            if formats or align is not None or spacing is not None:
+                self._write(block, text, style, formats=formats or None, align=align, line_spacing=spacing)
+            else:
+                self._write(block, text, style)
         except Exception as exc:  # noqa: BLE001 – never lose the user's session silently
             self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
             return False
@@ -1538,9 +1781,14 @@ class EditTextTool(Tool):
         anchor = QPointF((nxt.bbox.x0 + nxt.bbox.x1) / 2, (nxt.bbox.y0 + nxt.bbox.y1) / 2) if nxt else None
         self.commit()
         target = None
-        if anchor is not None:
+        if nxt is not None:
+            # the text below may have moved with the edit: find it by its text
+            same = [b for b in self.blocks(page) if b.text == nxt.text]
+            if same:
+                target = min(same, key=lambda b: abs(b.bbox.y0 - nxt.bbox.y0) + abs(b.bbox.x0 - nxt.bbox.x0))
+        if target is None and anchor is not None:
             target = self.block_at(page, anchor)
-        else:  # continue on the next / previous page that has text
+        elif nxt is None:  # continue on the next / previous page that has text
             pages = range(page + 1, self.ctx.pdf.page_count) if step > 0 else range(page - 1, -1, -1)
             for p in pages:
                 if self.blocks(p):
@@ -1549,6 +1797,160 @@ class EditTextTool(Tool):
         if target is not None:
             self.ctx.view.go_to_page(target.page) if target.page != page else None
             self.start_edit(target)
+
+    # -- character formatting (selection) -------------------------------------
+    def _px_size(self, pt: float) -> int:
+        return max(1, round(pt * self._px_per_pt()))
+
+    def _char_format(self, changes: dict) -> QTextCharFormat:
+        """Qt format for ``changes`` (what it looks like + the property the
+        commit reads back)."""
+        fmt = QTextCharFormat()
+        for key, value in changes.items():
+            fmt.setProperty(FORMAT_PROPS[key], value if key != "color" else list(value))
+            if key == "bold":
+                fmt.setFontWeight(QFont.Weight.Bold if value else QFont.Weight.Normal)
+            elif key == "italic":
+                fmt.setFontItalic(bool(value))
+            elif key == "underline":
+                fmt.setFontUnderline(bool(value))
+            elif key == "strike":
+                fmt.setFontStrikeOut(bool(value))
+            elif key == "color":
+                fmt.setForeground(to_qcolor(tuple(value)))
+            elif key == "size":
+                f = QFont(self.editor.font())
+                f.setPixelSize(self._px_size(float(value)))
+                fmt.setFont(f, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
+            elif key == "font":
+                fmt.setFontFamilies([core_fonts.qt_family_hint(core_fonts.SpanStyle(str(value), 12))])
+        return fmt
+
+    def _rescale_user_sizes(self) -> None:
+        """Characters the user gave a size keep it (in pt) when zooming."""
+        prop = FORMAT_PROPS["size"]
+        cur = QTextCursor(self.editor.document())
+        block = self.editor.document().begin()
+        self.editor.blockSignals(True)
+        try:
+            while block.isValid():
+                it = block.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid() and frag.charFormat().hasProperty(prop):
+                        cur.setPosition(frag.position())
+                        cur.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
+                        cur.mergeCharFormat(self._char_format({"size": float(frag.charFormat().property(prop))}))
+                    it += 1
+                block = block.next()
+        finally:
+            self.editor.blockSignals(False)
+
+    def has_text_selection(self) -> bool:
+        return self.editor is not None and self.editor.textCursor().hasSelection()
+
+    def apply_char_format(self, changes: dict) -> None:
+        """Format the selected text – or what is typed next at the cursor."""
+        if self.editor is None or not changes:
+            return
+        fmt = self._char_format(changes)
+        cur = self.editor.textCursor()
+        if cur.hasSelection():
+            cur.mergeCharFormat(fmt)
+            self.editor.setTextCursor(cur)
+        else:
+            self.editor.mergeCurrentCharFormat(fmt)
+        self.editor.setFocus()
+        self._reposition()
+
+    def format_state(self) -> dict:
+        """Effective bold / italic / underline / strike of the selection (all
+        characters) or of the cursor position."""
+        out = {k: False for k in ("bold", "italic", "underline", "strike")}
+        if self.editor is None:
+            return out
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        if cur.hasSelection():
+            a, b = cur.selectionStart(), cur.selectionEnd()
+            fmts = []
+            c = QTextCursor(doc)
+            for pos in range(a, b):
+                c.setPosition(pos + 1)
+                if doc.characterAt(pos) not in ("\u2029", "\n"):
+                    fmts.append(c.charFormat())
+        else:
+            fmts = [self.editor.currentCharFormat()]
+        if not fmts:
+            return out
+        base = self.editor.font()  # what characters without an own format show
+
+        def eff(f: QTextCharFormat, prop, own, inherited) -> bool:
+            return own(f) if f.hasProperty(prop) else inherited
+
+        P = QTextFormat.Property
+        out["bold"] = all(eff(f, P.FontWeight, lambda f: f.fontWeight() >= 600, base.bold()) for f in fmts)
+        out["italic"] = all(eff(f, P.FontItalic, QTextCharFormat.fontItalic, base.italic()) for f in fmts)
+        out["underline"] = all(eff(f, P.TextUnderlineStyle, QTextCharFormat.fontUnderline, base.underline())
+                               for f in fmts)
+        out["strike"] = all(eff(f, P.FontStrikeOut, QTextCharFormat.fontStrikeOut, base.strikeOut()) for f in fmts)
+        return out
+
+    def toggle_format(self, kind: str) -> None:
+        """Ctrl+B / Ctrl+I / Ctrl+U and the inspector toggles."""
+        if self.editor is None:
+            return
+        self.apply_char_format({kind: not self.format_state()[kind]})
+        if self._panel is not None:
+            self._panel.refresh_selection()
+
+    def _selection_moved(self) -> None:
+        if self._panel is not None:
+            self._panel.refresh_selection()
+
+    def collect_formats(self) -> list[tuple[int, int, dict]]:
+        """The user's formatting as core ``formats`` (offsets into the plain text)."""
+        if self.editor is None:
+            return []
+        out: list[tuple[int, int, dict]] = []
+        block = self.editor.document().begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fmt = frag.charFormat()
+                    changes = {}
+                    for key, prop in FORMAT_PROPS.items():
+                        if fmt.hasProperty(prop):
+                            v = fmt.property(prop)
+                            changes[key] = tuple(v) if key == "color" else v
+                    if changes:
+                        a, b = frag.position(), frag.position() + frag.length()
+                        if out and out[-1][1] == a and out[-1][2] == changes:
+                            out[-1] = (out[-1][0], b, changes)
+                        else:
+                            out.append((a, b, changes))
+                it += 1
+            block = block.next()
+        return out
+
+    def set_paragraph(self, align: str | None = "", spacing: float | None = -1.0) -> None:
+        """Alignment ("left" | "center" | "right" | "justify", ``None`` =
+        original) and line spacing (× single, ``None`` = original) of the
+        paragraph being edited; the editor previews it."""
+        if self.block is None:
+            return
+        if align != "":
+            self.align_override = align
+        if spacing is None or spacing >= 0:
+            self.spacing_override = spacing
+        self._layout = self._layout_for(self.block)
+        self._apply_editor_style()
+        if self.editor is not None:
+            self.editor.setFocus()
+        if self._panel is not None:
+            self._panel.refresh()
 
     # -- hooks for subclasses ---------------------------------------------------
     def set_align(self, align: str) -> None:

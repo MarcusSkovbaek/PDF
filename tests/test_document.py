@@ -79,3 +79,23 @@ def test_open_image_as_pdf(png_path):
     pdf = PdfDocument.open(png_path)
     assert pdf.page_count == 1
     assert pdf.path is None and pdf.display_name.endswith(".pdf")
+
+
+def test_undo_history_shares_unchanged_objects(sample_pdf):
+    """Snapshots are deduplicated per PDF object: many small edits of a big
+    document take far less memory than whole copies."""
+    from pdfstudio.core import annotations as A
+
+    raw = len(sample_pdf._serialize())
+    for i in range(30):
+        A.add_note(sample_pdf, i % 3, (50 + i, 50), f"note {i}", (1, 1, 0))
+    assert len(sample_pdf.history._undo) == 30
+    assert sample_pdf.history.memory < 3 * raw          # 30 whole copies would be ~30x
+    for _ in range(30):
+        assert sample_pdf.undo()
+    assert sample_pdf.history.memory > 0 and not sample_pdf.history.can_undo
+    for _ in range(30):
+        assert sample_pdf.redo()
+    assert len(list(sample_pdf.page(0).annots())) == 10
+    sample_pdf.history.clear()
+    assert sample_pdf.history.memory == 0

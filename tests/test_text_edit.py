@@ -195,7 +195,7 @@ def test_subset_font_reused_then_fallback_for_new_glyphs():
     assert s["origin"] == pytest.approx((72, 200), abs=0.5)
     # no foreign font was embedded (e.g. a fallback just for the spaces)
     new_fonts = {f[3] for f in page.get_fonts()} - fonts_before
-    assert all("Liberation" in name for name in new_fonts), new_fonts
+    assert all(SANS_NAME.removesuffix("Sans") in name.replace(" ", "") for name in new_fonts), new_fonts
     assert len(pdf.doc.tobytes(garbage=3, deflate=True)) - size0 < 60_000
     # glyphs really render (subset glyphs were not emptied)
     assert ink_bbox(pix(page, pymupdf.Rect(70, 185, 300, 205))) is not None

@@ -1162,34 +1162,29 @@ def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
     _draw_decorations(page, all_runs)
 
 
-_TOUNICODE_ENTRY = r"(<{gid}>\s*(?:<{gid}>\s*)?)<00a0>"
+# a whole CMap line mapping one glyph to U+00A0: bfchar "<g> <00a0>" or a
+# one-glyph bfrange "<g> <g> <00a0>" (never a longer range starting at U+00A0)
+_NBSP_ENTRY = r"^([ \t]*<({gid})>[ \t]*(?:<\2>[ \t]*)?)<00a0>(?=[ \t]*$)"
 
 
 def _fix_space_unicode(doc: pymupdf.Document, first_new: int, runs: list[TextRun]) -> None:
     """Fonts whose space and no-break space share one glyph (Arial, Times
-    New Roman, Calibri …) get a ToUnicode map from MuPDF that reads that
-    glyph back as U+00A0: every space of the new text would copy and search
-    as a no-break space, in Folio and in other readers. Map it to U+0020,
-    unless the text really contains no-break spaces."""
+    New Roman, Calibri … and MuPDF's own fallback fonts) get a ToUnicode map
+    that reads that glyph back as U+00A0: every space of the new text would
+    copy and search as a no-break space, in Folio and in other readers. In
+    the fonts this write added, map it to U+0020 – unless the text really
+    contains no-break spaces."""
     if any("\u00a0" in r.text for r in runs):
         return
-    gids = set()
-    for r in runs:
-        try:
-            g = r.font.has_glyph(0x20)
-            if g and g == r.font.has_glyph(0xA0):
-                gids.add(g)
-        except Exception:
-            continue
-    map_space_glyphs(doc, gids, first_new)
+    map_space_glyphs(doc, None, first_new)
 
 
-def map_space_glyphs(doc: pymupdf.Document, gids, first_xref: int = 1) -> None:
-    """Make glyphs ``gids`` read back as U+0020 instead of U+00A0 in the
-    ToUnicode maps of the fonts from xref ``first_xref`` on (see
-    :func:`_fix_space_unicode`)."""
-    if not gids:
-        return
+def map_space_glyphs(doc: pymupdf.Document, gids=None, first_xref: int = 1) -> None:
+    """Make glyphs read back as U+0020 instead of U+00A0 in the ToUnicode
+    maps of the fonts from xref ``first_xref`` on: the glyphs ``gids``, or
+    (``None``) every glyph mapped to U+00A0."""
+    gid = "[0-9a-f]{4}" if gids is None else "|".join(f"{g:04x}" for g in gids)
+    rx = re.compile(_NBSP_ENTRY.replace("{gid}", gid), re.IGNORECASE | re.MULTILINE)
     for xref in range(first_xref, doc.xref_length()):
         try:
             kind, val = doc.xref_get_key(xref, "ToUnicode")
@@ -1199,9 +1194,7 @@ def map_space_glyphs(doc: pymupdf.Document, gids, first_xref: int = 1) -> None:
             cmap = doc.xref_stream(tu).decode("latin-1")
         except Exception:
             continue
-        fixed = cmap
-        for g in gids:
-            fixed = re.sub(_TOUNICODE_ENTRY.format(gid=f"{g:04x}"), r"\1<0020>", fixed, flags=re.IGNORECASE)
+        fixed = rx.sub(r"\1<0020>", cmap)
         if fixed != cmap:
             doc.update_stream(tu, fixed.encode("latin-1"))
 

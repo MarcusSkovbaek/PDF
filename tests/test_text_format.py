@@ -411,3 +411,19 @@ def test_written_spaces_read_back_as_spaces_with_arial_like_fonts():
     te.write_runs(page, [te.TextRun(text="Hej Verden igen", font=font, size=12, color=(0, 0, 0),
                                     origin=(72, 100), dir=(1, 0))])
     assert pymupdf.open("pdf", doc.tobytes())[0].get_text().strip() == "Hej Verden igen"
+
+
+def test_map_space_glyphs_only_touches_single_glyph_entries():
+    doc = pymupdf.open()
+    doc.new_page()
+    font, tu = doc.get_new_xref(), doc.get_new_xref()
+    doc.update_object(font, "<<>>")
+    doc.update_object(tu, "<<>>")
+    doc.update_stream(tu, b"1 beginbfchar\n<0003> <00a0>\nendbfchar\n2 beginbfrange\n"
+                          b"<0081> <00e0> <00a0>\n<0010> <0010> <00A0>\nendbfrange\n")
+    doc.xref_set_key(font, "Type", "/Font")
+    doc.xref_set_key(font, "ToUnicode", f"{tu} 0 R")
+    te.map_space_glyphs(doc)
+    cmap = doc.xref_stream(tu).decode()
+    assert "<0003> <0020>" in cmap and "<0010> <0010> <0020>" in cmap
+    assert "<0081> <00e0> <00a0>" in cmap          # a range starting at U+00A0 stays as it is

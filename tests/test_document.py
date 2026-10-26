@@ -103,7 +103,8 @@ def test_undo_history_shares_unchanged_objects(sample_pdf):
 
 def _without_id(data: bytes) -> bytes:
     import re
-    return re.sub(rb"/ID\s*\[<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\]", b"", data)
+    # /ID entries are random – hex strings or (on Windows) literal ones
+    return re.sub(rb"/ID\s*\[.*?\]>>", b">>", data, flags=re.S)
 
 
 def test_write_bytes_matches_tobytes(monkeypatch):

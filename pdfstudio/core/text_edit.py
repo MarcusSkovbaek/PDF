@@ -71,6 +71,7 @@ __all__ = [
     "TextBlock",
     "text_blocks",
     "block_at",
+    "warm_page",
     "fit_scale",
     "replace_block_text",
     "write_runs",
@@ -115,6 +116,7 @@ class TextLine:
     display_dir: tuple[float, float] = field(default=(1.0, 0.0), repr=False)  # dir on screen
     decor: dict = field(default_factory=dict, repr=False)  # "underline"/"strike" -> (offset along n, thickness)
     decor_rects: list = field(default_factory=list, repr=False)  # raw rects of those strokes
+    cell: bool = field(default=False, repr=False)  # part of a row of table cells
 
 
 @dataclass
@@ -479,13 +481,15 @@ def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, f
     if gone:
         raw_lines = [ln for ln in raw_lines if id(ln) not in gone]
         per_block = [[ln for ln in lines if id(ln) not in gone] for lines in per_block]
+    _mark_table_rows(raw_lines, pg.rect * pg.derotation_matrix)
     for lines in per_block:
         if lines:
             for col in _split_columns(lines):
-                for part in _split_size_changes(col):
-                    # a wide line above (a heading) can bind side-by-side
-                    # pieces (bullet + list item) into one column: re-split
+                for part in (p for sc in _split_size_changes(col) for p in _split_cell_rows(sc)):
+                    # a wide line above (a heading, a paragraph) can bind side-by-side
+                    # pieces (bullet + list item, table cells) into one column: re-split
                     groups.extend(_split_columns(part) if len(part) < len(col) else [part])
+    groups = _split_interleaved(groups)
     _attach_decorations(pg, raw_lines)
     items = _list_item_starts(raw_lines)
     if items:
@@ -716,6 +720,114 @@ def _split_size_changes(lines: list[TextLine]) -> list[list[TextLine]]:
     return out
 
 
+def _split_cell_rows(lines: list[TextLine]) -> list[list[TextLine]]:
+    """Split one PyMuPDF block between a row of table cells (several pieces
+    on one baseline, far apart) and ordinary lines above or below it – MuPDF
+    puts a table's last row and the paragraph set tight under it in one
+    block. Keeps the lines' order within each part."""
+    if len(lines) < 3 or not all(_is_axis(ln.dir) and ln.dir == lines[0].dir for ln in lines):
+        return [lines]
+    n = _perp(lines[0].dir)
+    order = sorted(lines, key=lambda ln: (_dot(ln.raw_origin, n), ln.extent[0]))
+    rows: list[list[TextLine]] = [[order[0]]]
+    for ln in order[1:]:
+        ref = rows[-1][0]
+        if abs(_dot(ln.raw_origin, n) - _dot(ref.raw_origin, n)) <= 0.35 * max(ref.style.size, 1.0):
+            rows[-1].append(ln)
+        else:
+            rows.append([ln])
+    if len(rows) < 2:
+        return [lines]
+
+    def cells(row: list[TextLine]) -> bool:
+        row = sorted(row, key=lambda ln: ln.extent[0])
+        return len(row) >= 2 and all(b.extent[0] - a.extent[1] >= 2.0 * max(a.style.size, 1.0)
+                                     for a, b in zip(row, row[1:]))
+
+    kinds = [cells(r) or all(ln.cell for ln in r) for r in rows]
+    for row, is_cells in zip(rows, kinds):
+        for ln in row:
+            ln.cell = is_cells
+    if all(kinds) or not any(kinds):
+        return [lines]
+    part_of: dict[int, int] = {}
+    part = 0
+    for k, row in enumerate(rows):
+        if k and kinds[k] != kinds[k - 1]:
+            part += 1
+        for ln in row:
+            part_of[id(ln)] = part
+    out: list[list[TextLine]] = [[] for _ in range(part + 1)]
+    for ln in lines:
+        out[part_of[id(ln)]].append(ln)
+    return out
+
+
+def _mark_table_rows(lines: list[TextLine], raw_rect: pymupdf.Rect) -> None:
+    """Flag the lines of rows of table cells across the whole page: at least
+    three narrow pieces on one baseline, far apart (MuPDF may put the cells
+    of one row – an edited one above all – in different blocks). Two pieces
+    are not enough: side-by-side text columns look like that too."""
+    by_dir: dict[tuple, list[TextLine]] = {}
+    for ln in lines:
+        if _is_axis(ln.dir) and ln.text.strip():
+            by_dir.setdefault(ln.dir, []).append(ln)
+    for d, group in by_dir.items():
+        n = _perp(d)
+        width = raw_rect.width if abs(d[0]) > 0.5 else raw_rect.height
+        group.sort(key=lambda ln: _dot(ln.raw_origin, n))
+        rows: list[list[TextLine]] = []
+        for ln in group:
+            if rows and _dot(ln.raw_origin, n) - _dot(rows[-1][0].raw_origin, n) <= 0.35 * max(ln.style.size, 1.0):
+                rows[-1].append(ln)
+            else:
+                rows.append([ln])
+        for row in rows:
+            if len(row) < 3:
+                continue
+            row.sort(key=lambda ln: ln.extent[0])
+            if all(ln.extent[1] - ln.extent[0] <= 0.25 * width for ln in row) and \
+                    all(y.extent[0] - x.extent[1] >= 2.0 * max(x.style.size, 1.0) for x, y in zip(row, row[1:])):
+                for ln in row:
+                    ln.cell = True
+
+
+def _split_interleaved(groups: list[list[TextLine]]) -> list[list[TextLine]]:
+    """Split a group between two of its lines when a line of another group
+    lies between them (same column, between the baselines): after an edit
+    rewrote the first line of a list item, MuPDF reports the rest of that
+    item in one block with the lines of the item above."""
+    if len(groups) < 2:
+        return groups
+    all_lines = [(gi, ln) for gi, g in enumerate(groups) for ln in g if _is_axis(ln.dir)]
+    out: list[list[TextLine]] = []
+    for gi, g in enumerate(groups):
+        if len(g) < 2 or not all(_is_axis(ln.dir) and ln.dir == g[0].dir for ln in g):
+            out.append(g)
+            continue
+        n = _perp(g[0].dir)
+        order = sorted(g, key=lambda ln: _dot(ln.raw_origin, n))
+        part = [order[0]]
+        for a, b in zip(order, order[1:]):
+            ya, yb = _dot(a.raw_origin, n), _dot(b.raw_origin, n)
+            pad = 0.4 * max(a.style.size, 1.0)
+            lo = max(a.extent[0], b.extent[0])
+            hi = min(a.extent[1], b.extent[1])
+            between = yb - ya > 1.6 * max(a.style.size, 1.0) and any(
+                hj != gi and ln.dir == a.dir and ya + pad < _dot(ln.raw_origin, n) < yb - pad
+                and min(hi, ln.extent[1]) - max(lo, ln.extent[0]) > 0
+                for hj, ln in all_lines)
+            if between:
+                ids = {id(x) for x in part}
+                out.append([ln for ln in g if id(ln) in ids])
+                part = [b]
+            else:
+                part.append(b)
+        ids = {id(x) for x in part}
+        out.append([ln for ln in g if id(ln) in ids] if len(part) < len(g) else g)
+    return out
+
+
 def _pitch(lines: list[TextLine]) -> float | None:
     if len(lines) < 2:
         return None
@@ -729,6 +841,8 @@ def _continues(upper: list[TextLine], lower: list[TextLine]) -> bool:
     """Is ``lower`` the next line(s) of the paragraph ``upper``?"""
     a, b = upper[-1], lower[0]
     if abs(a.dir[0] - b.dir[0]) > 1e-3 or abs(a.dir[1] - b.dir[1]) > 1e-3:
+        return False
+    if a.cell != b.cell:  # a row of table cells never runs on into ordinary text
         return False
     sa, sb = a.style.size, b.style.size
     if not sa or not sb or not (0.85 <= sb / sa <= 1.18):
@@ -877,6 +991,22 @@ def _reading_order(groups: list) -> list:
     return [g for row in rows for g in sorted(row, key=lambda g: g[0].raw_origin[0])]
 
 
+def warm_page(doc: pymupdf.Document, page: int) -> None:
+    """Precompute what opening an editor on ``page`` needs – its text
+    blocks and the proof of its embedded fonts – so the next edit opens at
+    once. Meant for idle time right after an edit changed the page."""
+    from .fonts import _embedded_candidates
+
+    seen: set[str] = set()
+    for blk in text_blocks(doc, page):
+        for ln in blk.lines:
+            for st in [ln.style] + list(ln.char_styles):
+                if st.font not in seen:
+                    seen.add(st.font)
+                    _embedded_candidates(doc, page, st)
+    text_blocks(doc, page, merge=False)
+
+
 def block_at(doc: pymupdf.Document, page: int, point) -> TextBlock | None:
     """The text block under a display-space point (smallest match wins)."""
     p = pymupdf.Point(point)
@@ -996,23 +1126,27 @@ def _morph_degrees(d) -> float:
 
 
 def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
-    """Write text runs (raw page coordinates) with TextWriter, one writer per
-    colour for horizontal text and one per run for rotated text; then their
-    underline / strike-through strokes."""
+    """Write text runs (raw page coordinates) with TextWriter – in their
+    order (so text extraction sees each line in one piece), one writer per
+    stretch of horizontal runs of one colour and one per rotated run; then
+    their underline / strike-through strokes."""
     all_runs = runs
-    runs = [r for r in runs if r.text and r.text.strip()]
+    runs = [r for r in runs if r.text]
     if not runs:
         _draw_decorations(page, all_runs)
         return
     doc = page.parent
     first_new = doc.xref_length()
-    groups: dict[tuple, list[TextRun]] = {}
+    groups: list[tuple[tuple, list[TextRun]]] = []
     for r in runs:
         horizontal = abs(r.dir[0] - 1.0) < 1e-4 and abs(r.dir[1]) < 1e-4
         color = tuple(round(float(c), 4) for c in r.color)
         key = ("h", color) if horizontal else ("r", id(r))
-        groups.setdefault(key, []).append(r)
-    for key, group in groups.items():
+        if groups and groups[-1][0] == key:
+            groups[-1][1].append(r)
+        else:
+            groups.append((key, [r]))
+    for key, group in groups:
         color = key[1] if key[0] == "h" else tuple(group[0].color)
         tw = pymupdf.TextWriter(page.rect, color=color)
         for r in group:
@@ -1831,12 +1965,18 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
             # gap widths, table columns) instead of re-typesetting it
             pieces = _place_line(rich, old[j], em, font_of, align=align,
                                  columns=_Columns(old[j], ctx.others + old))
-            b0 = _dot(base, ld)
-            for piece, x in pieces:
-                off = x - b0
-                runs.extend(_emit_line(piece, (base[0] + ld[0] * off, base[1] + ld[1] * off), ld, em, 0.0,
-                                       font_of, decor))
-            continue
+            ends = [x + measure(piece, em) for piece, x in pieces]
+            if not ends or max(ends) <= max(rmax, old[j].extent[1]) + 0.5:
+                b0 = _dot(base, ld)
+                for piece, x in pieces:
+                    off = x - b0
+                    runs.extend(_emit_line(piece, (base[0] + ld[0] * off, base[1] + ld[1] * off), ld, em, 0.0,
+                                           font_of, decor))
+                continue
+            # the old (stretched) gaps push the text past the column: re-typeset
+            # it; a full-width line of a justified paragraph stays justified
+            if justified_block and at_right[j] and n_spaces and width < rmax - target:
+                extra = (rmax - target - width) / n_spaces
         shift = target - _dot(base, ld)
         origin = (base[0] + ld[0] * shift, base[1] + ld[1] * shift)
         runs.extend(_emit_line(rich, origin, ld, em, extra, font_of, decor))
@@ -2119,6 +2259,8 @@ def _place_line(rich, old: TextLine, em, font_of, *, align: str = "left",
             if pieces and gap is not None and abs(x - flow) < 0.01:
                 pieces[-1][1] = b              # natural flow: same piece
             else:
+                if pieces and gap is not None:
+                    pieces[-1][1] = gap[1]     # write the space too: the words stay separate
                 pieces.append([a, b, x])
             cursor = x + natural(a, b)
             ia = to_old[a]
@@ -2203,6 +2345,13 @@ def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = 
             w = text_width(font, piece, st.size, space)
             if piece[0] == " " and not piece.strip():
                 gap = w + extra * len(piece)
+                if extra and has_space(font):
+                    # the space glyph itself, centred in the stretched gap:
+                    # text extraction keeps the line in one piece
+                    mid = x + extra * len(piece) / 2
+                    out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
+                                       origin=(origin[0] + d[0] * mid, origin[1] + d[1] * mid), dir=d,
+                                       space=space))
                 if (under or strike) and out:
                     # underline the space between two underlined words too
                     out.append(TextRun(text="", font=font, size=st.size, color=tuple(st.color),
@@ -2228,8 +2377,8 @@ def _trim_decor(runs: list[TextRun]) -> list[TextRun]:
         if r.text:
             out.append(r)
             continue
-        prev = next((x for x in reversed(runs[:i]) if x.text), None)
-        nxt = next((x for x in runs[i + 1:] if x.text), None)
+        prev = next((x for x in reversed(runs[:i]) if x.text.strip()), None)
+        nxt = next((x for x in runs[i + 1:] if x.text.strip()), None)
         u = r.underline if prev is not None and nxt is not None and prev.underline and nxt.underline else None
         st = r.strike if prev is not None and nxt is not None and prev.strike and nxt.strike else None
         if u or st:

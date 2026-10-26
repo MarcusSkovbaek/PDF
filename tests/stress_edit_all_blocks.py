@@ -7,6 +7,7 @@ import pymupdf
 from pdfstudio.core import PdfDocument, text_edit as te
 path = sys.argv[1]
 pdf = PdfDocument.open(path)
+pdf.history.max_steps = 100000   # keep every step so the undo check below is exact
 problems, n, t_total, sources = [], 0, 0.0, {}
 
 
@@ -52,7 +53,8 @@ for page in range(pdf.page_count):
         if norm(new) not in norm(got):
             # report which words went missing
             miss = [w for w in new.split() if w not in got][:5]
-            problems.append((page, i, repr(b.text[:30]), f"text mismatch, missing {miss}"))
+            kind = "text mismatch" if miss or not res.overflow else "wrapped in full cell (overflow reported)"
+            problems.append((page, i, repr(b.text[:30]), f"{kind}, missing {miss}"))
 data = pdf.to_bytes(); d = pymupdf.open("pdf", data)
 print(f"{n} blocks edited, avg {1000 * t_total / max(n, 1):.0f} ms, file {len(data) // 1024} KB, repaired={d.is_repaired}")
 print(f"lines moved along: {moved_total}, edits reporting overflow: {overflows}")

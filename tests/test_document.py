@@ -99,3 +99,24 @@ def test_undo_history_shares_unchanged_objects(sample_pdf):
     assert len(list(sample_pdf.page(0).annots())) == 10
     sample_pdf.history.clear()
     assert sample_pdf.history.memory == 0
+
+
+def _without_id(data: bytes) -> bytes:
+    import re
+    return re.sub(rb"/ID\s*\[<[0-9A-Fa-f]*>\s*<[0-9A-Fa-f]*>\]", b"", data)
+
+
+def test_write_bytes_matches_tobytes(monkeypatch):
+    from pdfstudio.core.document import write_bytes
+    doc = pymupdf.open()
+    for i in range(3):
+        doc.new_page().insert_text((72, 72), f"Side {i + 1} æøå", fontname="helv", fontsize=12)
+    doc = pymupdf.open("pdf", doc.tobytes())
+    for kw in ({}, {"garbage": 3, "deflate": True}):
+        assert _without_id(write_bytes(doc, **kw)) == _without_id(doc.tobytes(**kw))
+    locked = write_bytes(doc, garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                         user_pw="hemmelig", owner_pw="ejer", permissions=pymupdf.PDF_PERM_PRINT)
+    reopened = pymupdf.open("pdf", locked)
+    assert reopened.needs_pass and reopened.authenticate("hemmelig") and "Side 2" in reopened[1].get_text()
+    monkeypatch.setattr("pdfstudio.core.document.NATIVE_WRITE", False)   # the plain fallback
+    assert _without_id(write_bytes(doc)) == _without_id(doc.tobytes())

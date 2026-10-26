@@ -1070,12 +1070,15 @@ class EditTextTool(Tool):
             self.editor.blockSignals(False)
 
     def _merge_char_formats(self, cur: QTextCursor, base: core_fonts.SpanStyle, ppp: float) -> None:
-        pos = 0
-        for line in self.block.lines:
-            styles = line.char_styles or []
-            for k, st in enumerate(styles[:len(line.text)]):
-                if st is None or _style_key(st) == _style_key(base):
-                    continue
+        """One format per run of equally styled characters (not per character:
+        a long paragraph with a bold sentence opens noticeably faster)."""
+        base_key = _style_key(base)
+        formats: dict = {}
+
+        def fmt_for(st: core_fonts.SpanStyle) -> QTextCharFormat:
+            key = _style_key(st)
+            fmt = formats.get(key)
+            if fmt is None:
                 fmt = QTextCharFormat()
                 fmt.setFontWeight(QFont.Weight.Bold if st.bold else QFont.Weight.Normal)
                 fmt.setFontItalic(st.italic)
@@ -1086,9 +1089,24 @@ class EditTextTool(Tool):
                     fmt.setFont(f, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
                 if st.font != base.font and not (st.bold != base.bold or st.italic != base.italic):
                     fmt.setFontFamilies([core_fonts.qt_family_hint(st)])
-                cur.setPosition(pos + k)
-                cur.setPosition(pos + k + 1, QTextCursor.MoveMode.KeepAnchor)
-                cur.mergeCharFormat(fmt)
+                formats[key] = fmt
+            return fmt
+
+        pos = 0
+        for line in self.block.lines:
+            styles = (line.char_styles or [])[:len(line.text)]
+            k = 0
+            while k < len(styles):
+                st = styles[k]
+                key = _style_key(st) if st is not None else base_key
+                end = k + 1
+                while end < len(styles) and styles[end] is not None and _style_key(styles[end]) == key:
+                    end += 1
+                if key != base_key:
+                    cur.setPosition(pos + k)
+                    cur.setPosition(pos + end, QTextCursor.MoveMode.KeepAnchor)
+                    cur.mergeCharFormat(fmt_for(st))
+                k = end
             pos += len(line.text) + 1  # "\n" between lines
 
     def properties_widget(self) -> QWidget | None:
@@ -1113,6 +1131,9 @@ class EditTextTool(Tool):
                                       if not te.is_list_bullet(b)]
             except Exception:
                 self._blocks[page] = []
+            else:
+                # the pointer is over this page: prove its fonts while idle
+                QTimer.singleShot(150, self, lambda p=page: self._warm(p))
         return self._blocks[page]
 
     def block_at(self, page: int, pos: QPointF) -> te.TextBlock | None:
@@ -1803,7 +1824,15 @@ class EditTextTool(Tool):
         finally:
             self._committing = False
         self._blocks.pop(block.page, None)
+        QTimer.singleShot(150, self, lambda p=block.page: self._warm(p))
         return True
+
+    def _warm(self, page: int) -> None:
+        """Idle after a commit: prepare the page so the next paragraph opens fast."""
+        try:
+            te.warm_page(self.ctx.pdf.doc, page)
+        except Exception:  # only a cache – never disturb the user
+            pass
 
     def commit_and_next(self, step: int = 1) -> None:
         """Save, then open the next (Tab) or previous (Shift+Tab) paragraph

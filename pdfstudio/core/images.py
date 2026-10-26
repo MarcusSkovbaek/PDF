@@ -26,7 +26,7 @@ from typing import Iterator, Sequence
 import pymupdf
 
 from ..i18n import tr
-from .document import DocumentError
+from .document import DocumentError, write_bytes
 
 try:  # Pillow is optional – only used for formats MuPDF cannot read.
     from PIL import Image as _PILImage
@@ -248,7 +248,7 @@ def images_to_pdf(images: Sequence[str | bytes], options: ImagePageOptions | Non
             src_rect = src[index].rect
             target, clip = _placement(box, src_rect.width, src_rect.height, opts.scale)
             page.show_pdf_page(target, src, index, keep_proportion=False, clip=clip)
-        return out.tobytes(garbage=3, deflate=True)
+        return write_bytes(out, garbage=3, deflate=True)
     finally:
         out.close()
 

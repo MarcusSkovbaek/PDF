@@ -279,3 +279,108 @@ def test_single_line_item_wraps_under_its_text():
     assert len(nb.lines) == 2
     start_text = nb.lines[0].char_pos[3][0]   # "F" of "Første"
     assert abs(nb.lines[1].extent[0] - start_text) < 0.6
+
+
+def _justified_doc(n_lines=4, lead=""):
+    """A justified paragraph (word spacing via Tw) whose last line is full
+    width too – it continues on the next page."""
+    words = (lead + "Selskabet forventer en stigende indtjening i de kommende kvartaler takket mange nye kunder og "
+             "markedet for gode losninger vokser fortsat i hele regionen hvor afdelingen har investeret "
+             "betydeligt i digitalisering og effektivisering af produktionen samt leverandorer og projekter "
+             "som skaber vaeksten i de naeste par aar for selskabet og dets medarbejdere i hele landet nu").split()
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((72, 60), "Rapport", fontname="helv", fontsize=11)   # registers /helv
+    lines, line = [], []
+    for w in words:
+        if pymupdf.get_text_length(" ".join(line + [w]), "helv", 11) > 448 and line:
+            lines.append(line)
+            line = [w]
+        else:
+            line.append(w)
+    ops = []
+    for k, ln in enumerate(lines[:n_lines]):
+        t = " ".join(ln)
+        tw = (448 - pymupdf.get_text_length(t, "helv", 11)) / (len(ln) - 1)
+        ops.append(f"BT /helv 11 Tf {tw:.3f} Tw 1 0 0 1 72 {page.rect.height - 100 - 15 * k} Tm ({t}) Tj ET")
+    xref = page.get_contents()[0]
+    doc.update_stream(xref, doc.xref_stream(xref) + ("\n" + "\n".join(ops) + "\n").encode())
+    return PdfDocument(pymupdf.open("pdf", doc.tobytes()))
+
+
+def test_full_last_line_of_justified_paragraph_stays_in_the_column():
+    pdf = _justified_doc()
+    b = te.text_blocks(pdf.doc, 0)[-1]
+    assert all(abs(ln.bbox.x1 - 520) < 0.5 for ln in b.lines)
+    te.replace_block_text(pdf, b, b.text + " ja")   # fits with normal spaces, not with the stretched ones
+    blocks = te.text_blocks(pdf.doc, 0)
+    assert len(blocks) == 2 and blocks[-1].text.endswith("i ja")
+    assert all(ln.bbox.x1 <= 520.5 for ln in blocks[-1].lines)
+    assert abs(blocks[-1].lines[-1].bbox.x1 - 520) < 0.5   # still justified to the margin
+
+
+def test_rewritten_justified_line_stays_one_line_with_real_spaces():
+    # long words: the first line's word gaps are stretched to ~10 pt
+    pdf = _justified_doc(lead="effektiviseringen digitaliseringen regnskabsaaret produktionsanlaeggene kunderne og "
+                              "leverandoerkontrakterne ")
+    b = te.text_blocks(pdf.doc, 0)[-1]
+    assert b.text.split("\n")[0].endswith("kunderne og")
+    new = b.text.replace("digitaliseringen", "digitaliseringer", 1)   # the first line is re-justified
+    te.replace_block_text(pdf, b, new)
+    blocks = te.text_blocks(pdf.doc, 0)
+    assert len(blocks) == 2 and blocks[-1].text == new
+    first = blocks[-1].lines[0]
+    assert abs(first.bbox.x1 - 520) < 0.5            # still justified
+    raw = pdf.page(0).get_text()
+    assert "effektiviseringen digitaliseringer regnskabsaaret" in raw   # one real space per gap
+
+
+def test_table_row_set_tight_above_a_paragraph_is_not_part_of_it():
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for x, t in ((72, "Post"), (250, "2025"), (480, "2026")):
+        page.insert_text((x, 100), t, fontname="helv", fontsize=11)
+    for x, t in ((72, "Omsætning"), (250, "183,8"), (480, "619,1")):
+        page.insert_text((x, 114), t, fontname="helv", fontsize=11)
+    page.insert_textbox(pymupdf.Rect(72, 117, 520, 200), "Brødtekst lige under tabellen, som fylder spalten. " * 4,
+                        fontname="helv", fontsize=11)
+    pdf = PdfDocument(pymupdf.open("pdf", doc.tobytes()))
+    texts = [b.text for b in te.text_blocks(pdf.doc, 0)]
+    para = next(t for t in texts if "Brødtekst" in t)
+    assert para.startswith("Brødtekst") and "Omsætning" not in para and "619,1" not in para
+
+
+def test_editing_first_line_of_item_keeps_items_apart():
+    pdf = _list_doc()
+    one = _block(pdf, "1.")
+    te.replace_block_text(pdf, one, one.text + " med en tilføjelse som gør punktet så langt at det må ombrydes til en ny linje")
+    two = _block(pdf, "2.")
+    lines = two.text.split("\n")
+    lines[0] = lines[0].replace("Andet", "Ændret")
+    te.replace_block_text(pdf, two, "\n".join(lines))
+    texts = [b.text.replace("\n", " ") for b in te.text_blocks(pdf.doc, 0)]
+    assert any(t.startswith("1. Første punkt") and t.endswith("til en ny linje") for t in texts)
+    assert ITEM2.replace("Andet", "Ændret") in texts
+
+
+def test_group_with_a_foreign_line_between_its_lines_is_split():
+    # MuPDF's block after an edit rewrote the first line of the second item:
+    # [item 1 line 2, item 2 line 2, item 2 line 3] with item 2 line 1 elsewhere
+    doc = pymupdf.open()
+    page = doc.new_page()
+    for y, t in ((100, "slutningen af det første punkt"), (114, "Andet punkt begynder her"),
+                 (128, "og fortsætter her"), (142, "og slutter her.")):
+        page.insert_text((98, y), t, fontname="helv", fontsize=11)
+    lines = [ln for b in te.text_blocks(pymupdf.open("pdf", doc.tobytes()), 0, merge=False) for ln in b.lines]
+    by_text = {ln.text: ln for ln in lines}
+    a, first, b, c = (by_text[t] for t in ("slutningen af det første punkt", "Andet punkt begynder her",
+                                          "og fortsætter her", "og slutter her."))
+    out = te._split_interleaved([[a, b, c], [first]])
+    assert [[ln.text for ln in g] for g in out] == [[a.text], [b.text, c.text], [first.text]]
+
+
+def test_warm_page_prepares_blocks_and_fonts():
+    pdf = _justified_doc()
+    te.warm_page(pdf.doc, 0)
+    assert getattr(pdf.doc, "_folio_embedded", None) is not None   # fonts proven ahead of time
+    assert te.text_blocks(pdf.doc, 0)[0] is te.text_blocks(pdf.doc, 0)[0]   # served from the cache

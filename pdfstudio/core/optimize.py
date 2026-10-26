@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import pymupdf
 
-from .document import PdfDocument
+from .document import PdfDocument, write_bytes
 
 #: Image quality presets: name -> target resolution (dpi), JPEG quality.
 QUALITY = {
@@ -46,7 +46,7 @@ class ReduceResult:
 def reduce_size(pdf: PdfDocument, options: ReduceOptions | None = None) -> ReduceResult:
     options = options or ReduceOptions()
     before = len(pdf.serialize(protect=False))
-    work = pymupdf.open("pdf", pdf.doc.tobytes(garbage=0, deflate=False))
+    work = pymupdf.open("pdf", write_bytes(pdf.doc))
     try:
         if options.images:
             dpi, quality = QUALITY[options.images]
@@ -70,8 +70,8 @@ def reduce_size(pdf: PdfDocument, options: ReduceOptions | None = None) -> Reduc
         kw: dict = {}
         if pdf.security is not None:
             kw.update(pdf.security.save_kwargs())
-        data = work.tobytes(garbage=4, deflate=True, deflate_images=True, deflate_fonts=True,
-                            use_objstms=1, clean=False, **kw)
+        data = write_bytes(work, garbage=4, deflate=True, deflate_images=True, deflate_fonts=True,
+                           use_objstms=True, **kw)
     finally:
         work.close()
     if pdf.security is None and len(data) > before:

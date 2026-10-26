@@ -15,7 +15,7 @@ from typing import Iterable, Sequence
 import pymupdf
 
 from ..i18n import tr
-from .document import STRUCTURE, PdfDocument
+from .document import STRUCTURE, PdfDocument, write_bytes
 from .images import ImagePageOptions
 from .merge import open_source, validate_indices
 
@@ -238,7 +238,7 @@ def _subset_bytes(src: pymupdf.Document, indices: Sequence[int]) -> bytes:
             out.set_metadata(meta)
         # Several runs may each have copied the same fonts/images: garbage=4
         # merges those duplicates.
-        return out.tobytes(garbage=4 if len(runs) > 1 else 3, deflate=True)
+        return write_bytes(out, garbage=4 if len(runs) > 1 else 3, deflate=True)
     finally:
         out.close()
 

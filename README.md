@@ -12,11 +12,12 @@ svævende værktøjslinje, og panelet *Egenskaber* til højre viser indstillinge
 | Tilstand | Værktøjer og funktioner |
 |---|---|
 | **Vis** | Faner med flere dokumenter, kontinuerlig visning, zoom og tilpasning, sideminiaturer, bogmærker, søgning med fremhævede fund, kommentaroversigt med filter · *Markér tekst* (kopiér) · *Hånd* (panorér) · udskrivning og eksport af sider som billeder |
-| **Redigér** | *Redigér tekst*: ret eksisterende tekst direkte på siden i dokumentets egen skrifttype, størrelse og farve – afsnit ombrydes og justeres som i originalen, også roteret tekst, tabelceller og punktopstillinger; skrifttypevælger med søgning, fed/kursiv/farve, "Vis alle tekstbokse" · *Markér objekt*: flyt, skalér, rotér, spejlvend, erstat, gem og slet billeder i PDF'en · *Tilføj tekst* (venstre/centreret/højre) · *Tilføj billede* (fil eller udklipsholder) |
-| **Kommentér** | *Markér kommentar* (vælg flere med Shift eller ved at trække, flyt, skift farve/gennemsigtighed/streg, slet) · *Fremhæv*, *Understreg*, *Gennemstreg* · *Note* · *Tekstfelt* · *Tegn* (frihånd) · *Figur* (rektangel, ellipse, linje, pil). Alt gemmes som standard-PDF-kommentarer, der kan læses i alle PDF-læsere |
+| **Redigér** | *Redigér tekst*: ret eksisterende tekst direkte på siden i dokumentets egen skrifttype, størrelse og farve – afsnit ombrydes og justeres som i originalen, også roteret tekst, tabelceller og punktopstillinger; skrifttypevælger med søgning; fed, kursiv, understreget, gennemstreget, farve og størrelse på markeret tekst (`Ctrl+B/I/U`) eller hele afsnittet; justering (venstre, centreret, højre, lige margener) og linjeafstand; nummererede lister og hængende indrykning bevares; tekst nedenunder flyttes med, når et afsnit vokser (ellers tilbydes "Formindsk så den passer"); indsæt fra andre programmer som ren tekst; "Vis alle tekstbokse" · *Søg og erstat* (`Ctrl+H`, bevarer skrifttype og farve, "Erstat alle" er ét fortryd-trin) · *Markér objekt*: flyt, skalér, rotér, spejlvend, erstat, gem og slet billeder i PDF'en · *Tilføj tekst* (venstre/centreret/højre) · *Tilføj billede* (fil eller udklipsholder) |
+| **Kommentér** | *Kommentér markeret tekst* som i Acrobat og Word: markér tekst med musen (præcis til tegnet, dobbeltklik = ord, tredobbeltklik = afsnit) og vælg i miniværktøjslinjen eller højreklikmenuen *Kommentér* (`Ctrl+Alt+M`), *Fremhæv*, *Understreg*, *Gennemstreg*, *Erstat tekst*, *Indsæt tekst* eller *Kopiér* (`Ctrl+C`) · Panelet *Kommentarer* til højre: tråde med svar, forfatter (dit Windows-navn) og tidspunkt, status (Accepteret, Afvist, Annulleret, Fuldført) og *Løst*, filter efter status/forfatter/side, søgning, sortering, `F8`/`Shift+F8` springer mellem kommentarer · *Opsummér kommentarer* til en PDF og udskrivning med eller uden kommentarer · *Markér kommentar* (vælg flere med Shift eller ved at trække, flyt, skift farve/gennemsigtighed/streg, slet) · *Fremhæv*, *Understreg*, *Gennemstreg* · *Note* · *Tekstfelt* · *Tegn* (frihånd) · *Figur* (rektangel, ellipse, linje, pil). Alt gemmes som standard-PDF-kommentarer, der kan læses i alle PDF-læsere |
 | **Sider** | Stort sidegitter: flyt (træk og slip), rotér, duplikér, slet, indsæt tomme sider eller sider fra andre filer, udtræk sider som ny fil, opdel dokumentet |
 | Værktøjer | *Kombinér filer* (PDF'er og billeder, sideudvalg pr. fil, bogmærker) · *Billeder til PDF* (skærmbilleder og fotos, også direkte fra udklipsholderen) |
-| Generelt | Fortryd/gentag på alt, sikker gemning (skrifttyper bliver subsettet), adgangskodebeskyttede PDF'er, kommandopalet (`Ctrl+K`), lyst og mørkt tema |
+| Gem | Hurtig gemning i baggrunden (vinduet fryser ikke), sikker gemning (skrives færdig, før den gamle fil erstattes; skrifttyper subsettes), automatisk sikkerhedskopi hvert 2. minut og gendannelse efter nedbrud (gemmes kun lokalt i `%LOCALAPPDATA%\Folio PDF\Gendannelse`), advarsel hvis filen er ændret af et andet program eller er skrivebeskyttet, *Gem en kopi*, adgangskodebeskyttelse og rettigheder bevares (AES-256) og kan ændres under *Adgangskode…*, *Reducér filstørrelse* (billedkvalitet, metadata, forfatternavne), *Indstillinger* (`Ctrl+,`) |
+| Generelt | Fortryd/gentag på alt (hukommelsesbesparende historik), adgangskodebeskyttede PDF'er, kommandopalet (`Ctrl+K`), lyst og mørkt tema |
 
 ### Tastaturgenveje
 | Genvej | Funktion | Genvej | Funktion |
@@ -32,6 +33,8 @@ svævende værktøjslinje, og panelet *Egenskaber* til højre viser indstillinge
 | `Ctrl+Shift+E` | Udtræk sider | `Ctrl+Shift+I` | Indsæt sider fra fil |
 | `Ctrl+\` | Vis/skjul sidepanel | `Ctrl+Shift+L` | Lyst/mørkt tema |
 | `Delete` | Slet det markerede (sider, kommentarer, billeder) | `F11` | Fuld skærm |
+| `Ctrl+H` | Søg og erstat | `Ctrl+Alt+M` | Kommentér markeret tekst |
+| `F8` / `Shift+F8` | Næste / forrige kommentar | `Ctrl+,` | Indstillinger |
 
 Værktøjer vælges med ét bogstav. Bogstaver, som flere tilstande deler, vælger værktøjet i den aktuelle tilstand
 (i en tilstand uden et sådant værktøj vælges værktøjet i *Vis*):
@@ -44,7 +47,7 @@ Værktøjer vælges med ét bogstav. Bogstaver, som flere tilstande deler, vælg
 | `U` / `K` | Understreg / Gennemstreg | `N` | Note |
 | `D` | Tegn | `R` | Figur |
 
-Mens du redigerer tekst: `Ctrl+Enter` gemmer, `Tab` / `Shift+Tab` gemmer og går til næste/forrige afsnit,
+Mens du redigerer tekst: `Ctrl+B` / `Ctrl+I` / `Ctrl+U` gør markeret tekst fed / kursiv / understreget, `Ctrl+Enter` gemmer, `Tab` / `Shift+Tab` gemmer og går til næste/forrige afsnit,
 `Esc` annullerer. Skifter du værktøj eller tilstand midt i en redigering, gemmes den.
 
 ## Privatliv og offline-garanti

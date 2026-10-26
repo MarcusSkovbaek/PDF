@@ -1,4 +1,44 @@
-# Status / handover – Folio PDF (paused 2026-10-12 to protect the weekly usage limit)
+# Status / handover – Folio PDF
+
+## 2026-10-25: tekstredigering, gem og kommentarer (spec `docs/kravspec-tekst-gem-kommentarer.md`)
+Spec approved 2026-10-25 (decisions in its section F: author = Windows name without asking, comments as one
+Acrobat-like list, no spell check, autosave every 2 min on by default). Built in the order C → B → A.
+
+**C – comments on selected text** (`core/textsel.py`, `core/comments.py`, `core/identity.py`,
+`ui/viewer/text_selection.py`, `tools/_text_actions.py`, `ui/panels/comments.py`): character-precise
+selection (drag, double = word, triple = paragraph, Shift-extend, Ctrl+A) in Markér tekst / Markér kommentar /
+markup tools; floating mini bar + context menu (Kommentér, Fremhæv, Understreg, Gennemstreg, Erstat tekst,
+Indsæt tekst, Kopiér); Acrobat-compatible threads (replies = hidden Text annots with /IRT, review/marked state
+annots, /T author, /M dates, /NM ids); comments pane as the second inspector tab with cards (avatar, author,
+time, quote, inline edit, replies, status chip, Løst), filters (status/author/page), search, sort, F8/Shift+F8;
+Opsummér kommentarer (PDF), print with/without comments; cascade delete with confirm.
+**B – saving** (`core/document.py`, `core/recovery.py`, `core/optimize.py`, `ui/saving.py`, dialogs
+security/reduce/settings): serialise on the UI thread (PyMuPDF holds the GIL; 58 pages ≈ 0.16 s), write +
+fsync + atomic replace in a QThread; encryption/permissions kept (AES-256) and editable; autosave every 2 min
+to `%LOCALAPPDATA%\Folio PDF\Gendannelse`, recovery prompt for orphans of dead sessions; external-change,
+read-only and signature warnings; Gem en kopi; Reducér filstørrelse; undo history deduplicated per PDF object
+(58 edit steps ≈ 3 MB, was ≈ 4.7 MB per step).
+**A – text editing** (`core/text_edit.py`, `core/fonts.py`, `core/insert.py`, `core/replace.py`,
+`tools/edit_text.py`, `dialogs/find_replace.py`): formats on selections (bold/italic/underline/strike/colour/
+size/font, Ctrl+B/I/U, inspector applies to selection or whole paragraph), real underline/strike strokes
+(detected, kept, removed with their text); paragraph alignment incl. justify + line spacing; reflow of the text
+below in the same column (`EditResult.moved/overflow`), overflow toast with "Formindsk så den passer"
+(`fit_scale`); glyph fallback reported (`substitutions`); plain-text paste; editor Ctrl+Z undoes typing;
+numbered lists / hanging indents (core + editor), line fragments joined, single-line table cells stop at the
+neighbour cell; Søg og erstat (Ctrl+H); caches: text blocks per page content, embedded fonts per doc.
+
+**Measured** (58-page LibreOffice report, offscreen, idle machine): open editor 41–88 ms after an edit
+(first open on a page 75–107 ms; the page is prepared while idle – `text_edit.warm_page`), commit
+59–135 ms in the UI; undo snapshot 8 ms instead of 110 ms (`document.write_bytes`: MuPDF writes into a native
+buffer instead of a Python callback per chunk). Stress test (`tests/stress_edit_all_blocks.py`, every block
+edited): 669 edits, avg 117 ms, 6 remaining table edge cases (was 91, baseline 297), undo exact over 669 steps;
+the 14-page strategy deck: 0 problems. Fixed on the way: full last line of a justified paragraph ran past the
+margin, stretched word gaps lost their space glyph (line fell apart), runs of another colour were written out
+of order, a table's last row merged with the paragraph under it, an edited list item's first line split it.
+**Open / verify on real Windows + Acrobat**: hidden reply annotations shown as threads in Adobe Acrobat;
+autosave timing on large files; 2-line double-spaced paragraphs are still split in two blocks (accepted
+limitation); remaining stress-test cases are table cells edited cell by cell (`tests/stress_edit_all_blocks.py`).
+Not built (KAN/BØR in the spec): A12, C9 "Flyt kommentar hertil", B9 default folder.
 
 ## >>> START HERE (max-effort review & optimisation) <<<
 State 2026-10-15: all planned features built (four modes, all tools, dialogs), whole-app QA pass done
@@ -60,13 +100,13 @@ scroll ~70 ms/step; open editor 170–310 ms, commit 110–350 ms, undo 70–180
 - README: features per mode/tool, shortcut tables, offline guarantee.
 
 **Remaining (prioritised for the max-effort review)**
-1. Undo snapshots store the whole document; after text edits the un-subset fonts make each step 3–5 MB
+1. DONE 2026-10-25 – Undo snapshots store the whole document; after text edits the un-subset fonts make each step 3–5 MB
    (60 steps ≈ 200–300 MB). Store font streams once / compress snapshots / diff-based history.
-2. Edited text that grows by a line overlaps the content below (no reflow of following blocks) – at least
+2. DONE 2026-10-25 – Edited text that grows by a line overlaps the content below (no reflow of following blocks) – at least
    warn or offer to shrink; same for list items.
-3. Editor open/commit latency 0.2–0.35 s on dense pages (`_page_context` re-extracts the page via
+3. DONE 2026-10-25 – Editor open/commit latency 0.2–0.35 s on dense pages (`_page_context` re-extracts the page via
    `text_blocks(merge=False)` each time) – cache per page/version.
-4. Block grouping heuristics (`_split_size_changes`, list items, `_continues`) need a corpus of Word/LO/InDesign
+4. PARTLY DONE 2026-10-25 (numbered lists, hanging indents) – Block grouping heuristics (`_split_size_changes`, list items, `_continues`) need a corpus of Word/LO/InDesign
    PDFs; hanging indents and numbered lists ("1.", "a)") are not yet treated like bullets.
 5. Search on 76 pages ~0.85 s (synchronous core call) – check the UI keeps it incremental on 500+ pages.
 6. Thumbnail cache is unbounded (≈45 MB at 350 pages).

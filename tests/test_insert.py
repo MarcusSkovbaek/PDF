@@ -114,9 +114,25 @@ def test_add_text_box_on_rotated_page_is_upright(pdf):
     assert dark
 
 
+def _font_report(doc, page) -> list:
+    """Fonts of the page and their ToUnicode lines for U+00A0 (diagnostics)."""
+    out = []
+    for f in doc[page].get_fonts(full=True):
+        kind, val = doc.xref_get_key(f[0], "ToUnicode")
+        lines = []
+        if kind == "xref":
+            cmap = doc.xref_stream(int(val.split()[0])).decode("latin-1")
+            lines = [ln for ln in cmap.splitlines() if "00a0" in ln.lower()][:3]
+        out.append((f[0], f[3], f[2], lines))
+    return out
+
+
 def test_add_text_box_non_latin_falls_back(pdf):
     add_text_box(pdf, 0, pymupdf.Rect(72, 700, 500, 760), "Привет – 中文", SpanStyle(font="Helvetica", size=12))
-    assert "Привет – 中文" in pdf.doc[0].get_text()
+    text = pdf.doc[0].get_text()
+    spans = [(s["font"], s["text"]) for b in pdf.doc[0].get_text("dict")["blocks"] for ln in b.get("lines", ())
+             for s in ln["spans"] if "Привет" in s["text"] or "中" in s["text"] or s["text"].strip() == "–"]
+    assert "Привет – 中文" in text, (spans, _font_report(pdf.doc, 0))
 
 
 # -- images ---------------------------------------------------------------------------

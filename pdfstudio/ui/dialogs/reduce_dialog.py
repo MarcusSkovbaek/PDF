@@ -49,7 +49,7 @@ class ReduceDialog(FolioDialog):
         self.choice = "cancel"
         self.add_button(tr("shell.dirty.cancel"), "secondary", "cancel")
         run = self.add_button(tr("reduce.run"), "primary", None, default=True)
-        run.clicked.connect(self.run)
+        run.clicked.connect(lambda: self.run())  # not run(checked): "checked" is no path
         self._tip("medium")
 
     def _tip(self, key: str) -> None:

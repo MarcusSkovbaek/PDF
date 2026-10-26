@@ -307,7 +307,7 @@ class ReplyRow(_HfwMixin, QWidget):
         top.addWidget(self.name)
         top.addWidget(self.when, 1)
         self.more = IconButton("dots-three", tr("comments.more"), variant="icon-xs", icon_size=14)
-        self.more.clicked.connect(self._menu)
+        self.more.clicked.connect(lambda: self._menu())
         top.addWidget(self.more)
         v.addLayout(top)
         self.text = label("", None, wrap=True)
@@ -440,7 +440,7 @@ class CommentCard(_HfwMixin, QFrame):
         head.addWidget(self.resolve, 0, Qt.AlignmentFlag.AlignTop)
         self.more = IconButton("dots-three", tr("comments.more"), variant="icon-sm", icon_size=17)
         self.more.setAccessibleName("comments.more")
-        self.more.clicked.connect(self._menu)
+        self.more.clicked.connect(lambda: self._menu())  # not _menu(checked): "checked" is no position
         head.addWidget(self.more, 0, Qt.AlignmentFlag.AlignTop)
         lay.addLayout(head)
 

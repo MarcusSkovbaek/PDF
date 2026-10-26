@@ -206,3 +206,17 @@ def test_reduce_dialog_saves_smaller_copy(win, qapp, tmp_path):  # noqa: F811
     assert os.path.getsize(out) < os.path.getsize(src)
     assert not ws.pdf.is_dirty
     assert "foto (reduceret).pdf" in " ".join(win.toasts.visible_messages())
+
+
+def test_reduce_button_asks_where_to_save(win, qapp, sample_pdf_path, monkeypatch):  # noqa: F811
+    from PySide6.QtWidgets import QFileDialog, QPushButton
+    from pdfstudio.i18n import tr
+    from pdfstudio.ui.dialogs.reduce_dialog import ReduceDialog
+
+    ws = win.open_path(sample_pdf_path)
+    asked = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (asked.append(a) or "", "")))
+    dlg = ReduceDialog(win, ws)
+    btn = next(b for b in dlg.findChildren(QPushButton) if b.text() == tr("reduce.run"))
+    btn.click()                       # cancelled in the file dialog: nothing is written
+    assert len(asked) == 1

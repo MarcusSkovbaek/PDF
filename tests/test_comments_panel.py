@@ -310,3 +310,33 @@ def test_summarize_comments_action(win, qapp, sample_pdf_path, tmp_path):  # noq
         text = "".join(p.get_text() for p in d)
     assert "Kommentaroversigt" in text and "Ret stavningen" in text and "Husk Søren" in text
     assert win.current_workspace().pdf.path == out          # opened for reading
+
+
+def test_left_click_on_more_opens_the_menu(win, qapp, sample_pdf_path):  # noqa: F811
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    ws, panel = _populated(win, qapp, sample_pdf_path)
+    shown = []
+
+    def click(button):
+        def grab():
+            menu = QApplication.activePopupWidget()
+            shown.append([a.text() for a in menu.actions()] if menu else None)
+            if menu:
+                menu.close()
+        QTimer.singleShot(50, grab)
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+
+    card = panel.cards()[1]
+    key = card.key
+    click(card.more)                       # the comment's "…"
+    assert shown[-1] and "Svar" in shown[-1]
+    card.start_reply()
+    card.reply_editor.edit.setPlainText("Enig")
+    card.reply_editor._commit()
+    qapp.processEvents()
+    row = next(iter(panel.card(*key)._reply_rows.values()))
+    click(row.more)                        # a reply's "…"
+    assert shown[-1] and "Slet svar" in shown[-1]

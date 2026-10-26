@@ -39,6 +39,8 @@ of order, a table's last row merged with the paragraph under it, an edited list 
 autosave timing on large files; 2-line double-spaced paragraphs are still split in two blocks (accepted
 limitation); remaining stress-test cases are table cells edited cell by cell (`tests/stress_edit_all_blocks.py`).
 Not built (KAN/BØR in the spec): A12, C9 "Flyt kommentar hertil", B9 default folder.
+**Dependencies pinned** (`requirements.txt`): PyMuPDF 2.0 (Oct 2026) pulls numpy/onnxruntime/pymupdf4llm and
+doubled the installer (42 → 88 MB); two font tests fail with it. Upgrading needs its own pass.
 
 ## >>> START HERE (max-effort review & optimisation) <<<
 State 2026-10-15: all planned features built (four modes, all tools, dialogs), whole-app QA pass done

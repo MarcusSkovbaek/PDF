@@ -1176,15 +1176,50 @@ def _fix_space_unicode(doc: pymupdf.Document, first_new: int, runs: list[TextRun
     contains no-break spaces."""
     if any("\u00a0" in r.text for r in runs):
         return
-    map_space_glyphs(doc, None, first_new)
+    spaces = set()
+    for r in runs:
+        try:
+            g = r.font.has_glyph(0x20)
+            if g and g == r.font.has_glyph(0xA0):
+                spaces.add(g)
+        except Exception:
+            continue
+    map_space_glyphs(doc, None, first_new, space_gids=spaces)
 
 
-def map_space_glyphs(doc: pymupdf.Document, gids=None, first_xref: int = 1) -> None:
+_NBSP_RANGE = re.compile(r"^([ \t]*)<([0-9a-f]{4})>[ \t]*<([0-9a-f]{4})>[ \t]*<00a0>[ \t]*$",
+                         re.IGNORECASE | re.MULTILINE)
+
+
+def _split_space_ranges(cmap: str, space_gids) -> str:
+    """A bfrange that starts at a known space glyph and U+00A0 ("<0003>
+    <0006> <00a0>": glyphs 3…6 -> U+00A0…U+00A3, as MuPDF writes it for
+    Microsoft YaHei) becomes the rest of the range plus "<0003> <0020>"."""
+    extra: list[str] = []
+
+    def split(m: re.Match) -> str:
+        a, b = int(m.group(2), 16), int(m.group(3), 16)
+        if a not in space_gids or b <= a:
+            return m.group(0)
+        extra.append(f"<{a:04x}> <0020>")
+        return f"{m.group(1)}<{a + 1:04x}> <{b:04x}> <00a1>"
+
+    out = _NBSP_RANGE.sub(split, cmap)
+    if not extra:
+        return cmap
+    block = f"{len(extra)} beginbfchar\n" + "\n".join(extra) + "\nendbfchar\n"
+    k = out.rfind("endcmap")
+    return out[:k] + block + out[k:] if k >= 0 else out + block
+
+
+def map_space_glyphs(doc: pymupdf.Document, gids=None, first_xref: int = 1, *, space_gids=()) -> None:
     """Make glyphs read back as U+0020 instead of U+00A0 in the ToUnicode
     maps of the fonts from xref ``first_xref`` on: the glyphs ``gids``, or
-    (``None``) every glyph mapped to U+00A0."""
+    (``None``) every single glyph mapped to U+00A0; ranges of glyphs
+    starting at U+00A0 only when they start at one of ``space_gids``."""
     gid = "[0-9a-f]{4}" if gids is None else "|".join(f"{g:04x}" for g in gids)
     rx = re.compile(_NBSP_ENTRY.replace("{gid}", gid), re.IGNORECASE | re.MULTILINE)
+    space_gids = set(space_gids) | (set(gids) if gids else set())
     for xref in range(first_xref, doc.xref_length()):
         try:
             kind, val = doc.xref_get_key(xref, "ToUnicode")
@@ -1195,6 +1230,8 @@ def map_space_glyphs(doc: pymupdf.Document, gids=None, first_xref: int = 1) -> N
         except Exception:
             continue
         fixed = rx.sub(r"\1<0020>", cmap)
+        if space_gids:
+            fixed = _split_space_ranges(fixed, space_gids)
         if fixed != cmap:
             doc.update_stream(tu, fixed.encode("latin-1"))
 

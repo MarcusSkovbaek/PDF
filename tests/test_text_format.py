@@ -1,6 +1,8 @@
 """Text editing 1.1: character formatting, underline/strike, alignment, line
 spacing, moving the text below, overflow and shrink-to-fit."""
 
+import re
+
 import pymupdf
 import pytest
 
@@ -427,3 +429,29 @@ def test_map_space_glyphs_only_touches_single_glyph_entries():
     cmap = doc.xref_stream(tu).decode()
     assert "<0003> <0020>" in cmap and "<0010> <0010> <0020>" in cmap
     assert "<0081> <00e0> <00a0>" in cmap          # a range starting at U+00A0 stays as it is
+
+
+def test_space_glyph_inside_a_range_is_split_out():
+    # Microsoft YaHei on Windows: MuPDF writes "<0003> <0006> <00a0>" (glyphs 3…6 -> U+00A0…)
+    font = _shared_space_font()
+    if font is None:
+        pytest.skip("no font with a shared space / no-break space glyph")
+    g = font.has_glyph(0x20)
+    doc = pymupdf.open()
+    page = doc.new_page()
+    tw = pymupdf.TextWriter(page.rect)
+    tw.append((72, 100), "Hej Verden", font=font, fontsize=12)
+    tw.write_text(page)
+    for xref in range(1, doc.xref_length()):
+        kind, val = doc.xref_get_key(xref, "ToUnicode")
+        if kind == "xref":
+            tu = int(val.split()[0])
+            cmap = doc.xref_stream(tu).decode("latin-1")
+            single = re.compile(rf"^<{g:04x}> <00a0>$", re.I | re.M)
+            assert single.search(cmap)
+            cmap = single.sub("", cmap).replace("endcmap", f"1 beginbfrange\n<{g:04x}> <{g + 1:04x}> <00a0>\n"
+                                                           "endbfrange\nendcmap", 1)
+            doc.update_stream(tu, cmap.encode("latin-1"))
+    assert "Hej\xa0Verden" in pymupdf.open("pdf", doc.tobytes())[0].get_text()   # the YaHei situation
+    te.map_space_glyphs(doc, None, space_gids={g})
+    assert pymupdf.open("pdf", doc.tobytes())[0].get_text().strip() == "Hej Verden"

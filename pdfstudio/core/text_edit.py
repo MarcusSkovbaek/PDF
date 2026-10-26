@@ -1157,8 +1157,53 @@ def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
             r = group[0]
             tw.write_text(page, color=color,
                           morph=(pymupdf.Point(r.origin), pymupdf.Matrix(_morph_degrees(r.dir))))
+    _fix_space_unicode(doc, first_new, runs)
     _dedupe_font_files(doc, first_new)
     _draw_decorations(page, all_runs)
+
+
+_TOUNICODE_ENTRY = r"(<{gid}>\s*(?:<{gid}>\s*)?)<00a0>"
+
+
+def _fix_space_unicode(doc: pymupdf.Document, first_new: int, runs: list[TextRun]) -> None:
+    """Fonts whose space and no-break space share one glyph (Arial, Times
+    New Roman, Calibri …) get a ToUnicode map from MuPDF that reads that
+    glyph back as U+00A0: every space of the new text would copy and search
+    as a no-break space, in Folio and in other readers. Map it to U+0020,
+    unless the text really contains no-break spaces."""
+    if any("\u00a0" in r.text for r in runs):
+        return
+    gids = set()
+    for r in runs:
+        try:
+            g = r.font.has_glyph(0x20)
+            if g and g == r.font.has_glyph(0xA0):
+                gids.add(g)
+        except Exception:
+            continue
+    map_space_glyphs(doc, gids, first_new)
+
+
+def map_space_glyphs(doc: pymupdf.Document, gids, first_xref: int = 1) -> None:
+    """Make glyphs ``gids`` read back as U+0020 instead of U+00A0 in the
+    ToUnicode maps of the fonts from xref ``first_xref`` on (see
+    :func:`_fix_space_unicode`)."""
+    if not gids:
+        return
+    for xref in range(first_xref, doc.xref_length()):
+        try:
+            kind, val = doc.xref_get_key(xref, "ToUnicode")
+            if kind != "xref" or doc.xref_get_key(xref, "Type")[1] != "/Font":
+                continue
+            tu = int(val.split()[0])
+            cmap = doc.xref_stream(tu).decode("latin-1")
+        except Exception:
+            continue
+        fixed = cmap
+        for g in gids:
+            fixed = re.sub(_TOUNICODE_ENTRY.format(gid=f"{g:04x}"), r"\1<0020>", fixed, flags=re.IGNORECASE)
+        if fixed != cmap:
+            doc.update_stream(tu, fixed.encode("latin-1"))
 
 
 def _draw_decorations(page: pymupdf.Page, runs: list[TextRun]) -> None:

@@ -15,7 +15,7 @@ from pdfstudio.core.fonts import (
     resolve_font,
     style_from_span,
 )
-from tests.conftest import SANS_TTF, SERIF_TTF, make_sample_pdf
+from tests.conftest import SANS_NAME, SANS_TTF, SERIF_TTF, make_sample_pdf
 
 DANISH = "Blåbærgrød ÆØÅ æøå"
 
@@ -89,7 +89,7 @@ def test_base14_resolves_to_builtin_clone(doc):
 
 @pytest.mark.skipif(not SANS_TTF, reason="no sans TTF available")
 def test_embedded_full_font_is_used(doc):
-    st = style_from_span("LiberationSans", 14, 0x0033CC, 0)
+    st = style_from_span(SANS_NAME, 14, 0x0033CC, 0)
     choice = resolve_font(doc, 0, st, "Helt ny tekst " + DANISH)
     assert choice.source == "embedded"
     assert font_covers(choice.font, DANISH)

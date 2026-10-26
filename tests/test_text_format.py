@@ -384,3 +384,30 @@ def test_warm_page_prepares_blocks_and_fonts():
     te.warm_page(pdf.doc, 0)
     assert getattr(pdf.doc, "_folio_embedded", None) is not None   # fonts proven ahead of time
     assert te.text_blocks(pdf.doc, 0)[0] is te.text_blocks(pdf.doc, 0)[0]   # served from the cache
+
+
+def _shared_space_font():
+    """A font whose space and no-break space are one glyph (Arial on
+    Windows, IPA Gothic on Linux), or None."""
+    import glob
+    import os
+    from tests.conftest import SANS_TTF
+    cands = [SANS_TTF, os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "arial.ttf")]
+    cands += glob.glob("/usr/share/fonts/**/ipag*.ttf", recursive=True)
+    for path in cands:
+        if path and os.path.exists(path):
+            f = pymupdf.Font(fontfile=path)
+            if f.has_glyph(0x20) and f.has_glyph(0x20) == f.has_glyph(0xA0):
+                return f
+    return None
+
+
+def test_written_spaces_read_back_as_spaces_with_arial_like_fonts():
+    font = _shared_space_font()
+    if font is None:
+        pytest.skip("no font with a shared space / no-break space glyph")
+    doc = pymupdf.open()
+    page = doc.new_page()
+    te.write_runs(page, [te.TextRun(text="Hej Verden igen", font=font, size=12, color=(0, 0, 0),
+                                    origin=(72, 100), dir=(1, 0))])
+    assert pymupdf.open("pdf", doc.tobytes())[0].get_text().strip() == "Hej Verden igen"

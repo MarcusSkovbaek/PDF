@@ -39,13 +39,18 @@ of order, a table's last row merged with the paragraph under it, an edited list 
 autosave timing on large files; 2-line double-spaced paragraphs are still split in two blocks (accepted
 limitation); remaining stress-test cases are table cells edited cell by cell (`tests/stress_edit_all_blocks.py`).
 Not built (KAN/BØR in the spec): A12, C9 "Flyt kommentar hertil", B9 default folder.
+**Windows**: six tests had been failing on Windows since 2026-10-15, hidden by `continue-on-error` in the
+workflow (now removed – tests gate the installer). Cause: Arial/Times/Calibri use one glyph for space and
+no-break space, so MuPDF's ToUnicode read every space of newly written text as U+00A0 – a real bug: edited text
+did not search/copy correctly on Windows. `text_edit.write_runs` now maps that glyph to U+0020
+(`map_space_glyphs`); tests no longer assume Liberation fonts (`conftest.SANS_NAME`).
 **Dependencies pinned** (`requirements.txt`): PyMuPDF 2.0 (Oct 2026) pulls numpy/onnxruntime/pymupdf4llm and
 doubled the installer (42 → 88 MB); two font tests fail with it. Upgrading needs its own pass.
 
 ## >>> START HERE (max-effort review & optimisation) <<<
 State 2026-10-15: all planned features built (four modes, all tools, dialogs), whole-app QA pass done
 (see "QA status" below for verified items, measurements and the ranked list of remaining issues).
-Full suite: 408 tests green in ~60 s on Linux AND on Windows (GitHub Actions).
+Full suite green on Linux; on Windows see the 2026-10-25 note above.
 Windows installer: `packaging/installer.iss` (Inno Setup, Danish wizard) + `packaging/folio.spec`; the
 workflow `.github/workflows/windows-installer.yml` builds on windows-latest, runs the tests, smoke-tests the
 frozen app and a silent install, and publishes `FolioPDF-Setup-<version>.exe` (~42 MB) as an artifact.

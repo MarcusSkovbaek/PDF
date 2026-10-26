@@ -35,8 +35,6 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Tests
-        # reported in the log, but a Windows-only test issue must not block the installer
-        continue-on-error: true
         run: python -m pytest -q -p no:cacheprovider
 
       - name: Build program (PyInstaller)

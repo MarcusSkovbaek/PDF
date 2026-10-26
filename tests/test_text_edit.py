@@ -4,7 +4,7 @@ import pytest
 from pdfstudio.core import CONTENT, PdfDocument
 from pdfstudio.core.fonts import SpanStyle, style_from_span
 from pdfstudio.core.text_edit import TextBlock, block_at, replace_block_text, text_blocks
-from tests.conftest import SANS_TTF, make_sample_pdf
+from tests.conftest import SANS_NAME, SANS_TTF, make_sample_pdf
 
 
 # -- helpers ------------------------------------------------------------------
@@ -166,7 +166,7 @@ def test_embedded_font_kept_without_duplicating_it(pdf):
     page = pdf.doc[0]
     s = find_span(page, "Hej Verden")
     assert s["text"] == "Indlejret skrifttype: Hej Verden – blåbær"
-    assert "LiberationSans" in s["font"].replace(" ", "")
+    assert SANS_NAME.removesuffix("Sans") in s["font"].replace(" ", "")
     assert s["size"] == pytest.approx(14, abs=0.01)
     assert s["color"] == 0x0033CC
     assert s["origin"] == pytest.approx((72, 200), abs=0.5)
@@ -191,7 +191,7 @@ def test_subset_font_reused_then_fallback_for_new_glyphs():
     s = find_span(page, "World Hello")
     assert s["text"] == "World Hello Indlejret"
     # still the embedded subset font program (small), not a 400 KB system font
-    assert "LiberationSans" in s["font"].replace(" ", "")
+    assert SANS_NAME.removesuffix("Sans") in s["font"].replace(" ", "")
     assert s["origin"] == pytest.approx((72, 200), abs=0.5)
     # no foreign font was embedded (e.g. a fallback just for the spaces)
     new_fonts = {f[3] for f in page.get_fonts()} - fonts_before

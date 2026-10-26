@@ -30,6 +30,8 @@ def _find_font(pattern: str) -> str | None:
 SANS_TTF = _find_font("LiberationSans-Regular.ttf") or _find_font("arial.ttf")
 SERIF_TTF = _find_font("LiberationSerif-Regular.ttf") or _find_font("times.ttf")
 SANS_BOLD_TTF = _find_font("LiberationSans-Bold.ttf") or _find_font("arialbd.ttf")
+#: family of SANS_TTF as the PDF names it ("LiberationSans" on Linux, "Arial" on Windows)
+SANS_NAME = pymupdf.Font(fontfile=SANS_TTF).name.replace(" Regular", "").replace(" ", "") if SANS_TTF else ""
 
 
 def filled_pixmap(width: int, height: int, color, alpha: bool = False, regions=()) -> pymupdf.Pixmap:
@@ -66,6 +68,14 @@ def make_sample_pdf(path: str | None = None) -> bytes:
     if SANS_BOLD_TTF:
         p.insert_font(fontname="LibSansBold", fontfile=SANS_BOLD_TTF)
         p.insert_text((72, 240), "Fed overskrift", fontname="LibSansBold", fontsize=16)
+    # Arial (Windows) shares one glyph for space and no-break space: write
+    # real spaces like a word processor (and Folio itself) does
+    from pdfstudio.core.text_edit import map_space_glyphs
+    for ttf in (SANS_TTF, SANS_BOLD_TTF):
+        if ttf:
+            f = pymupdf.Font(fontfile=ttf)
+            if f.has_glyph(0x20) == f.has_glyph(0xA0):
+                map_space_glyphs(doc, {f.has_glyph(0x20)})
 
     p = doc.new_page(width=595, height=842)
     p.insert_textbox(pymupdf.Rect(72, 72, 290, 400), "Venstre kolonne. " * 20, fontname="helv", fontsize=10)
@@ -172,4 +182,4 @@ def _close_leftover_windows(request):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
-__all__ = ["make_sample_pdf", "make_png", "filled_pixmap", "SANS_TTF", "SERIF_TTF", "io"]
+__all__ = ["make_sample_pdf", "make_png", "filled_pixmap", "SANS_TTF", "SANS_NAME", "SERIF_TTF", "io"]

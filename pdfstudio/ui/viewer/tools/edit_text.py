@@ -1074,6 +1074,13 @@ class EditTextTool(Tool):
         self._box_timer.setInterval(40)
         self._box_timer.timeout.connect(self._refresh_box_outlines)
         self.show_all_boxes = False
+        # idle preparation of the visible pages (text surfaces, fonts, the
+        # text-free backdrop) so a click opens the text at once
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setSingleShot(True)
+        self._warm_timer.setInterval(350)
+        self._warm_timer.timeout.connect(self._warm_step)
+        self._warm_queue: list[tuple[str, int]] = []
 
     # -- lifecycle ---------------------------------------------------------
     def activate(self, ctx) -> None:
@@ -1084,6 +1091,7 @@ class EditTextTool(Tool):
         view.verticalScrollBar().valueChanged.connect(self._reposition)
         view.verticalScrollBar().valueChanged.connect(self._schedule_box_outlines)
         view.pagesReset.connect(self._on_pages_reset)
+        view.verticalScrollBar().valueChanged.connect(self._schedule_warm)
         if self.supports_box_outlines:
             try:
                 self.show_all_boxes = str(_settings().value(SHOW_BOXES_KEY, "false")).lower() in ("true", "1")
@@ -1092,14 +1100,18 @@ class EditTextTool(Tool):
             self._schedule_box_outlines()
         # resolving fonts the first time scans the system fonts – do it early
         QTimer.singleShot(0, core_fonts.available_families)
+        self._schedule_warm()
 
     def deactivate(self) -> None:
         self.commit()
         self._clear_box_outlines()
         self._box_timer.stop()
+        self._warm_timer.stop()
+        self._warm_queue = []
         if self.ctx is not None:
             view = self.ctx.view
             for sig, slot in ((view.zoomChanged, self._on_zoom),
+                              (view.verticalScrollBar().valueChanged, self._schedule_warm),
                               (view.horizontalScrollBar().valueChanged, self._reposition),
                               (view.verticalScrollBar().valueChanged, self._reposition),
                               (view.verticalScrollBar().valueChanged, self._schedule_box_outlines),
@@ -1837,15 +1849,26 @@ class EditTextTool(Tool):
                 formats[key] = fmt
             return fmt
 
+        keys: dict = {}          # id(style) -> key (the chars of a span share one style object)
+
+        def key_of(st) -> tuple:
+            if st is None:
+                return base_key
+            key = keys.get(id(st))
+            if key is None:
+                key = keys[id(st)] = _style_key(st)
+            return key
+
         pos = q.position()
         for line in piece.block.lines:
             styles = (line.char_styles or [])[:len(line.text)]
             k = 0
             while k < len(styles):
                 st = styles[k]
-                key = _style_key(st) if st is not None else base_key
+                key = key_of(st)
                 end = k + 1
-                while end < len(styles) and styles[end] is not None and _style_key(styles[end]) == key:
+                while end < len(styles) and styles[end] is not None and (
+                        styles[end] is st or key_of(styles[end]) == key):
                     end += 1
                 if key != base_key:
                     cur.setPosition(pos + k)
@@ -1895,6 +1918,7 @@ class EditTextTool(Tool):
         for k, look in enumerate(self._looks):
             if look.bullet is not None:
                 text, st, s = look.bullet
+                text = core_fonts.readable_symbols(text, st.font)   # symbol-font bullets (U+F0xx)
                 bullets[k] = (text, self._qfont(st, self._ppp), to_qcolor(tuple(st.color)),
                               (s - self._box[0]) * self._ppp)
         ed.bullets = bullets
@@ -1963,9 +1987,16 @@ class EditTextTool(Tool):
                 br = view.page_to_viewport(page, QPointF(o.x1, o.y1))
                 others.append(QRectF(tl, br).normalized().adjusted(-2, -2, 2, 2))
         inner = frame.adjusted(1, 1, -1, -1)
+        # floating widgets over the view (the tool bar): never hide behind them
+        floating = []
+        tb = getattr(self.ctx.workspace, "toolbar", None)
+        if isinstance(tb, QWidget) and tb.isVisible():
+            tl = view.viewport().mapFromGlobal(tb.mapToGlobal(tb.rect().topLeft()))
+            floating.append(QRectF(tl.x(), tl.y(), tb.width(), tb.height()).adjusted(-4, -4, 4, 4))
 
         def cost(r: QRectF) -> float:
             covered = sum((r & o).width() * (r & o).height() for o in others if r.intersects(o))
+            covered += sum(1e5 for o in floating if r.intersects(o))
             if r.intersects(inner):
                 covered += 1e6 + (r & inner).width() * (r & inner).height()
             outside = 0.0 if area.contains(r) else 1e7
@@ -2118,7 +2149,7 @@ class EditTextTool(Tool):
         finally:
             self._committing = False
         if changed:
-            QTimer.singleShot(150, self, lambda p=story.page: self._warm(p))
+            self._schedule_warm()
         return changed
 
     def _write_story(self, story: flow.Story, edits: list[flow.Edit], session) -> bool:
@@ -2165,10 +2196,45 @@ class EditTextTool(Tool):
         self.ctx.toast(tr("edit.text.overflow.done", pct=round(scale * 100)), "success")
 
     def _warm(self, page: int) -> None:
-        """Idle after a commit: prepare the page so the next text opens fast."""
+        """Prepare a page completely (text surfaces, fonts, backdrops)."""
+        for what in ("stories", "fonts", "backdrop"):
+            self._warm_one(what, page)
+
+    def _schedule_warm(self, *_a) -> None:
+        """The view settled (scrolled, opened, committed): prepare the
+        visible page and the next one while the user is idle."""
+        if self.ctx is None or not self.supports_box_outlines:
+            return
+        self._warm_queue = []
+        self._warm_timer.start()
+
+    def _warm_step(self) -> None:
+        """One small piece of preparation per idle tick (so scrolling or a
+        click is never held up by more than one page step)."""
+        if self.ctx is None or self._warm_timer.isActive():
+            return                       # still scrolling: the timer comes back
+        if not self._warm_queue:
+            here = self.ctx.view.current_page
+            pages = [p for p in (here, here + 1) if 0 <= p < self.ctx.pdf.page_count]
+            self._warm_queue = [(what, p) for p in pages for what in ("stories", "fonts", "backdrop")]
+        what, page = self._warm_queue.pop(0)
+        self._warm_one(what, page)
+        if self._warm_queue:
+            QTimer.singleShot(30, self, self._warm_step)
+
+    def _warm_one(self, what: str, page: int) -> None:
+        if self.editor is not None and what == "backdrop":
+            return                       # the open text has its backdrop
         try:
-            te.warm_page(self.ctx.pdf.doc, page)
-            flow.page_stories(self.ctx.pdf.doc, page)
+            doc = self.ctx.pdf.doc
+            if what == "stories":
+                flow.page_stories(doc, page)
+            elif what == "fonts":
+                te.warm_page(doc, page)
+            else:
+                body = [s for s in flow.page_stories(doc, page) if s.kind == "flow"]
+                for st in sorted(body, key=lambda s: -sum(len(p.text) for p in s.pieces))[:2]:
+                    flow.prepare_without(doc, st)
         except Exception:  # only a cache – never disturb the user
             pass
 

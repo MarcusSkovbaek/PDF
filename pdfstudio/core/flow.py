@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import statistics
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 
 import pymupdf
@@ -1316,28 +1317,63 @@ def _apply_single(pdf, story: Story, edits: list[Edit], merge, result: FlowResul
     return result
 
 
+def _story_sig(story: Story) -> tuple:
+    return (story.page, story.kind, tuple(tuple(round(v, 1) for v in p.block.bbox) for p in story.pieces))
+
+
+def _text_free_page(doc, story: Story) -> pymupdf.Document:
+    """A one-page copy of the story's page without the story's text (and
+    its list bullets) – cached for the last few stories, so the editor's
+    backdrop is ready when the page was prepared while idle."""
+    cache = getattr(doc, "_folio_without", None)
+    if cache is None:
+        cache = OrderedDict()
+        try:
+            doc._folio_without = cache
+        except Exception:
+            pass
+    try:
+        from .fonts import _page_key
+        key = (_page_key(doc[story.page]), _story_sig(story))
+    except Exception:
+        key = None
+    hit = cache.get(key) if key is not None else None
+    if hit is not None and not hit.is_closed:
+        cache.move_to_end(key)
+        return hit
+    tmp = pymupdf.open()
+    tmp.insert_pdf(doc, from_page=story.page, to_page=story.page, annots=True)
+    page = tmp[0]
+    lines = [ln for p in story.pieces for ln in p.block.lines]
+    lines += [ln for p in story.pieces if p.bullet is not None for ln in p.bullet.lines]
+    if lines:
+        te._remove_lines(page, lines)
+    if key is not None:
+        cache[key] = tmp
+        while len(cache) > 4:
+            _k, old = cache.popitem(last=False)
+            try:
+                old.close()
+            except Exception:
+                pass
+    return tmp
+
+
+def prepare_without(doc, story: Story) -> None:
+    """Precompute :func:`render_without`'s text-free page (idle time)."""
+    _text_free_page(doc, story)
+
+
 def render_without(doc, story: Story, zoom: float, *, clip=None, alpha: bool = False) -> pymupdf.Pixmap:
     """The story's page rendered without the story's text (and its list
     bullets) – images, drawings, colour and other text stay: the backdrop
     an editor shows its live text on (``clip``: display rect, points)."""
-    src = doc[story.page]
-    tmp = pymupdf.open()
-    try:
-        tmp.insert_pdf(doc, from_page=story.page, to_page=story.page, annots=True)
-        page = tmp[0]
-        lines = [ln for p in story.pieces for ln in p.block.lines]
-        lines += [ln for p in story.pieces if p.bullet is not None for ln in p.bullet.lines]
-        if lines:
-            te._remove_lines(page, lines)
-        mat = pymupdf.Matrix(zoom, zoom)
-        kw = {"matrix": mat, "alpha": alpha, "annots": True}
-        if clip is not None:
-            kw["clip"] = pymupdf.Rect(clip)
-        pix = page.get_pixmap(**kw)
-    finally:
-        tmp.close()
-    del src
-    return pix
+    page = _text_free_page(doc, story)[0]
+    kw = {"matrix": pymupdf.Matrix(zoom, zoom), "alpha": alpha, "annots": True}
+    if clip is not None:
+        kw["clip"] = pymupdf.Rect(clip)
+    return page.get_pixmap(**kw)
 
 
-__all__ = ["Edit", "FlowResult", "Piece", "Story", "apply_story", "page_stories", "render_without", "story_at"]
+__all__ = ["Edit", "FlowResult", "Piece", "Story", "apply_story", "page_stories", "prepare_without", "render_without",
+           "story_at"]

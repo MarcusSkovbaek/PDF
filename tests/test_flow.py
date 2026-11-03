@@ -258,3 +258,20 @@ def test_a_header_is_edited_where_it_is(rep):
     assert head2.pieces[0].text == HEADER.replace("2026", "2027")
     assert abs(head2.rect.y0 - head.rect.y0) < 0.5
     assert body(pdf.doc) == body(rep)
+
+
+def test_backdrop_without_the_story_is_cached_and_follows_edits():
+    pdf = _pdf(report(1))
+    st = next(s for s in flow.page_stories(pdf.doc, 0) if s.kind == "flow")
+    flow.prepare_without(pdf.doc, st)
+    text_free = flow._text_free_page(pdf.doc, st)
+    assert flow._text_free_page(pdf.doc, st) is text_free             # cached
+    words = text_free[0].get_text()
+    assert st.pieces[0].text.split()[0] not in words                 # the story's text is gone
+    assert HEADER.split()[0] in words                                # other text stays
+    a = flow.render_without(pdf.doc, st, 1.0)
+    assert a.width == round(pdf.doc[0].rect.width)
+    edits = [flow.Edit(piece=k, text=p.text + (EXTRA if k == 0 else "")) for k, p in enumerate(st.pieces)]
+    flow.apply_story(pdf, st, edits)
+    st2 = next(s for s in flow.page_stories(pdf.doc, 0) if s.kind == "flow")
+    assert flow._text_free_page(pdf.doc, st2) is not text_free        # the page changed: built anew

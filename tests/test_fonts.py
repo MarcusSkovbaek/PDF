@@ -210,3 +210,12 @@ def test_sfnt_cmap_rebuild_roundtrip():
     for u, gid in mapping.items():
         assert font.has_glyph(u) == gid
     assert font.has_glyph(ord("Z")) == 0
+
+
+def test_readable_symbols_maps_symbol_font_bullets():
+    assert F.readable_symbols("", "OpenSymbol") == "•"           # LibreOffice bullet (cp1252 0x95)
+    assert F.readable_symbols("", "ABCDEF+Symbol") == "•"
+    assert F.readable_symbols("", "Wingdings-Regular") == "▪"
+    assert F.readable_symbols("", "Wingdings") == "✓"
+    assert F.readable_symbols("", "Whatever") == "•"             # unknown private use → bullet
+    assert F.readable_symbols("1.", "Arial") == "1."

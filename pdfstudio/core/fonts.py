@@ -48,6 +48,7 @@ __all__ = [
     "text_width",
     "prepare_text",
     "missing_chars",
+    "readable_symbols",
     "system_font_index",
     "warm_up",
 ]
@@ -270,6 +271,47 @@ def missing_chars(font: pymupdf.Font, text: str) -> set[str]:
 
 def font_covers(font: pymupdf.Font, text: str) -> bool:
     return not missing_chars(font, text)
+
+
+# symbol fonts put their glyphs in the private use area (U+F0xx = code xx);
+# on screen we show the Unicode character they stand for
+_WINGDINGS = {0x6C: "\u25CF", 0x6E: "\u25A0", 0x6F: "\u25A1", 0x71: "\u2751", 0x76: "\u2756",
+              0x77: "\u2B25", 0x9F: "\u2022", 0xA1: "\u25CB", 0xA7: "\u25AA", 0xA8: "\u25FB",
+              0xD8: "\u27A2", 0xE0: "\u27A2", 0xE8: "\u2794", 0xF0: "\u21E8", 0xFB: "\u2717",
+              0xFC: "\u2713", 0xFE: "\u2611"}
+_SYMBOL = {0xB7: "\u2022", 0xA8: "\u2663", 0xA9: "\u2666", 0xAA: "\u2665", 0xAB: "\u2660",
+           0xAE: "\u2192", 0xDE: "\u21D2", 0xE0: "\u25CA", 0x2D: "\u2212", 0xD7: "\u22C5"}
+
+
+def readable_symbols(text: str, font_name: str = "") -> str:
+    """``text`` with symbol-font private-use characters (Symbol, Wingdings,
+    OpenSymbol/StarSymbol bullets) replaced by the Unicode characters they
+    show, so a Qt font can draw them. Other text is returned unchanged."""
+    if not text or not any(0xE000 <= ord(c) <= 0xF8FF for c in text):
+        return text
+    name = clean_font_name(font_name).lower()
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if not 0xE000 <= o <= 0xF8FF:
+            out.append(ch)
+            continue
+        low = o - 0xF000
+        rep = None
+        if 0 <= low <= 0xFF:
+            if "wingding" in name or "webding" in name:
+                rep = _WINGDINGS.get(low)
+            elif "symbol" in name and "open" not in name and "star" not in name:
+                rep = _SYMBOL.get(low)
+            if rep is None and low >= 0x20:
+                try:
+                    rep = bytes([low]).decode("cp1252")      # OpenSymbol: U+F095 = cp1252 0x95 "•"
+                except UnicodeDecodeError:
+                    rep = None
+                if rep is not None and not rep.isprintable():
+                    rep = None
+        out.append(rep or "\u2022")
+    return "".join(out)
 
 
 _INVISIBLE = dict.fromkeys(map(ord, "\u00ad\u200b\u200c\u200d\ufeff"), None)

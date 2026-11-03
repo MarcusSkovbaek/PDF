@@ -800,3 +800,29 @@ def test_bulleted_list_items_are_blocks_of_their_own():
     new = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Nye projekter"))
     assert len(new.lines) == 2 and new.bbox.x1 <= item.bbox.x1 + 1.0   # reflowed inside the item
     assert all(abs(ln.origin[0] - 98) < 0.5 for ln in new.lines)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_one_redaction_with_quads_removes_exactly_its_rects(rotation):
+    from pdfstudio.core import text_edit as te
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=300)
+    for i, t in enumerate(["Line one here", "Line two here", "Line three here", "Line four here"]):
+        page.insert_text((50, 60 + 20 * i), t, fontsize=12)
+    page.set_cropbox(pymupdf.Rect(20, 10, 380, 290))
+    page.set_rotation(rotation)
+    doc = pymupdf.open("pdf", doc.tobytes())
+    page = doc[0]
+    words = page.get_text("words")          # raw (unrotated) coordinates
+    strips = []
+    for w in words:
+        if w[4] in ("two", "four"):
+            r = pymupdf.Rect(w[:4])
+            cy = (r.y0 + r.y1) / 2
+            strips.append(pymupdf.Rect(r.x0, cy - 1, r.x1, cy + 1))
+    te._apply_text_redactions(page, strips)
+    words = [w[4] for w in doc[0].get_text("words")]
+    assert "two" not in words and "four" not in words
+    assert words.count("Line") == 4 and "one" in words and "three" in words
+    assert not list(doc[0].annots())

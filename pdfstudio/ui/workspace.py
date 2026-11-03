@@ -326,6 +326,13 @@ class Inspector(QWidget):
     MODE_ICONS = {"view": "eye", "edit": "pencil-simple", "annotate": "chat-circle-text", "pages": "squares-four"}
 
     def set_tool(self, tool, mode: str | None = None) -> None:
+        if tool is not None and self._tool_widget is not None and self.scroll.widget() is self._tool_widget \
+                and not self._tool_widget.property("transientPanel") and tool.properties_widget() is self._tool_widget:
+            # the same tool panel again (the tool only changed state): no re-parenting / re-layout
+            self.head_title.setText(tool.display_label())
+            self.tool_name.setText(tool.display_label())
+            self.tool_hint.setText(tool.hint or "")
+            return
         current = self.scroll.takeWidget()   # never let QScrollArea delete a widget it does not own
         if current is not None:
             current.hide()

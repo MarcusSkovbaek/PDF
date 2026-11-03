@@ -1503,11 +1503,42 @@ def _restore_redactions(page: pymupdf.Page, saved: list[dict]) -> None:
             continue
 
 
+def _add_redactions(page: pymupdf.Page, rects: list[pymupdf.Rect]) -> None:
+    """Redaction areas ``rects`` (raw page coordinates) as ONE annotation
+    with a QuadPoint per rect – MuPDF redacts exactly the quads, and adding
+    an annotation per rect costs O(n²) (each new one scans all others)."""
+    rects = [pymupdf.Rect(r) for r in rects if not pymupdf.Rect(r).is_empty]
+    if not rects:
+        return
+    if len(rects) == 1:
+        page.add_redact_annot(rects[0], fill=None, cross_out=False)
+        return
+    union = pymupdf.Rect(rects[0])
+    for r in rects[1:]:
+        union |= r
+    annot = page.add_redact_annot(union, fill=None, cross_out=False)
+    doc = page.parent
+    try:
+        kind, val = doc.xref_get_key(annot.xref, "Rect")
+        x0, y0, x1, y1 = (float(v) for v in val.strip("[] ").split())
+        if kind != "array" or abs((x1 - x0) - union.width) > 0.5 or abs((y1 - y0) - union.height) > 0.5:
+            raise ValueError("unexpected /Rect")
+        ax, by = x0 - union.x0, y1 + union.y0          # raw (x, y) -> PDF (x + ax, by - y)
+        quads = []
+        for r in rects:
+            top, bottom = by - r.y0, by - r.y1
+            quads += (r.x0 + ax, top, r.x1 + ax, top, r.x0 + ax, bottom, r.x1 + ax, bottom)
+        doc.xref_set_key(annot.xref, "QuadPoints", "[" + " ".join(f"{v:.3f}" for v in quads) + "]")
+    except Exception:
+        page.delete_annot(annot)
+        for r in rects:
+            page.add_redact_annot(r, fill=None, cross_out=False)
+
+
 def _apply_text_redactions(page: pymupdf.Page, rects: list[pymupdf.Rect]) -> None:
     if not rects:
         return
-    for r in rects:
-        page.add_redact_annot(r, fill=None, cross_out=False)
+    _add_redactions(page, rects)
     page.apply_redactions(
         images=pymupdf.PDF_REDACT_IMAGE_NONE,
         graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
@@ -1566,8 +1597,7 @@ def _remove_lines(page: pymupdf.Page, lines: list[TextLine]) -> None:
         if decor:
             # the underline / strike strokes of these lines (only strokes lying
             # completely inside their own small box are removed)
-            for r in decor:
-                page.add_redact_annot(r, fill=None, cross_out=False)
+            _add_redactions(page, decor)
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                   graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                                   text=pymupdf.PDF_REDACT_TEXT_NONE)

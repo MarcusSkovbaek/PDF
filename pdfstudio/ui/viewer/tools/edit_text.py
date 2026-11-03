@@ -1,32 +1,28 @@
-""""Rediger tekst" – edit existing PDF text in place, Acrobat style.
+""""Rediger tekst" – edit the PDF's text as in Word.
 
-Hovering outlines the paragraph under the cursor. Clicking opens an inline
-editor exactly on top of it, using the paragraph's own font, size, colour and
-line pitch, painted on the page's own background colour so the original text
-does not show through. Text that runs at an angle (rotated pages, vertical
-labels) is edited in place too: the editor is embedded in the page scene and
-rotated with the text. Committing calls
-:func:`pdfstudio.core.text_edit.replace_block_text`, which rewrites the text
-in the same font inside the PDF (one undo step).
+One click puts the caret where you click: the whole text surface opens – a
+page's column of body text (all its paragraphs, headings and list items as
+one text) or a standalone text (header, footer, table cell, caption, a
+rotated label). The editor is transparent and lies exactly on the text, in
+the document's own fonts, sizes, colours, alignment and line pitch; behind it
+the page is shown without the text being edited (``core.flow.render_without``),
+so images and colour stay and no old text shows through. Arrow keys, Enter
+(new paragraph), Backspace (joins paragraphs), selection and formatting work
+across paragraphs; an arrow past the end goes on in the next column / page,
+Tab in the next text surface. Esc or a click elsewhere keeps the changes:
+:func:`pdfstudio.core.flow.apply_story` writes them and lets the column flow
+on over the following pages – one undo step per editing session.
 
-Keys while editing: Ctrl+Enter or clicking elsewhere saves, Tab saves and
-opens the next paragraph, Esc cancels. A small key-hint chip is placed next
-to the frame where it covers no other text. The inspector shows the
-paragraph's formatting (searchable font picker with recently used fonts);
-changing it overrides the style for the whole paragraph. "Vis alle
-tekstbokse" outlines every editable text block on the visible pages.
-
-Extension points: ``InlineTextEditor`` (geometry/appearance),
-``EditTextTool.start_edit``/``commit``/``cancel`` (session flow),
-``_background_color`` (page background sampling) and the hooks used by
-"Tilføj tekst" (``_layout_for``, ``_wrap_width``, ``_write`` ...).
+Extension points: ``InlineTextEditor`` (the editor widget),
+``EditTextTool.start_story`` / ``commit`` / ``_write_story`` (session flow),
+``_look_for`` (how a paragraph appears) – "Tilføj tekst" builds on them.
 """
 
 from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pymupdf
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer, Signal
@@ -54,8 +50,8 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGraphicsPathItem,
+    QGraphicsPixmapItem,
     QGraphicsProxyWidget,
-    QGraphicsRectItem,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -70,6 +66,7 @@ from PySide6.QtWidgets import (
 )
 
 from ....core import RELOADED, STRUCTURE
+from ....core import flow
 from ....core import fonts as core_fonts
 from ....core import text_edit as te
 from ....i18n import tr
@@ -206,6 +203,7 @@ class InlineTextEditor(QTextEdit):
     nextRequested = Signal()
     previousRequested = Signal()
     formatRequested = Signal(str)   # Ctrl+B / Ctrl+I / Ctrl+U: "bold" | "italic" | "underline"
+    leaveRequested = Signal(int)    # an arrow key past the start (-1) / end (+1) of the text
 
     _clip: tuple[str, QTextDocumentFragment] | None = None  # last copy made in an editor (rich)
 
@@ -222,6 +220,9 @@ class InlineTextEditor(QTextEdit):
         self.setContentsMargins(0, 0, 0, 0)
         self.setViewportMargins(0, 0, 0, 0)
         self._line_px = 0.0
+        self.escape_commits = False   # Esc finishes (keeps the text) instead of cancelling
+        self.bullets: dict = {}       # paragraph tag -> (text, QFont, QColor, x px): list bullets to draw
+        self.bullet_tag = None        # block property holding a paragraph's tag
         self.textChanged.connect(self._apply_line_height)
 
     def configure(self, font: QFont, color: QColor, background: QColor, line_px: float, wrap_px: int) -> None:
@@ -356,7 +357,7 @@ class InlineTextEditor(QTextEdit):
             return
         if key == Qt.Key.Key_Escape:
             ev.accept()
-            self.cancelRequested.emit()
+            (self.commitRequested if self.escape_commits else self.cancelRequested).emit()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and mods & Qt.KeyboardModifier.ControlModifier:
             ev.accept()
@@ -370,7 +371,42 @@ class InlineTextEditor(QTextEdit):
             ev.accept()
             self.previousRequested.emit()
             return
+        moves = {Qt.Key.Key_Down: 1, Qt.Key.Key_Right: 1, Qt.Key.Key_PageDown: 1,
+                 Qt.Key.Key_Up: -1, Qt.Key.Key_Left: -1, Qt.Key.Key_PageUp: -1}
+        step = moves.get(key) if not mods & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.ControlModifier) \
+            else None
+        before = self.textCursor().position()
+        had_selection = self.textCursor().hasSelection()
         super().keyPressEvent(ev)
+        if step is not None and not had_selection and self.textCursor().position() == before:
+            # the caret could not move: on into the next / previous text
+            doc_end = self.document().characterCount() - 1
+            if (step > 0 and before >= doc_end) or (step < 0 and before == 0) or key in (
+                    Qt.Key.Key_Down, Qt.Key.Key_Up, Qt.Key.Key_PageDown, Qt.Key.Key_PageUp):
+                self.leaveRequested.emit(step)
+
+    def paintEvent(self, ev) -> None:  # noqa: N802 - Qt override
+        super().paintEvent(ev)
+        if not self.bullets or self.bullet_tag is None:
+            return
+        p = QPainter(self.viewport())
+        try:
+            layout = self.document().documentLayout()
+            block = self.document().begin()
+            while block.isValid():
+                tag = block.blockFormat().property(self.bullet_tag)
+                info = self.bullets.get(tag) if tag is not None else None
+                if info is not None and block.layout() is not None and block.layout().lineCount():
+                    text, font, color, x = info
+                    line = block.layout().lineAt(0)
+                    layout.blockBoundingRect(block)        # laid out
+                    y = block.layout().position().y() + line.y() + line.ascent() - self.verticalScrollBar().value()
+                    p.setFont(font)
+                    p.setPen(color)
+                    p.drawText(QPointF(x, y), text)
+                block = block.next()
+        finally:
+            p.end()
 
     def event(self, ev) -> bool:
         # keep Tab for us instead of focus navigation
@@ -869,7 +905,7 @@ class EditTextPanel(QWidget):
             self.italic.setChecked(style.italic)
             self.underline.setChecked(style.underline)
             self.strike.setChecked(style.strike)
-            self.reset.setEnabled(self.tool.style_override is not None)
+            self.reset.setEnabled(self.tool.has_user_format())
             self.rotated_note.setVisible(self.tool.rotated())
             lay = self.tool._layout
             current = self.tool.align_override or (
@@ -953,14 +989,49 @@ class EditTextPanel(QWidget):
             underline=self.underline.isChecked(),
             strike=self.strike.isChecked(),
         ))
-        self.reset.setEnabled(self.tool.style_override is not None)
+        self.reset.setEnabled(self.tool.has_user_format())
 
 
 # ---------------------------------------------------------------------------
 # the tool
 # ---------------------------------------------------------------------------
+_PIECE = _P + 20      # block property: index of the story piece a paragraph comes from
+_ALIGN = _P + 21      # block property: alignment chosen in the inspector
+_SPACING = _P + 22    # block property: line spacing chosen in the inspector (× SINGLE)
+_STYLE = _P + 23      # block property: the paragraph's own style changes (inspector, no selection)
+_GEOM = _P + 24       # block property: [left, right, indent, pitch, top] in pt
+_PT = _P + 25         # char property: the text size in pt (pixel sizes follow the zoom)
+_LS = " "        # Qt's line separator: a hard line break inside a paragraph
+
+
+@dataclass
+class _Look:
+    """How one paragraph appears in the editor: pt, in the story's own frame
+    (``s`` along the text from the anchor, ``t`` from line to line)."""
+
+    style: core_fonts.SpanStyle
+    pitch: float
+    align: str                  # left | center | right | justify
+    left: float                 # the paragraph's box along s
+    right: float
+    indent: float               # the first line starts this much further (negative: hanging)
+    first: tuple                # (s, t) of the first baseline origin
+    spacing: float = 100.0      # letter spacing (%) that matches the PDF's line widths
+    bullet: tuple | None = None  # (text, style, s) of a list bullet
+
+
+def _local(anchor, u, v, x: float, y: float) -> tuple[float, float]:
+    dx, dy = x - anchor[0], y - anchor[1]
+    return dx * u[0] + dy * u[1], dx * v[0] + dy * v[1]
+
+
 @ToolRegistry.register
 class EditTextTool(Tool):
+    """Edits a whole text surface – a page's column of body text, or a
+    standalone text such as a header, a table cell or a rotated label – in
+    one editor, as in Word: one click puts the caret where you click, the
+    paragraphs are one text, and the text flows (``core.flow``)."""
+
     id = "edit.text"
     label = tr("edit.text.label")
     hint = tr("edit.text.hint")
@@ -971,29 +1042,32 @@ class EditTextTool(Tool):
     cursor = Qt.CursorShape.IBeamCursor
     idle_title_key = "edit.text.idle.title"
     idle_text_key = "edit.text.idle.text"
-    supports_box_outlines = True    # "Vis alle tekstbokse"
+    supports_box_outlines = True    # "Vis tekstflader"
     supports_alignment = False      # alignment buttons (new text only)
-    supports_paragraph = True       # alignment + line spacing of an existing paragraph
+    supports_paragraph = True       # alignment + line spacing of existing paragraphs
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._blocks: dict[int, list[te.TextBlock]] = {}
-        self._hover: QGraphicsRectItem | None = None
-        self._frame: QGraphicsRectItem | None = None
         self.editor: InlineTextEditor | None = None
-        self._proxy: QGraphicsProxyWidget | None = None   # rotated text: editor inside the scene
+        self.story: flow.Story | None = None
+        self._proxy: QGraphicsProxyWidget | None = None   # rotated text: the editor inside the scene
         self._proxy_drag = False
+        self._bg: QGraphicsPixmapItem | None = None       # the page without the text being edited
+        self._bg_timer = QTimer(self)
+        self._bg_timer.setSingleShot(True)
+        self._bg_timer.setInterval(120)
+        self._bg_timer.timeout.connect(self._render_background)
         self._keys: QLabel | None = None
         self._keys_covers_text = False
-        self.block: te.TextBlock | None = None
-        self.style_override: core_fonts.SpanStyle | None = None
-        self.align_override: str | None = None           # "left" | "center" | "right" | "justify"
-        self.spacing_override: float | None = None       # × SINGLE (1.0, 1.15, 1.5, 2.0)
         self._panel: EditTextPanel | None = None
         self._committing = False
-        self._layout: te.LayoutInfo | None = None
-        self._shown_text = ""
-        self._soft_positions: list[int] = []
+        self._looks: list[_Look] = []
+        self._anchor = (0.0, 0.0)
+        self._axes = ((1.0, 0.0), (0.0, 1.0))
+        self._box = (0.0, 0.0, 0.0)          # (s0, s1, t0): the editor's area in the story frame
+        self._ppp = 1.0
+        self._session: object | None = None   # undo merge token of the editing session
+        self._drag_anchor: int | None = None  # caret where a click-drag started
         self._box_items: dict[int, QGraphicsPathItem] = {}
         self._box_timer = QTimer(self)
         self._box_timer.setSingleShot(True)
@@ -1021,7 +1095,6 @@ class EditTextTool(Tool):
 
     def deactivate(self) -> None:
         self.commit()
-        self._clear_hover()
         self._clear_box_outlines()
         self._box_timer.stop()
         if self.ctx is not None:
@@ -1038,76 +1111,22 @@ class EditTextTool(Tool):
         super().deactivate()
 
     def _on_zoom(self, *_a) -> None:
-        """Zooming while editing: re-derive font pixel sizes, not just the box."""
+        """Zooming while editing: font pixel sizes and margins follow."""
         if self.editor is not None:
-            self._apply_editor_style()
-            self._apply_rich_formats()
-            self._rescale_user_sizes()
+            self._ppp = self._px_per_pt()
+            self._apply_px()
+            self._align_first()
+            self._reposition()
+            self._bg_timer.start()
         self._schedule_box_outlines()
 
     def _on_pages_reset(self) -> None:
-        # the view dropped every overlay (frame, hover, outlines)
+        # the view dropped every overlay
         self._box_items.clear()
-        self._hover = None
+        self._bg = None
+        if self.editor is not None:
+            self._bg_timer.start()
         self._schedule_box_outlines()
-
-    def _apply_rich_formats(self) -> None:
-        """Show per-character styles (a bold word, a coloured phrase) of the
-        original paragraph. Only characters that differ from the paragraph's
-        dominant style get an explicit format; the core keeps those styles on
-        commit by aligning the new text with the old one."""
-        if self.editor is None or self.block is None or self.style_override is not None:
-            return
-        base, ppp = self.block.style, self._px_per_pt()
-        doc = self.editor.document()
-        cur = QTextCursor(doc)
-        if doc.toPlainText() != self._shown_text:
-            return  # the user already typed: offsets no longer match
-        self.editor.blockSignals(True)  # formatting is not typing (keeps the key hint)
-        try:
-            self._merge_char_formats(cur, base, ppp)
-        finally:
-            self.editor.blockSignals(False)
-
-    def _merge_char_formats(self, cur: QTextCursor, base: core_fonts.SpanStyle, ppp: float) -> None:
-        """One format per run of equally styled characters (not per character:
-        a long paragraph with a bold sentence opens noticeably faster)."""
-        base_key = _style_key(base)
-        formats: dict = {}
-
-        def fmt_for(st: core_fonts.SpanStyle) -> QTextCharFormat:
-            key = _style_key(st)
-            fmt = formats.get(key)
-            if fmt is None:
-                fmt = QTextCharFormat()
-                fmt.setFontWeight(QFont.Weight.Bold if st.bold else QFont.Weight.Normal)
-                fmt.setFontItalic(st.italic)
-                fmt.setForeground(to_qcolor(st.color))
-                if abs(st.size - base.size) > 0.05:
-                    f = QFont(self.editor.font())
-                    f.setPixelSize(max(1, round(st.size * ppp)))
-                    fmt.setFont(f, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
-                if st.font != base.font and not (st.bold != base.bold or st.italic != base.italic):
-                    fmt.setFontFamilies([core_fonts.qt_family_hint(st)])
-                formats[key] = fmt
-            return fmt
-
-        pos = 0
-        for line in self.block.lines:
-            styles = (line.char_styles or [])[:len(line.text)]
-            k = 0
-            while k < len(styles):
-                st = styles[k]
-                key = _style_key(st) if st is not None else base_key
-                end = k + 1
-                while end < len(styles) and styles[end] is not None and _style_key(styles[end]) == key:
-                    end += 1
-                if key != base_key:
-                    cur.setPosition(pos + k)
-                    cur.setPosition(pos + end, QTextCursor.MoveMode.KeepAnchor)
-                    cur.mergeCharFormat(fmt_for(st))
-                k = end
-            pos += len(line.text) + 1  # "\n" between lines
 
     def properties_widget(self) -> QWidget | None:
         if self._panel is None:
@@ -1116,40 +1135,39 @@ class EditTextTool(Tool):
         return self._panel
 
     def document_changed(self, event) -> None:
-        self._blocks.clear()
         self._clear_box_outlines()
         self._schedule_box_outlines()
         if self.editor is not None and not self._committing and event.kind in (RELOADED, STRUCTURE):
-            self.cancel()  # undo/redo or page changes invalidate the open paragraph
+            self.cancel()  # undo/redo or page changes invalidate the open text
 
-    # -- block lookup --------------------------------------------------------
-    def blocks(self, page: int) -> list[te.TextBlock]:
-        if page not in self._blocks:
-            try:
-                # bullets are not text to edit (their list item next to them is)
-                self._blocks[page] = [b for b in te.text_blocks(self.ctx.pdf.doc, page)
-                                      if not te.is_list_bullet(b)]
-            except Exception:
-                self._blocks[page] = []
-            else:
-                # the pointer is over this page: prove its fonts while idle
-                QTimer.singleShot(150, self, lambda p=page: self._warm(p))
-        return self._blocks[page]
+    # -- what is where -----------------------------------------------------------
+    def stories(self, page: int) -> list[flow.Story]:
+        try:
+            return flow.page_stories(self.ctx.pdf.doc, page)
+        except Exception:
+            return []
 
-    def block_at(self, page: int, pos: QPointF) -> te.TextBlock | None:
+    def story_at(self, page: int, pos: QPointF) -> tuple[flow.Story, int] | None:
         if page < 0:
             return None
-        x, y = pos.x(), pos.y()
-        hits = [b for b in self.blocks(page)
-                if b.bbox.x0 - HOVER_PAD <= x <= b.bbox.x1 + HOVER_PAD
-                and b.bbox.y0 - HOVER_PAD <= y <= b.bbox.y1 + HOVER_PAD]
-        return min(hits, key=lambda b: b.bbox.width * b.bbox.height) if hits else None
+        try:
+            return flow.story_at(self.ctx.pdf.doc, page, (pos.x(), pos.y()))
+        except Exception:
+            return None
+
+    def blocks(self, page: int) -> list[te.TextBlock]:
+        """Every editable paragraph of the page (bullets excluded)."""
+        return [p.block for s in self.stories(page) for p in s.pieces]
+
+    def block_at(self, page: int, pos: QPointF) -> te.TextBlock | None:
+        hit = self.story_at(page, pos)
+        return hit[0].pieces[hit[1]].block if hit else None
 
     def rotated(self) -> bool:
-        """Does the open paragraph run at an angle on screen?"""
-        return self.block is not None and abs(self.block.angle) > 0.01
+        """Does the open text run at an angle on screen?"""
+        return self.story is not None and bool(self.story.pieces) and abs(self.story.pieces[0].block.angle) > 0.01
 
-    # -- "Vis alle tekstbokse" -------------------------------------------------
+    # -- "Vis tekstflader" -------------------------------------------------------
     def set_show_all_boxes(self, on: bool) -> None:
         on = bool(on)
         if on == self.show_all_boxes:
@@ -1174,8 +1192,8 @@ class EditTextTool(Tool):
         self._box_items.clear()
 
     def _refresh_box_outlines(self) -> None:
-        """One dashed path per visible page (plus a screen of margin), built
-        from the cached blocks; pages scrolled far away are dropped."""
+        """One dashed path per visible page (plus a screen of margin): the
+        text surfaces – a column as a whole, standalone texts on their own."""
         if self.ctx is None or not self.active or not self.show_all_boxes:
             self._clear_box_outlines()
             return
@@ -1183,15 +1201,15 @@ class EditTextTool(Tool):
         wanted = set(view.visible_pages(extra_px=view.viewport().height() // 2))
         for page in [p for p in self._box_items if p not in wanted]:
             view.remove_overlay(self._box_items.pop(page))
-        editing = (self.block.page, tuple(self.block.bbox)) if self.block is not None else None
+        editing = (self.story.page, tuple(self.story.rect)) if self.story is not None else None
         for page in sorted(wanted):
             if page in self._box_items:
                 continue
             path = QPainterPath()
-            for b in self.blocks(page):
-                if editing == (page, tuple(b.bbox)):
+            for st in self.stories(page):
+                if editing == (page, tuple(st.rect)):
                     continue
-                r = b.bbox
+                r = st.rect
                 path.addRoundedRect(QRectF(r.x0 - HOVER_PAD, r.y0 - HOVER_PAD,
                                            r.width + 2 * HOVER_PAD, r.height + 2 * HOVER_PAD), 1.5, 1.5)
             item = QGraphicsPathItem(path)
@@ -1211,71 +1229,69 @@ class EditTextTool(Tool):
             self.ctx.view.remove_overlay(self._box_items.pop(page))
         self._schedule_box_outlines()
 
-    # -- hover ---------------------------------------------------------------
-    def _clear_hover(self) -> None:
-        if self._hover is not None and self.ctx is not None:
-            self.ctx.view.remove_overlay(self._hover)
-        self._hover = None
-
-    def _outline(self, page: int, rect: pymupdf.Rect, pad: float, *, strong: bool) -> QGraphicsRectItem:
-        item = QGraphicsRectItem(QRectF(rect.x0 - pad, rect.y0 - pad, rect.width + 2 * pad, rect.height + 2 * pad))
-        color = T.qcolor("accent")
-        pen = QPen(color, 1.6 if strong else 1.0)
-        pen.setCosmetic(True)
-        if not strong:
-            pen.setStyle(Qt.PenStyle.DashLine)
-            fill = QColor(color)
-            fill.setAlpha(14)
-            item.setBrush(fill)
-        item.setPen(pen)
-        item.setZValue(30 if strong else 20)
-        self.ctx.view.add_overlay(page, item)
-        return item
-
+    # -- mouse -----------------------------------------------------------------
     def mouse_move(self, ev: ToolMouseEvent) -> None:
         if self._forward_mouse(QEvent.Type.MouseMove, ev):
             return
-        block = self.block_at(ev.page, ev.pos)
-        if block is not None and self.block is not None and block.page == self.block.page \
-                and block.bbox == self.block.bbox:
-            block = None  # already editing it
-        self._clear_hover()
-        if block is not None:
-            self._hover = self._outline(block.page, block.bbox, HOVER_PAD, strong=False)
-            self.ctx.view.viewport().setCursor(Qt.CursorShape.IBeamCursor)
-        else:
-            self.ctx.view.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+        if self._drag_anchor is not None and self.editor is not None and ev.buttons & Qt.MouseButton.LeftButton:
+            cur = self.editor.textCursor()
+            cur.setPosition(self._drag_anchor)
+            cur.setPosition(self._caret_at(ev), QTextCursor.MoveMode.KeepAnchor)
+            self.editor.setTextCursor(cur)
+            return
+        over = self.story_at(ev.page, ev.pos) is not None
+        self.ctx.view.viewport().setCursor(Qt.CursorShape.IBeamCursor if over else Qt.CursorShape.ArrowCursor)
 
     def mouse_press(self, ev: ToolMouseEvent) -> None:
         if not ev.left:
             return
         if self._forward_mouse(QEvent.Type.MouseButtonPress, ev):
             return
-        block = self.block_at(ev.page, ev.pos)
-        # clicking elsewhere saves the open paragraph first
+        hit = self.story_at(ev.page, ev.pos)
+        if self.editor is not None and hit is not None and self._same_story(hit[0]):
+            # a click in the open text outside the editor's widget (beside a line)
+            self._place_caret(ev)
+            return
         if self.editor is not None:
-            same = block is not None and self.block is not None and block.page == self.block.page \
-                and block.bbox == self.block.bbox
-            if same:
-                return
-            target = (block.page, QPointF(ev.pos)) if block is not None else None
             self.commit()
-            if target is not None:
-                block = self.block_at(*target)
-        if block is not None:
-            self._clear_hover()
-            self.start_edit(block)
+            hit = self.story_at(ev.page, ev.pos)      # the page may have changed
+        if hit is not None:
+            self.start_story(hit[0], click=(ev.page, QPointF(ev.pos)))
+            if self.editor is not None and self._proxy is None:
+                self._drag_anchor = self.editor.textCursor().position()
 
     def mouse_release(self, ev: ToolMouseEvent) -> None:
+        self._drag_anchor = None
         self._forward_mouse(QEvent.Type.MouseButtonRelease, ev)
 
     def mouse_double_click(self, ev: ToolMouseEvent) -> None:
-        self._forward_mouse(QEvent.Type.MouseButtonDblClick, ev)
+        if self._forward_mouse(QEvent.Type.MouseButtonDblClick, ev):
+            return
+        if self.editor is not None and self._proxy is None:
+            cur = self.editor.textCursor()
+            cur.setPosition(self._caret_at(ev))
+            cur.select(QTextCursor.SelectionType.WordUnderCursor)
+            self.editor.setTextCursor(cur)
+
+    def _same_story(self, story: flow.Story) -> bool:
+        return self.story is not None and story.page == self.story.page and tuple(story.rect) == tuple(self.story.rect)
+
+    def _caret_at(self, ev: ToolMouseEvent) -> int:
+        view = self.ctx.view
+        pos = self.editor.viewport().mapFrom(view.viewport(), ev.view_pos.toPoint())
+        return self.editor.cursorForPosition(pos).position()
+
+    def _place_caret(self, ev: ToolMouseEvent) -> None:
+        cur = self.editor.textCursor()
+        cur.setPosition(self._caret_at(ev))
+        self.editor.setTextCursor(cur)
+        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._drag_anchor = cur.position()
 
     def _forward_mouse(self, kind: QEvent.Type, ev: ToolMouseEvent) -> bool:
-        """The page view hands every mouse event to the tool; events on the
-        rotated editor (a scene proxy) are passed on to it here, so clicking,
-        drag-selecting and double-clicking work as in any text field."""
+        """Mouse events on the rotated editor (a scene proxy) are passed on to
+        it, so clicking, drag-selecting and double-clicking work as in any
+        text field."""
         if self._proxy is None or self.editor is None:
             return False
         local = self._proxy.mapFromScene(ev.scene_pos)
@@ -1284,7 +1300,6 @@ class EditTextTool(Tool):
             if not self._proxy_drag:
                 if inside:
                     self.ctx.view.viewport().setCursor(Qt.CursorShape.IBeamCursor)
-                    self._clear_hover()
                 return inside
         elif kind == QEvent.Type.MouseButtonRelease:
             if not self._proxy_drag:
@@ -1307,86 +1322,220 @@ class EditTextTool(Tool):
 
     def key_press(self, ev: QKeyEvent) -> bool:
         if ev.key() == Qt.Key.Key_Escape and self.editor is not None:
-            self.cancel()
+            self.commit()
             return True
         return False
 
-    # -- editing session -----------------------------------------------------
-    def current_style(self) -> core_fonts.SpanStyle | None:
-        if self.block is None:
+    # -- the paragraph at the caret ------------------------------------------------
+    def _qblock(self):
+        """The editor paragraph the caret is in."""
+        if self.editor is None:
             return None
-        return self.style_override or self.block.style
+        return self.editor.textCursor().block()
+
+    def _piece_index(self, qblock) -> int | None:
+        if qblock is None:
+            return None
+        tag = qblock.blockFormat().property(_PIECE)
+        return int(tag) if tag is not None else None
+
+    def _active(self) -> int | None:
+        k = self._piece_index(self._qblock())
+        if k is None and self.story is not None and self.story.pieces:
+            k = 0
+        return k
+
+    @property
+    def block(self) -> te.TextBlock | None:
+        """The paragraph the caret is in (its original block)."""
+        k = self._active()
+        if k is None or self.story is None or k >= len(self.story.pieces):
+            return None
+        return self.story.pieces[k].block
+
+    def _changes_of(self, qblock) -> dict:
+        val = qblock.blockFormat().property(_STYLE) if qblock is not None else None
+        return dict(val) if val else {}
+
+    def current_style(self) -> core_fonts.SpanStyle | None:
+        b = self.block
+        if b is None:
+            return None
+        changes = self._changes_of(self._qblock())
+        return replace(b.style, **{k: (tuple(v) if k == "color" else v) for k, v in changes.items()}) \
+            if changes else b.style
+
+    @property
+    def style_override(self) -> core_fonts.SpanStyle | None:
+        return self.current_style() if self._changes_of(self._qblock()) else None
+
+    @property
+    def align_override(self) -> str | None:
+        q = self._qblock()
+        val = q.blockFormat().property(_ALIGN) if q is not None else None
+        return str(val) if val else None
+
+    @property
+    def spacing_override(self) -> float | None:
+        q = self._qblock()
+        val = q.blockFormat().property(_SPACING) if q is not None else None
+        return float(val) if val else None
+
+    @property
+    def _layout(self) -> te.LayoutInfo | None:
+        k = self._active()
+        if k is None or self.story is None:
+            return None
+        return self._layout_of(self.story.pieces[k], self.align_override, self.spacing_override)
+
+    def _layout_of(self, piece: flow.Piece, align: str | None, spacing: float | None) -> te.LayoutInfo | None:
+        if align is None and spacing is None and piece.layout is not None:
+            return piece.layout
+        try:
+            return te.layout_info(self.ctx.pdf.doc, piece.block, align=align,
+                                  line_spacing=spacing * SINGLE if spacing else None)
+        except Exception:
+            return piece.layout
 
     def set_style(self, style: core_fonts.SpanStyle) -> None:
-        if self.block is None:
+        """The inspector without a selection: the whole paragraph at the
+        caret gets this style (what differs from its original)."""
+        q, b = self._qblock(), self.block
+        if q is None or b is None:
             return
-        self.style_override = None if _style_key(style) == _style_key(self.block.style) else style
-        self._apply_editor_style()
-
-    def reset_style(self) -> None:
-        self.style_override = None
-        self._apply_editor_style()
+        changes = {}
+        for key in ("font", "size", "color", "bold", "italic", "underline", "strike"):
+            val = getattr(style, key)
+            if (tuple(val) if key == "color" else val) != (tuple(getattr(b.style, key)) if key == "color"
+                                                           else getattr(b.style, key)):
+                changes[key] = list(val) if key == "color" else val
+        fmt = q.blockFormat()
+        fmt.setProperty(_STYLE, changes or None)
+        self._set_block_format(q, fmt)
+        self._restyle_block(q)
         if self._panel is not None:
             self._panel.refresh()
 
+    def reset_style(self) -> None:
+        """"Nulstil til original": the paragraph (or the selection) as it was."""
+        if self.editor is None:
+            return
+        cur = self.editor.textCursor()
+        blocks = self._selected_blocks() if cur.hasSelection() else [self._qblock()]
+        for q in blocks:
+            fmt = q.blockFormat()
+            fmt.setProperty(_STYLE, None)
+            self._set_block_format(q, fmt)
+            c = QTextCursor(q)
+            c.setPosition(q.position())
+            c.setPosition(q.position() + q.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+            self._strip_user_formats(c)
+            self._restyle_block(q)
+        if self._panel is not None:
+            self._panel.refresh()
+
+    def has_user_format(self) -> bool:
+        q = self._qblock()
+        if q is None:
+            return False
+        if self._changes_of(q):
+            return True
+        it = q.begin()
+        while not it.atEnd():
+            f = it.fragment()
+            if f.isValid() and any(f.charFormat().hasProperty(p) for p in FORMAT_PROPS.values()):
+                return True
+            it += 1
+        return False
+
+    # -- opening -------------------------------------------------------------------
     def start_edit(self, block: te.TextBlock) -> None:
+        """Open the text surface containing ``block`` with the caret at the
+        end of that paragraph."""
+        for st in self.stories(block.page):
+            for i, p in enumerate(st.pieces):
+                if p.block.bbox == block.bbox and p.block.text == block.text:
+                    self.start_story(st, piece=i)
+                    return
+
+    def start_story(self, story: flow.Story, *, click: tuple | None = None, piece: int | None = None,
+                    at_end: bool = False, session: object | None = None) -> None:
         self.cancel()
         view = self.ctx.view
-        self.block = block
-        self.style_override = None
-        self.align_override = None
-        self.spacing_override = None
-        self._layout = self._layout_for(block)
-        # make sure the paragraph is on screen (Tab may jump below the fold)
-        r = block.bbox
-        tl = view.page_to_scene(block.page, QPointF(r.x0, r.y0))
-        br = view.page_to_scene(block.page, QPointF(r.x1, r.y1))
-        view.ensureVisible(QRectF(tl, br).normalized(), 40, 60)
+        self.story = story
+        self._session = session if session is not None else object()
+        if not story.pieces:
+            return
+        first = story.pieces[0].block
+        self._anchor = first.lines[0].origin if first.lines else (first.bbox.x0, first.bbox.y1)
+        self._axes = _unit(first) if abs(first.angle) > 0.01 else ((1.0, 0.0), (0.0, 1.0))
+        self._ppp = self._px_per_pt()
+        self._looks = [self._look_for(p) for p in story.pieces]
+        s0 = min(lk.left for lk in self._looks)
+        s1 = max(lk.right for lk in self._looks)
+        # room above the first line for Qt's line box (a top margin cannot be negative)
+        t0 = min(lk.first[1] - max(1.6 * lk.style.size, lk.pitch) for lk in self._looks) - 2.0
+        self._box = (s0, s1, t0)
         if self.rotated():
-            # rotated text: edit it in place, in a proxy rotated with the text
             self.editor = InlineTextEditor(None)
             self.editor.setMinimumSize(8, 8)  # else the proxy keeps QTextEdit's 78 px minimum
             self.editor.ensurePolished()
             self._proxy = QGraphicsProxyWidget()
             self._proxy.setWidget(self.editor)
             self._proxy.setZValue(36)
-            view.add_overlay(block.page, self._proxy)
+            view.add_overlay(story.page, self._proxy)
         else:
             self.editor = InlineTextEditor(view.viewport())
-        self.editor.commitRequested.connect(self.commit)
-        self.editor.cancelRequested.connect(self.cancel)
-        self.editor.nextRequested.connect(self.commit_and_next)
-        self.editor.previousRequested.connect(lambda: self.commit_and_next(-1))
-        self.editor.textChanged.connect(self._reposition)
-        self.editor.formatRequested.connect(self.toggle_format)
-        self.editor.cursorPositionChanged.connect(self._selection_moved)
-        self._shown_text, self._soft_positions = self._display_text(block)
-        self.editor.setPlainText(self._shown_text)
+        ed = self.editor
+        ed.escape_commits = True
+        ed.bullet_tag = _PIECE
+        ed.commitRequested.connect(self.commit)
+        ed.cancelRequested.connect(self.cancel)
+        ed.nextRequested.connect(lambda: self.leave(1, tab=True))
+        ed.previousRequested.connect(lambda: self.leave(-1, tab=True))
+        ed.leaveRequested.connect(self.leave)
+        ed.formatRequested.connect(self.toggle_format)
+        ed.cursorPositionChanged.connect(self._selection_moved)
+        self._build_document()
+        ed.document().contentsChanged.connect(self._reposition)
         self._keys = QLabel(self._keys_html(), view.viewport())
         self._keys.setObjectName("EditKeysHint")
         self._keys.setTextFormat(Qt.TextFormat.RichText)
         self._keys.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._keys_covers_text = False
-        # where no free spot exists the chip gives way once typing starts
-        self.editor.textChanged.connect(self._on_typed)
-        self._frame = self._outline(block.page, block.bbox, EDIT_PAD, strong=True)
-        self._apply_editor_style()
-        self._apply_rich_formats()
-        self.editor.show()
+        ed.textChanged.connect(self._on_typed)
+        self._reposition()
+        self._render_background()
+        ed.show()
         self._keys.show()
         if self._proxy is not None:
             view.setFocus(Qt.FocusReason.MouseFocusReason)
             self._proxy.setFocus(Qt.FocusReason.MouseFocusReason)
-        self.editor.setFocus(Qt.FocusReason.MouseFocusReason)
-        self.editor.selectAll() if not block.text.strip() else self.editor.moveCursor(QTextCursor.MoveOperation.End)
+        ed.setFocus(Qt.FocusReason.MouseFocusReason)
+        # the caret: where the click was, or in the given paragraph
+        cur = ed.textCursor()
+        if click is not None and self._proxy is None:
+            page, pos = click
+            vp = view.page_to_viewport(page, pos)
+            cur = ed.cursorForPosition(ed.viewport().mapFrom(view.viewport(), vp.toPoint()))
+        elif piece is not None:
+            q = ed.document().findBlockByNumber(piece)
+            cur.setPosition(q.position() + q.length() - 1)     # the end of that paragraph
+        else:
+            cur.movePosition(QTextCursor.MoveOperation.End if at_end else QTextCursor.MoveOperation.Start)
+        ed.setTextCursor(cur)
+        r = story.rect if click is None else pymupdf.Rect(click[1].x(), click[1].y(), click[1].x(), click[1].y())
+        tl = view.page_to_scene(story.page, QPointF(r.x0, r.y0))
+        br = view.page_to_scene(story.page, QPointF(r.x1, min(r.y1, r.y0 + 200)))
+        view.ensureVisible(QRectF(tl, br).normalized(), 40, 60)
         if self.show_all_boxes:
-            self._refresh_page_outline(block.page)
+            self._refresh_page_outline(story.page)
         self.changed.emit()
         if self._panel is not None:
             self._panel.refresh()
 
     def _keys_html(self) -> str:
-        """The key hints with the keys emphasised: "<b>Ctrl+Enter</b> gemmer · ..."."""
+        """The key hints with the keys emphasised: "<b>Esc</b> afslutter · ..."."""
         strong, sep = T.qcolor("text").name(), T.qcolor("text_subtle").name()
         parts = []
         for part in tr("edit.text.keys").split("·"):
@@ -1399,106 +1548,599 @@ class EditTextTool(Tool):
             self._keys.hide()
 
     def _px_per_pt(self) -> float:
-        view, page = self.ctx.view, self.block.page
-        a = view.mapFromScene(view.page_to_scene(page, QPointF(0, 0)))
-        b = view.mapFromScene(view.page_to_scene(page, QPointF(100, 0)))
-        c = view.mapFromScene(view.page_to_scene(page, QPointF(0, 100)))
-        return max(abs(b.x() - a.x()), abs(b.y() - a.y()), abs(c.y() - a.y()), abs(c.x() - a.x())) / 100.0
+        """Viewport pixels per pt, exactly (a column is hundreds of pt tall:
+        a rounded scale would drift)."""
+        view = self.ctx.view
+        page = self.story.page if self.story is not None else 0
+        m = view.viewportTransform()
+        a = m.map(view.page_to_scene(page, QPointF(0, 0)))
+        b = m.map(view.page_to_scene(page, QPointF(1000, 0)))
+        c = m.map(view.page_to_scene(page, QPointF(0, 1000)))
+        return max(abs(b.x() - a.x()), abs(b.y() - a.y()), abs(c.y() - a.y()), abs(c.x() - a.x())) / 1000.0
 
-    def _apply_editor_style(self) -> None:
-        if self.editor is None or self.block is None:
-            return
-        style = self.current_style()
-        ppp = self._px_per_pt()
-        font = QFont(core_fonts.qt_family_hint(style) if self.style_override is None or
-                     self.style_override.font == self.block.style.font else style.font)
-        font.setPixelSize(max(1, round(style.size * ppp)))
+    # -- the paragraphs' looks -----------------------------------------------------
+    def _look_for(self, piece: flow.Piece, align: str | None = None, spacing: float | None = None) -> _Look:
+        b = piece.block
+        lay = self._layout_of(piece, align, spacing)
+        u, v = self._axes
+        style = b.style
+        size = style.size or 10.0
+        if spacing:
+            pitch = spacing * SINGLE * size
+        elif lay is not None and getattr(lay, "pitch", 0.0):
+            pitch = lay.pitch
+        else:
+            pitch = _line_pitch(b)
+        starts, ends = [], []
+        for ln in b.lines:
+            s, _t = _local(self._anchor, u, v, *ln.origin)
+            starts.append(s)
+            ends.append(s + max(0.0, ln.extent[1] - ln.extent[0]))
+        if not starts:
+            starts, ends = [0.0], [b.bbox.width]
+        first = _local(self._anchor, u, v, *(b.lines[0].origin if b.lines else (b.bbox.x0, b.bbox.y1)))
+        lmin, rmax = min(starts), max(ends)
+        x_first, x_rest = starts[0], starts[0]
+        if len(starts) >= 2:
+            rest = starts[1:]
+            x_rest = min(rest) if max(rest) - min(rest) <= 1.0 else lmin
+        elif b.lines:
+            k = te.marker_end(b.lines[0].text)
+            ln = b.lines[0]
+            if k and len(ln.char_pos) == len(ln.text):
+                x_rest = x_first + (ln.char_pos[k][0] - ln.extent[0])
+        how = align or ("justify" if lay is not None and lay.justified else (lay.align if lay is not None else "left"))
+        wrap = lay.wrap_width if lay is not None else (rmax - lmin)
+        slack = 0.5 if how == "justify" and not align else max(2.0, 0.3 * size)
+        if wrap <= 0:
+            wrap = max(self._room_ahead(b, first[0]) - (lmin - first[0]), rmax - lmin)
+        if align and lay is not None and lay.frame and not self.rotated():
+            ax = self._anchor[0] * u[0] + self._anchor[1] * u[1]
+            left, right = lay.frame[0] - ax, lay.frame[1] - ax + slack
+        elif how == "center":
+            c = (lmin + rmax) / 2
+            w = max(wrap, rmax - lmin) + slack
+            left, right = c - w / 2, c + w / 2
+        elif how == "right":
+            right = rmax + 0.75
+            left = right - max(wrap, rmax - lmin) - slack
+        else:
+            left = min(x_first, x_rest)
+            right = left + max(wrap, rmax - left) + slack
+        bullet = None
+        if piece.bullet is not None and piece.bullet.lines:
+            bl = piece.bullet.lines[0]
+            bs, _bt = _local(self._anchor, u, v, *bl.origin)
+            bullet = (bl.text, bl.style, bs)
+        look = _Look(style=style, pitch=pitch, align=how, left=left, right=right,
+                     indent=x_first - x_rest if how in ("left", "justify") else 0.0, first=first, bullet=bullet)
+        look.spacing = self._spacing_fix(b, look)
+        return look
+
+    def _room_ahead(self, b: te.TextBlock, s_first: float) -> float:
+        """Distance (pt) from the paragraph's start to the page edge along
+        the text – how far a never-wrapping line may run."""
+        u, _v = self._axes
+        rect = self.ctx.pdf.page(b.page).rect
+        ox, oy = self._anchor[0] + u[0] * s_first, self._anchor[1] + u[1] * s_first
+        room = []
+        for o, d, lo, hi in ((ox, u[0], rect.x0, rect.x1), (oy, u[1], rect.y0, rect.y1)):
+            if abs(d) > 1e-6:
+                room.append(((hi if d > 0 else lo) - o) / d)
+        return max(min(room) if room else 0.0, 0.0)
+
+    def _qfont(self, style: core_fonts.SpanStyle, px: float) -> QFont:
+        font = QFont(core_fonts.qt_family_hint(style))
+        font.setPixelSize(max(1, round(style.size * px)))
         font.setBold(style.bold)
         font.setItalic(style.italic)
         font.setUnderline(style.underline)
         font.setStrikeOut(style.strike)
         font.setKerning(True)
         font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
-        if self.style_override is None or self.style_override.font == self.block.style.font:
-            font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, self._spacing_fix(font, ppp))
-        pitch = self._block_pitch() * (style.size / max(self.block.style.size, 0.1))
-        if self.spacing_override:
-            pitch = self.spacing_override * SINGLE * style.size
-        bg = self._editor_background()
-        width_px = int(round(self._wrap_width() * ppp))
-        if self._proxy is not None:
-            self._proxy.setFont(font)  # a proxy propagates its own font to the widget
-        self.editor.configure(font, to_qcolor(style.color), bg, pitch * ppp, width_px)
-        align = self._layout.align if self._layout is not None else "left"
-        if align == "left" and self._layout is not None and self._layout.justified:
-            align = "justify"
-        if self.align_override:
-            align = self.align_override
-        self.editor.set_alignment({"center": Qt.AlignmentFlag.AlignHCenter,
-                                   "right": Qt.AlignmentFlag.AlignRight,
-                                   "justify": Qt.AlignmentFlag.AlignJustify}.get(align, Qt.AlignmentFlag.AlignLeft))
-        hang = self._hanging_indent()
-        if hang > 0:
-            self.editor.set_hanging_indent(hang * ppp)
+        return font
+
+    def _spacing_fix(self, block: te.TextBlock, look: _Look) -> float:
+        """Letter spacing (%) that makes the on-screen font as wide as the
+        PDF's: the screen family is often a metric-close substitute."""
+        lines = [ln for ln in block.lines if len(ln.text.strip()) >= 4]
+        if not lines:
+            return 100.0
+        ln = max(lines, key=lambda ln: len(ln.text))
+        ppp = self._ppp
+        font = self._qfont(look.style, ppp)
+        qt_w = QFontMetricsF(font).horizontalAdvance(ln.text.rstrip())
+        pdf_w = (ln.extent[1] - ln.extent[0]) * ppp
+        if qt_w <= 0:
+            return 100.0
+        return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
+
+    def _char_base(self, look: _Look, changes: dict | None = None) -> QTextCharFormat:
+        style = look.style
+        if changes:
+            style = replace(style, **{k: (tuple(v) if k == "color" else v) for k, v in changes.items()})
+        fmt = QTextCharFormat()
+        fmt.setFont(self._qfont(style, self._ppp), QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesAll)
+        fmt.setFontLetterSpacingType(QFont.SpacingType.PercentageSpacing)
+        fmt.setFontLetterSpacing(look.spacing if not changes or "font" not in changes else 100.0)
+        fmt.setForeground(to_qcolor(tuple(style.color)))
+        fmt.setProperty(_PT, float(style.size))
+        return fmt
+
+    # -- the document --------------------------------------------------------------
+    def _build_document(self) -> None:
+        ed, story = self.editor, self.story
+        style = story.pieces[0].block.style
+        ed.configure(self._qfont(style, self._ppp), to_qcolor(tuple(style.color)), QColor(0, 0, 0, 0), 0.0,
+                     max(8, int(round((self._box[1] - self._box[0]) * self._ppp))))
+        ed.setLineWrapMode(QTextEdit.LineWrapMode.FixedPixelWidth)
+        ed.blockSignals(True)
+        try:
+            ed.setPlainText("\n".join(p.text.replace("\n", _LS) for p in story.pieces))
+            doc = ed.document()
+            q = doc.begin()
+            for k, (piece, look) in enumerate(zip(story.pieces, self._looks)):
+                fmt = QTextBlockFormat()
+                fmt.setProperty(_PIECE, k)
+                fmt.setProperty(_GEOM, [look.left, look.right, look.indent, look.pitch, 0.0])
+                self._set_block_format(q, fmt)
+                c = QTextCursor(q)
+                c.setPosition(q.position())
+                c.setPosition(q.position() + q.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+                base = self._char_base(look)
+                c.setCharFormat(base)
+                c.setBlockCharFormat(base)
+                self._merge_char_formats(q, piece, look)
+                q = q.next()
+            self._apply_px()
+            self._align_baselines()
+            doc.clearUndoRedoStacks()
+            self._update_bullets()
+        finally:
+            ed.blockSignals(False)
+
+    def _set_block_format(self, q, fmt: QTextBlockFormat) -> None:
+        c = QTextCursor(q)
+        self.editor.blockSignals(True)
+        try:
+            c.setBlockFormat(fmt)
+        finally:
+            self.editor.blockSignals(False)
+
+    def _geom(self, q) -> list:
+        g = q.blockFormat().property(_GEOM)
+        return list(g) if g else [self._box[0], self._box[1], 0.0, 12.0, 0.0]
+
+    def _apply_px(self) -> None:
+        """Pixel sizes, margins and line heights from the pt values (zoom)."""
+        ed = self.editor
+        ppp = self._ppp
+        s0, s1, _t0 = self._box
+        ed.setLineWrapColumnOrWidth(max(8, int(round((s1 - s0) * ppp))))
+        doc = ed.document()
+        q = doc.begin()
+        last = 0
+        ed.blockSignals(True)
+        try:
+            while q.isValid():
+                left, right, indent, pitch, top = self._geom(q)
+                fmt = q.blockFormat()
+                align = str(fmt.property(_ALIGN) or "")
+                k = self._piece_index(q)
+                if k is None or k >= len(self._looks):
+                    k = last                 # an untagged paragraph looks like the one before
+                last = k
+                how = align or (self._looks[k].align if self._looks else "left")
+                fmt.setLeftMargin(max(0.0, (left - s0) * ppp) + (max(0.0, -indent) * ppp if how in ("left", "justify")
+                                                                  else 0.0))
+                fmt.setTextIndent(indent * ppp if how in ("left", "justify") else 0.0)
+                fmt.setRightMargin(max(0.0, (s1 - right) * ppp))
+                fmt.setLineHeight(pitch * ppp, QTextBlockFormat.LineHeightTypes.FixedHeight.value)
+                fmt.setTopMargin(max(0.0, top * ppp))
+                fmt.setAlignment({"center": Qt.AlignmentFlag.AlignHCenter, "right": Qt.AlignmentFlag.AlignRight,
+                                  "justify": Qt.AlignmentFlag.AlignJustify}.get(how, Qt.AlignmentFlag.AlignLeft))
+                QTextCursor(q).setBlockFormat(fmt)
+                # character pixel sizes from their pt sizes
+                it = q.begin()
+                while not it.atEnd():
+                    frag = it.fragment()
+                    if frag.isValid():
+                        cf = frag.charFormat()
+                        pt = cf.property(FORMAT_PROPS["size"]) if cf.hasProperty(FORMAT_PROPS["size"]) \
+                            else cf.property(_PT)
+                        if pt:
+                            px = max(1, round(float(pt) * ppp))
+                            if cf.font().pixelSize() != px:
+                                f = QTextCharFormat()
+                                font = QFont(cf.font())
+                                font.setPixelSize(px)
+                                f.setFont(font, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
+                                c = QTextCursor(doc)
+                                c.setPosition(frag.position())
+                                c.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
+                                c.mergeCharFormat(f)
+                    it += 1
+                q = q.next()
+        finally:
+            ed.blockSignals(False)
+        self._update_bullets()
+
+    def _first_baseline_px(self) -> float | None:
+        doc = self.editor.document()
+        q = doc.begin()
+        doc.documentLayout().blockBoundingRect(q)
+        ql = q.layout()
+        if ql is None or not ql.lineCount():
+            return None
+        return ql.position().y() + ql.lineAt(0).y() + ql.lineAt(0).ascent()
+
+    def _align_first(self) -> None:
+        """The editor's top so the first paragraph's baseline lands on the
+        PDF's (Qt ignores the first paragraph's top margin)."""
+        got = self._first_baseline_px()
+        if got is None or not self._looks:
+            return
+        s0, s1, _t0 = self._box
+        self._box = (s0, s1, self._looks[0].first[1] - got / self._ppp)
+
+    def _align_baselines(self) -> None:
+        """Top margins so every paragraph's first baseline lands on the PDF's
+        (measured from Qt's own layout)."""
+        ed = self.editor
+        doc = ed.document()
+        layout = doc.documentLayout()
+        ppp = self._ppp
+        self._align_first()
+        t0 = self._box[2]
+        q = doc.begin().next()
+        k = 1
+        while q.isValid() and k < len(self._looks):
+            want = (self._looks[k].first[1] - t0) * ppp
+            layout.blockBoundingRect(q)
+            ql = q.layout()
+            if ql is not None and ql.lineCount():
+                got = ql.position().y() + ql.lineAt(0).y() + ql.lineAt(0).ascent()
+                fmt = q.blockFormat()
+                top = max(0.0, fmt.topMargin() + want - got)
+                fmt.setTopMargin(top)
+                g = self._geom(q)
+                g[4] = top / ppp
+                fmt.setProperty(_GEOM, g)
+                QTextCursor(q).setBlockFormat(fmt)
+            q = q.next()
+            k += 1
+
+    def _merge_char_formats(self, q, piece: flow.Piece, look: _Look) -> None:
+        """The original paragraph's own character styles (a bold word, a
+        coloured phrase): one format per run of equally styled characters."""
+        base = piece.block.style
+        base_key = _style_key(base)
+        formats: dict = {}
+        doc = self.editor.document()
+        cur = QTextCursor(doc)
+
+        def fmt_for(st: core_fonts.SpanStyle) -> QTextCharFormat:
+            key = _style_key(st)
+            fmt = formats.get(key)
+            if fmt is None:
+                fmt = QTextCharFormat()
+                fmt.setFontWeight(QFont.Weight.Bold if st.bold else QFont.Weight.Normal)
+                fmt.setFontItalic(st.italic)
+                fmt.setForeground(to_qcolor(st.color))
+                if abs(st.size - base.size) > 0.05:
+                    f = QFont(self._qfont(base, self._ppp))
+                    f.setPixelSize(max(1, round(st.size * self._ppp)))
+                    fmt.setFont(f, QTextCharFormat.FontPropertiesInheritanceBehavior.FontPropertiesSpecifiedOnly)
+                    fmt.setProperty(_PT, float(st.size))
+                if st.font != base.font and not (st.bold != base.bold or st.italic != base.italic):
+                    fmt.setFontFamilies([core_fonts.qt_family_hint(st)])
+                formats[key] = fmt
+            return fmt
+
+        pos = q.position()
+        for line in piece.block.lines:
+            styles = (line.char_styles or [])[:len(line.text)]
+            k = 0
+            while k < len(styles):
+                st = styles[k]
+                key = _style_key(st) if st is not None else base_key
+                end = k + 1
+                while end < len(styles) and styles[end] is not None and _style_key(styles[end]) == key:
+                    end += 1
+                if key != base_key:
+                    cur.setPosition(pos + k)
+                    cur.setPosition(pos + end, QTextCursor.MoveMode.KeepAnchor)
+                    cur.mergeCharFormat(fmt_for(st))
+                k = end
+            pos += len(line.text) + 1
+
+    def _restyle_block(self, q) -> None:
+        """A paragraph's style changed in the inspector: its look follows."""
+        k = self._piece_index(q)
+        if k is None or k >= len(self._looks):
+            return
+        changes = self._changes_of(q)
+        look = self._looks[k]
+        c = QTextCursor(q)
+        c.setPosition(q.position())
+        c.setPosition(q.position() + q.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+        fmt = self._char_base(look, changes)
+        if not changes:
+            c.setCharFormat(fmt)
+            self._merge_char_formats(q, self.story.pieces[k], look)
         else:
-            self.editor.set_first_line_indent(self._first_line_indent() * ppp)
+            c.mergeCharFormat(fmt)
+        c.setBlockCharFormat(fmt)
+        g = self._geom(q)
+        scale = float(changes.get("size", look.style.size)) / max(look.style.size, 0.1)
+        spacing = self._spacing_value(q)
+        g[3] = spacing * SINGLE * float(changes.get("size", look.style.size)) if spacing else look.pitch * scale
+        bf = q.blockFormat()
+        bf.setProperty(_GEOM, g)
+        self._set_block_format(q, bf)
+        self._apply_px()
         self._reposition()
 
-    def _first_line_indent(self) -> float:
-        """A left-aligned paragraph whose first line starts further right than
-        the others (first-line indent): the editor's box starts at the column
-        edge and only its first line is indented – like the core lays it out."""
-        b, lay = self.block, self._layout
-        if self.rotated() or len(b.lines) < 2 or (lay is not None and lay.align != "left") \
-                or self.align_override not in (None, "left", "justify"):
-            return 0.0
-        indent = b.lines[0].origin[0] - min(ln.origin[0] for ln in b.lines)
-        return indent if indent > 0.5 else 0.0
+    def _spacing_value(self, q) -> float | None:
+        val = q.blockFormat().property(_SPACING)
+        return float(val) if val else None
 
-    def _hanging_indent(self) -> float:
-        """How much further right than the first line the following lines
-        start (pt): a wrapped list item ("1. Første …" continues under
-        "Første") or a hanging indent; 0 when there is none."""
-        b, lay = self.block, self._layout
-        if self.rotated() or not b.lines or (lay is not None and lay.align != "left") \
-                or self.align_override not in (None, "left", "justify"):
-            return 0.0
-        first = b.lines[0]
-        if len(b.lines) >= 2:
-            rest = [ln.origin[0] for ln in b.lines[1:]]
-            if max(rest) - min(rest) <= 1.0 and min(rest) - first.origin[0] > 1.0:
-                return min(rest) - first.origin[0]
-            return 0.0
-        k = te.marker_end(first.text)
-        if k and len(first.char_pos) == len(first.text) and abs(first.dir[1]) < 1e-3 and first.dir[0] > 0:
-            return max(0.0, first.char_pos[k][0] - first.extent[0])
-        return 0.0
+    def _update_bullets(self) -> None:
+        """List bullets drawn by the editor next to their paragraph, so they
+        follow it while you type (the page behind shows none)."""
+        ed = self.editor
+        if ed is None:
+            return
+        bullets = {}
+        for k, look in enumerate(self._looks):
+            if look.bullet is not None:
+                text, st, s = look.bullet
+                bullets[k] = (text, self._qfont(st, self._ppp), to_qcolor(tuple(st.color)),
+                              (s - self._box[0]) * self._ppp)
+        ed.bullets = bullets
+        ed.viewport().update()
 
-    def _editor_background(self) -> QColor:
-        """Opaque page colour: hides the original text while it is edited."""
-        return _background_color(self.ctx.pdf.doc, self.block.page, self.block.bbox)
+    # -- geometry -----------------------------------------------------------------
+    def _reposition(self, *_a) -> None:
+        if self.editor is None or self.story is None:
+            return
+        ed = self.editor
+        ppp = self._ppp
+        s0, s1, t0 = self._box
+        w = int(round((s1 - s0) * ppp)) + 2
+        h = int(round(ed.document().size().height())) + 4
+        if self._proxy is not None:
+            ed.resize(w, h)
+            self._proxy.resize(ed.size())
+            # editor pixel (X, Y) is the point (s0 + X / ppp, t0 + Y / ppp)
+            # of the text's own frame, rotated with the text onto the page
+            t = QTransform()
+            t.translate(self._anchor[0], self._anchor[1])
+            t.rotate(self.story.pieces[0].block.angle)
+            t.translate(s0, t0)
+            t.scale(1.0 / ppp, 1.0 / ppp)
+            self._proxy.setTransform(t)
+            frame = QRectF(self.ctx.view.mapFromScene(self._proxy.mapToScene(QRectF(ed.rect()))).boundingRect())
+            self._place_keys(frame)
+            return
+        view = self.ctx.view
+        u, v = self._axes
+        x = self._anchor[0] + u[0] * s0 + v[0] * t0
+        y = self._anchor[1] + u[1] * s0 + v[1] * t0
+        tl = view.mapFromScene(view.page_to_scene(self.story.page, QPointF(x, y)))
+        ed.setGeometry(int(round(tl.x())), int(round(tl.y())), w, h)
+        self._place_keys(QRectF(ed.geometry()))
 
-    def _block_pitch(self) -> float:
-        """Baseline-to-baseline distance (pt) the editor should use."""
-        return _line_pitch(self.block)
+    def _place_keys(self, frame: QRectF | None) -> None:
+        """Put the key-hint chip next to the editor where it covers no other
+        text (above or below it, right or left); else where it covers least,
+        and it gives way once the user types."""
+        chip = self._keys
+        if chip is None or frame is None:
+            return
+        chip.adjustSize()
+        w, h = chip.width(), chip.height()
+        view = self.ctx.view
+        area = QRectF(view.viewport().rect()).adjusted(4, 4, -4, -4)
+        vis = frame & area if frame.intersects(area) else frame
+        candidates = [
+            QRectF(vis.right() - w, frame.top() - KEYS_GAP - h, w, h),    # above, right
+            QRectF(vis.right() - w, frame.bottom() + KEYS_GAP, w, h),     # below, right
+            QRectF(vis.left(), frame.top() - KEYS_GAP - h, w, h),         # above, left
+            QRectF(vis.left(), frame.bottom() + KEYS_GAP, w, h),          # below, left
+            QRectF(frame.right() + KEYS_GAP, vis.top(), w, h),            # beside, right
+            QRectF(frame.left() - KEYS_GAP - w, vis.top(), w, h),         # beside, left
+            QRectF(area.right() - w, area.top(), w, h),                   # the view's corner
+        ]
+        others = []
+        page = self.story.page
+        for st in self.stories(page):
+            if self._same_story(st):
+                continue
+            for p in st.pieces:
+                o = p.block.bbox
+                tl = view.page_to_viewport(page, QPointF(o.x0, o.y0))
+                br = view.page_to_viewport(page, QPointF(o.x1, o.y1))
+                others.append(QRectF(tl, br).normalized().adjusted(-2, -2, 2, 2))
+        inner = frame.adjusted(1, 1, -1, -1)
 
-    def _write(self, block: te.TextBlock, text: str, style: core_fonts.SpanStyle | None, *,
-               formats=None, align: str | None = None, line_spacing: float | None = None) -> None:
-        """Put the edited text into the PDF (one undo step); tell the user
-        when it runs into what is below or a font lacked characters."""
+        def cost(r: QRectF) -> float:
+            covered = sum((r & o).width() * (r & o).height() for o in others if r.intersects(o))
+            if r.intersects(inner):
+                covered += 1e6 + (r & inner).width() * (r & inner).height()
+            outside = 0.0 if area.contains(r) else 1e7
+            return covered + outside
+
+        costs = [cost(r) for r in candidates]
+        best = min(range(len(candidates)), key=lambda i: (costs[i], i))
+        r = candidates[best]
+        r.moveLeft(max(area.left(), min(r.left(), area.right() - w)))
+        chip.move(int(round(r.left())), int(round(r.top())))
+        self._keys_covers_text = costs[best] > 0
+
+    def _viewport_rect(self, item) -> QRectF:
+        view = self.ctx.view
+        poly = view.mapFromScene(item.mapToScene(item.rect()))
+        return QRectF(poly.boundingRect())
+
+    def _render_background(self) -> None:
+        """The page without the text being edited, under the (transparent)
+        editor – images, lines and colour stay, no old text shows through."""
+        if self.editor is None or self.story is None or not self._wants_background():
+            return
+        view = self.ctx.view
+        try:
+            zoom = view.zoom * max(1.0, view.devicePixelRatioF())
+            pix = flow.render_without(self.ctx.pdf.doc, self.story, zoom)
+        except Exception:
+            return
+        from PySide6.QtGui import QImage, QPixmap
+
+        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888).copy()
+        if self._bg is not None:
+            view.remove_overlay(self._bg)
+        item = QGraphicsPixmapItem(QPixmap.fromImage(img))
+        item.setTransform(QTransform.fromScale(1.0 / zoom, 1.0 / zoom))
+        item.setZValue(5)
+        item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        view.add_overlay(self.story.page, item)
+        self._bg = item
+
+    def _wants_background(self) -> bool:
+        return True
+
+    # -- closing ------------------------------------------------------------------
+    def _teardown(self) -> None:
+        page = self.story.page if self.story is not None else None
+        self._bg_timer.stop()
+        if self._proxy is not None:
+            if self.ctx is not None:
+                self.ctx.view.remove_overlay(self._proxy)
+            self._proxy.deleteLater()
+        elif self.editor is not None:
+            self.editor.hide()
+            self.editor.deleteLater()
+        if self._keys is not None:
+            self._keys.hide()
+            self._keys.deleteLater()
+        if self._bg is not None and self.ctx is not None:
+            self.ctx.view.remove_overlay(self._bg)
+        self.editor = self._keys = self._proxy = self._bg = None
+        self._proxy_drag = False
+        self._drag_anchor = None
+        self.story = None
+        self._looks = []
+        if page is not None and self.show_all_boxes:
+            self._refresh_page_outline(page)
+        if self._panel is not None:
+            self._panel.refresh()
+        self.changed.emit()
+
+    def cancel(self) -> None:
+        if self.editor is None:
+            return
+        self._teardown()
+        self.ctx.view.setFocus()
+
+    def collect_edits(self) -> list[flow.Edit]:
+        """The editor's paragraphs as core edits (in order). A paragraph
+        whose tag was already seen is new (Enter split it off)."""
+        out = []
+        seen: set[int] = set()
+        last = 0
+        q = self.editor.document().begin()
+        while q.isValid():
+            k = self._piece_index(q)
+            text = q.text().replace(_LS, "\n")
+            fmt = q.blockFormat()
+            align = str(fmt.property(_ALIGN)) if fmt.property(_ALIGN) else None
+            spacing = self._spacing_value(q)
+            changes = self._changes_of(q)
+            style = None
+            if changes and k is not None:
+                style = replace(self.story.pieces[k].block.style,
+                                **{a: (tuple(b) if a == "color" else b) for a, b in changes.items()})
+            formats = self._block_formats(q)
+            if k is None or k in seen:
+                out.append(flow.Edit(piece=None, like=k if k is not None else last, text=text, formats=formats or None,
+                                     align=align, line_spacing=spacing * SINGLE if spacing else None, style=style))
+            else:
+                seen.add(k)
+                last = k
+                out.append(flow.Edit(piece=k, text=text, formats=formats or None, align=align,
+                                     line_spacing=spacing * SINGLE if spacing else None, style=style))
+            q = q.next()
+        return out
+
+    def _block_formats(self, q) -> list[tuple[int, int, dict]]:
+        out: list[tuple[int, int, dict]] = []
+        it = q.begin()
+        start = q.position()
+        while not it.atEnd():
+            frag = it.fragment()
+            if frag.isValid():
+                fmt = frag.charFormat()
+                changes = {}
+                for key, prop in FORMAT_PROPS.items():
+                    if fmt.hasProperty(prop):
+                        v = fmt.property(prop)
+                        changes[key] = tuple(v) if key == "color" else v
+                if changes:
+                    a, b = frag.position() - start, frag.position() - start + frag.length()
+                    if out and out[-1][1] == a and out[-1][2] == changes:
+                        out[-1] = (out[-1][0], b, changes)
+                    else:
+                        out.append((a, b, changes))
+            it += 1
+        return out
+
+    def collect_formats(self) -> list[tuple[int, int, dict]]:
+        """The user's formatting of the paragraph at the caret (offsets
+        into its text)."""
+        q = self._qblock()
+        return self._block_formats(q) if q is not None else []
+
+    def commit(self) -> bool:
+        """Write the editor's text into the PDF. Returns True if it changed."""
+        if self.editor is None or self.story is None or self._committing:
+            return False
+        story = self.story
+        edits = self.collect_edits()
+        session = self._session
+        self._teardown()
+        self._committing = True
+        try:
+            changed = self._write_story(story, edits, session)
+        except Exception as exc:  # noqa: BLE001 – never lose the user's session silently
+            self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
+            return False
+        finally:
+            self._committing = False
+        if changed:
+            QTimer.singleShot(150, self, lambda p=story.page: self._warm(p))
+        return changed
+
+    def _write_story(self, story: flow.Story, edits: list[flow.Edit], session) -> bool:
+        """Put the edited text into the PDF; tell the user when a font lacked
+        characters, and – for a standalone text that ran into what is below –
+        offer to make it smaller."""
         pdf = self.ctx.pdf
-        res = te.replace_block_text(pdf, block, text, style, formats=formats, align=align,
-                                    line_spacing=line_spacing)
-        if res.substitutions:
-            orig, used = res.substitutions[0]
-            self.ctx.toast(tr("edit.text.substituted", font=display_font_name(orig), used=display_font_name(used)),
+        res = flow.apply_story(pdf, story, edits, merge=session if story.kind == "flow" else None)
+        for wanted, used in res.substitutions[:2]:
+            self.ctx.toast(tr("edit.text.substituted", font=display_font_name(wanted), used=display_font_name(used)),
                            "info")
-        if res.overflow > 0:
+        if res.overflow > 0 and story.kind == "single" and edits:
+            e = edits[0]
+            piece = story.pieces[0]
+            text = te.restore_soft_breaks(piece.text, piece.soft, "\n".join(x.text for x in edits))
+
             def shrink() -> None:
-                self._shrink_to_fit(block, text, style, formats, align, line_spacing)
+                self._shrink_to_fit(piece.block, text, e.style, e.formats, e.align, e.line_spacing)
 
             self.ctx.toast(tr("edit.text.overflow"), "warning", action_text=tr("edit.text.overflow.fit"),
                            on_action=shrink, duration_ms=12000)
+        return bool(res.pages)
 
     def _shrink_to_fit(self, block, text, style, formats, align, line_spacing) -> None:
         """"Formindsk så den passer": redo the edit with a smaller text size."""
@@ -1522,323 +2164,61 @@ class EditTextTool(Tool):
             return
         self.ctx.toast(tr("edit.text.overflow.done", pct=round(scale * 100)), "success")
 
-    def _spacing_fix(self, font: QFont, ppp: float) -> float:
-        """Letter spacing (%) that makes the on-screen font as wide as the
-        PDF's: the screen family is often a metric-close substitute."""
-        lines = [ln for ln in self.block.lines if len(ln.text.strip()) >= 4]
-        if not lines:
-            return 100.0
-        ln = max(lines, key=lambda ln: len(ln.text))
-        qt_w = QFontMetricsF(font).horizontalAdvance(ln.text.rstrip())
-        length = ln.extent[1] - ln.extent[0] if self.rotated() else ln.bbox.width
-        pdf_w = length * ppp
-        if qt_w <= 0:
-            return 100.0
-        return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
-
-    def _display_text(self, block: te.TextBlock) -> tuple[str, list[int]]:
-        text, soft = te.editor_text(block, self._layout)
-        return text, list(soft)
-
-    _restore_soft_breaks = staticmethod(te.restore_soft_breaks)
-
-    def _layout_for(self, block: te.TextBlock) -> te.LayoutInfo:
-        """How the core will lay out this block (alignment, wrap width) –
-        with the alignment / line spacing chosen in the inspector."""
-        spacing = self.spacing_override * SINGLE if self.spacing_override else None
-        return te.layout_info(self.ctx.pdf.doc, block, align=self.align_override, line_spacing=spacing)
-
-    def _text_extent(self) -> tuple[float, float]:
-        """(start, end) of the paragraph along its own direction, relative to
-        the first line's origin (pt, display space)."""
-        b = self.block
-        u, _v = _unit(b)
-        ox, oy = b.lines[0].origin if b.lines else (b.bbox.x0, b.bbox.y0)
-        starts, ends = [], []
-        for ln in b.lines:
-            s = (ln.origin[0] - ox) * u[0] + (ln.origin[1] - oy) * u[1]
-            starts.append(s)
-            ends.append(s + max(0.0, ln.extent[1] - ln.extent[0]))
-        return (min(starts), max(ends)) if starts else (0.0, b.bbox.width)
-
-    def _room_ahead(self) -> float:
-        """Distance (pt) from the paragraph's start to the page edge along
-        the text direction – how far a never-wrapping line may run."""
-        b = self.block
-        u, _v = _unit(b)
-        rect = self.ctx.pdf.page(b.page).rect
-        ox, oy = b.lines[0].origin if b.lines else (b.bbox.x0, b.bbox.y0)
-        ox += u[0] * self._text_extent()[0]
-        oy += u[1] * self._text_extent()[0]
-        room = []
-        for o, d, lo, hi in ((ox, u[0], rect.x0, rect.x1), (oy, u[1], rect.y0, rect.y1)):
-            if abs(d) > 1e-6:
-                room.append(((hi if d > 0 else lo) - o) / d)
-        return max(min(room) if room else 0.0, 0.0)
-
-    def _wrap_width(self) -> float:
-        """The core's own wrap width (``text_edit.layout_info``), so the editor
-        breaks lines exactly where the PDF will; a little slack keeps the
-        caret visible. 0 from the core means "never wraps"."""
-        b = self.block
-        slack = max(2.0, 0.3 * b.style.size)
-        if self._layout is not None and self._layout.justified:
-            slack = 0.5  # justified lines are stretched to the box: it must be the column
-        wrap = self._layout.wrap_width if self._layout is not None else b.bbox.width
-        if self.align_override and self._layout is not None and self._layout.frame and not self.rotated():
-            return max(wrap, self._layout.frame[1] - self._layout.frame[0]) + slack
-        if self.rotated():
-            start, end = self._text_extent()
-            if wrap <= 0:
-                wrap = max(self._room_ahead(), end - start + 4 * b.style.size)
-            return max(wrap, end - start) + slack
-        if wrap <= 0:
-            wrap = self.ctx.pdf.page(b.page).rect.width - b.bbox.x0
-        return max(wrap, b.bbox.width) + slack
-
-    def _box_left(self, width_pt: float) -> float | None:
-        """Left edge (pt) of the editor for centred/right-aligned text, or
-        None for left-aligned text (positioned by its first glyph)."""
-        b, lay = self.block, self._layout
-        if self.align_override and lay is not None and lay.frame and not self.rotated():
-            return lay.frame[0]  # an explicit alignment: the editor spans the column
-        if lay is None or lay.align == "left":
-            return None
-        if self.rotated():  # along the text, relative to the first line's origin
-            start, end = self._text_extent()
-            if lay.align == "center":
-                return (start + end) / 2 - width_pt / 2
-            return end - width_pt + 0.75
-        if lay.align == "center":
-            return (b.bbox.x0 + b.bbox.x1) / 2 - width_pt / 2
-        # right-aligned: the box's right edge is the text's right edge (Qt
-        # keeps ~1 px for the caret there)
-        return b.bbox.x1 - width_pt + 0.75
-
-    def _reposition(self, *_a) -> None:
-        if self.editor is None or self.block is None:
-            return
-        if self._proxy is not None:
-            self._reposition_rotated()
-            return
-        view, b = self.ctx.view, self.block
-        ppp = self._px_per_pt()
-        style = self.current_style()
-        first = b.lines[0] if b.lines else None
-        fm = QFontMetricsF(self.editor.font())
-        if first is not None:
-            origin = QPointF(first.origin[0], first.origin[1])
-        else:
-            origin = QPointF(b.bbox.x0, b.bbox.y0 + style.size * 0.8)
-        top_left = view.mapFromScene(view.page_to_scene(b.page, origin))
-        line_px = self.editor._line_px or fm.height()
-        # place the editor so its first baseline lands exactly on the PDF's
-        # (measured from Qt's own layout: margins/leading differ per platform)
-        bx, by = self.editor.first_baseline()
-        x = top_left.x() - bx
-        y = top_left.y() - by
-        left_pt = self._box_left(self.editor.lineWrapColumnOrWidth() / ppp)
-        if left_pt is not None:  # centred / right-aligned: Qt aligns inside the box
-            x = view.mapFromScene(view.page_to_scene(b.page, QPointF(left_pt, origin.y()))).x()
-        w = self.editor.lineWrapColumnOrWidth() + 2
-        h = max(line_px, self.editor.content_height()) + 2
-        self.editor.setGeometry(int(round(x)), int(round(y)), int(w), int(round(h)))
-        frame_vp = None
-        if self._frame is not None:
-            # grow the frame with the text (pt)
-            hh = max(b.bbox.height, h / ppp)
-            ww = max(b.bbox.width, (w - 2) / ppp)
-            rect = QRectF(b.bbox.x0 - EDIT_PAD, b.bbox.y0 - EDIT_PAD, ww + 2 * EDIT_PAD, hh + 2 * EDIT_PAD)
-            self._frame.setRect(rect)
-            frame_vp = self._viewport_rect(self._frame)
-        self._place_keys(frame_vp)
-
-    def _reposition_rotated(self) -> None:
-        """Rotated text: size the editor in screen pixels and map it onto the
-        page with a transform (rotation + 1/zoom scale) whose anchor is the
-        first line's baseline origin."""
-        b, ed = self.block, self.editor
-        ppp = self._px_per_pt()
-        fm = QFontMetricsF(ed.font())
-        w = ed.lineWrapColumnOrWidth() + 2
-        h = max(ed._line_px or fm.height(), ed.content_height()) + 2
-        ed.resize(int(w), int(round(h)))
-        self._proxy.resize(ed.size())
-        bx, by = ed.first_baseline()
-        left = self._box_left(ed.lineWrapColumnOrWidth() / ppp)
-        ax = bx if left is None else -left * ppp     # widget x that lies on the first origin
-        ox, oy = b.lines[0].origin if b.lines else (b.bbox.x0, b.bbox.y0)
-        t = QTransform()
-        t.translate(ox, oy)
-        t.rotate(b.angle)
-        t.scale(1.0 / ppp, 1.0 / ppp)
-        t.translate(-ax, -by)
-        self._proxy.setTransform(t)
-        if self._frame is not None:
-            # the frame lives in the editor's own (rotated) pixel space too;
-            # it encloses the editor and the original lines (their extent
-            # along the text, ascender to descender across it)
-            u, v = _unit(b)
-            inv_x, inv_y = [], []
-            for ln in b.lines:
-                du = (ln.origin[0] - ox) * u[0] + (ln.origin[1] - oy) * u[1]
-                dv = (ln.origin[0] - ox) * v[0] + (ln.origin[1] - oy) * v[1]
-                size = ln.style.size
-                inv_x += [ax + du * ppp, ax + (du + ln.extent[1] - ln.extent[0]) * ppp]
-                inv_y += [by + (dv - ln.ascender * size) * ppp, by + (dv - ln.descender * size) * ppp]
-            pad = EDIT_PAD * ppp
-            rect = QRectF(min([0.0] + inv_x) - pad, min([0.0] + inv_y) - pad, 0, 0)
-            rect.setRight(max([w - 2] + inv_x) + pad)
-            rect.setBottom(max([h - 2] + inv_y) + pad)
-            self._frame.setRect(rect)
-            self._frame.setTransform(t)
-        self._place_keys(self._viewport_rect(self._frame) if self._frame is not None else None)
-
-    def _viewport_rect(self, item) -> QRectF:
-        view = self.ctx.view
-        poly = view.mapFromScene(item.mapToScene(item.rect()))
-        return QRectF(poly.boundingRect())
-
-    def _place_keys(self, frame: QRectF | None) -> None:
-        """Put the key-hint chip next to the edit frame where it covers no
-        other text: above or below the frame, right- or left-aligned (the
-        corners next to a paragraph are usually free – short last lines,
-        paragraph spacing). If every spot covers text, the least covered one
-        wins and the chip gives way once the user types."""
-        chip = self._keys
-        if chip is None or frame is None:
-            return
-        chip.adjustSize()
-        w, h = chip.width(), chip.height()
-        view, b = self.ctx.view, self.block
-        area = QRectF(view.viewport().rect()).adjusted(4, 4, -4, -4)
-        candidates = [
-            QRectF(frame.right() - w, frame.top() - KEYS_GAP - h, w, h),    # above, right
-            QRectF(frame.right() - w, frame.bottom() + KEYS_GAP, w, h),     # below, right
-            QRectF(frame.left(), frame.top() - KEYS_GAP - h, w, h),         # above, left
-            QRectF(frame.left(), frame.bottom() + KEYS_GAP, w, h),          # below, left
-            QRectF(frame.right() + KEYS_GAP, frame.top(), w, h),            # beside, right
-            QRectF(frame.left() - KEYS_GAP - w, frame.top(), w, h),         # beside, left
-        ]
-        others = []
-        for o in self.blocks(b.page):
-            if tuple(o.bbox) == tuple(b.bbox):
-                continue
-            tl = view.page_to_viewport(b.page, QPointF(o.bbox.x0, o.bbox.y0))
-            br = view.page_to_viewport(b.page, QPointF(o.bbox.x1, o.bbox.y1))
-            others.append(QRectF(tl, br).normalized().adjusted(-2, -2, 2, 2))
-
-        def cost(r: QRectF) -> float:
-            covered = sum((r & o).width() * (r & o).height() for o in others if r.intersects(o))
-            outside = 0.0 if area.contains(r) else 1e7
-            return covered + outside
-
-        costs = [cost(r) for r in candidates]
-        best = min(range(len(candidates)), key=lambda i: (costs[i], i))
-        r = candidates[best]
-        r.moveLeft(max(area.left(), min(r.left(), area.right() - w)))
-        chip.move(int(round(r.left())), int(round(r.top())))
-        self._keys_covers_text = costs[best] > 0
-
-    def _teardown(self) -> None:
-        page = self.block.page if self.block is not None else None
-        if self._proxy is not None:
-            if self.ctx is not None:
-                self.ctx.view.remove_overlay(self._proxy)
-            self._proxy.deleteLater()
-        elif self.editor is not None:
-            self.editor.hide()
-            self.editor.deleteLater()
-        if self._keys is not None:
-            self._keys.hide()
-            self._keys.deleteLater()
-        if self._frame is not None and self.ctx is not None:
-            self.ctx.view.remove_overlay(self._frame)
-        self.editor = self._keys = self._frame = self._proxy = None
-        self._proxy_drag = False
-        self.block = None
-        self.style_override = None
-        self.align_override = None
-        self.spacing_override = None
-        if page is not None and self.show_all_boxes:
-            self._refresh_page_outline(page)
-        if self._panel is not None:
-            self._panel.refresh()
-        self.changed.emit()
-
-    def cancel(self) -> None:
-        if self.editor is None:
-            return
-        self._teardown()
-        self.ctx.view.setFocus()
-
-    def commit(self) -> bool:
-        """Write the editor's text into the PDF. Returns True if it changed."""
-        if self.editor is None or self.block is None or self._committing:
-            return False
-        block, text, style = self.block, self.editor.toPlainText(), self.style_override
-        shown, soft = self._shown_text, self._soft_positions
-        formats = self.collect_formats()
-        align = self.align_override
-        spacing = self.spacing_override * SINGLE if self.spacing_override else None
-        self._teardown()
-        if text == shown and style is None and not formats and align is None and spacing is None:
-            return False
-        text = self._restore_soft_breaks(shown, soft, text)
-        self._committing = True
-        try:
-            if formats or align is not None or spacing is not None:
-                self._write(block, text, style, formats=formats or None, align=align, line_spacing=spacing)
-            else:
-                self._write(block, text, style)
-        except Exception as exc:  # noqa: BLE001 – never lose the user's session silently
-            self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
-            return False
-        finally:
-            self._committing = False
-        self._blocks.pop(block.page, None)
-        QTimer.singleShot(150, self, lambda p=block.page: self._warm(p))
-        return True
-
     def _warm(self, page: int) -> None:
-        """Idle after a commit: prepare the page so the next paragraph opens fast."""
+        """Idle after a commit: prepare the page so the next text opens fast."""
         try:
             te.warm_page(self.ctx.pdf.doc, page)
+            flow.page_stories(self.ctx.pdf.doc, page)
         except Exception:  # only a cache – never disturb the user
             pass
 
-    def commit_and_next(self, step: int = 1) -> None:
-        """Save, then open the next (Tab) or previous (Shift+Tab) paragraph
-        in reading order."""
-        if self.block is None:
+    # -- moving on to the next text --------------------------------------------------
+    def _reading_order(self, page: int, tab: bool) -> list[flow.Story]:
+        stories = self.stories(page)
+        if not tab:
+            body = [s for s in stories if s.kind == "flow"]
+            return sorted(body, key=lambda s: (s.lo, s.rect.y0))
+        return sorted(stories, key=lambda s: (round(s.rect.y0 / 6.0), s.rect.x0))
+
+    def leave(self, step: int, tab: bool = False) -> None:
+        """Arrow past the end / start (or Tab / Shift+Tab): save and go on
+        in the next / previous text surface – the next column, then the
+        next page."""
+        if self.story is None:
             return
-        page, old = self.block.page, self.blocks(self.block.page)
-        idx = next((i for i, b in enumerate(old) if b.bbox == self.block.bbox), -1)
-        j = idx + step
-        nxt = old[j] if idx >= 0 and 0 <= j < len(old) else None
-        anchor = QPointF((nxt.bbox.x0 + nxt.bbox.x1) / 2, (nxt.bbox.y0 + nxt.bbox.y1) / 2) if nxt else None
+        page = self.story.page
+        here = self._reading_order(page, tab)
+        idx = next((i for i, s in enumerate(here) if self._same_story(s)), -1)
+        key = (round(self.story.rect.x0, 1), round(self.story.rect.y0, 1))
+        session = self._session
         self.commit()
-        target = None
-        if nxt is not None:
-            # the text below may have moved with the edit: find it by its text
-            same = [b for b in self.blocks(page) if b.text == nxt.text]
-            if same:
-                target = min(same, key=lambda b: abs(b.bbox.y0 - nxt.bbox.y0) + abs(b.bbox.x0 - nxt.bbox.x0))
-        if target is None and anchor is not None:
-            target = self.block_at(page, anchor)
-        elif nxt is None:  # continue on the next / previous page that has text
+        here = self._reading_order(page, tab)      # positions may have changed
+        if idx < 0:
+            idx = next((i for i, s in enumerate(here) if (round(s.rect.x0, 1), round(s.rect.y0, 1)) == key), -1)
+        j = idx + step
+        target = here[j] if idx >= 0 and 0 <= j < len(here) else None
+        if target is None:
             pages = range(page + 1, self.ctx.pdf.page_count) if step > 0 else range(page - 1, -1, -1)
             for p in pages:
-                if self.blocks(p):
-                    target = self.blocks(p)[0] if step > 0 else self.blocks(p)[-1]
+                order = self._reading_order(p, tab)
+                if order:
+                    target = order[0] if step > 0 else order[-1]
                     break
         if target is not None:
-            self.ctx.view.go_to_page(target.page) if target.page != page else None
-            self.start_edit(target)
+            if target.page != page:
+                self.ctx.view.go_to_page(target.page)
+            self.start_story(target, at_end=step < 0, session=session)
+            if self.editor is not None:
+                cur = self.editor.textCursor()
+                cur.movePosition(QTextCursor.MoveOperation.End if step < 0 else QTextCursor.MoveOperation.Start)
+                self.editor.setTextCursor(cur)
+
+    def commit_and_next(self, step: int = 1) -> None:
+        self.leave(step, tab=True)
 
     # -- character formatting (selection) -------------------------------------
     def _px_size(self, pt: float) -> int:
-        return max(1, round(pt * self._px_per_pt()))
+        return max(1, round(pt * self._ppp))
 
     def _char_format(self, changes: dict) -> QTextCharFormat:
         """Qt format for ``changes`` (what it looks like + the property the
@@ -1864,25 +2244,26 @@ class EditTextTool(Tool):
                 fmt.setFontFamilies([core_fonts.qt_family_hint(core_fonts.SpanStyle(str(value), 12))])
         return fmt
 
-    def _rescale_user_sizes(self) -> None:
-        """Characters the user gave a size keep it (in pt) when zooming."""
-        prop = FORMAT_PROPS["size"]
-        cur = QTextCursor(self.editor.document())
-        block = self.editor.document().begin()
-        self.editor.blockSignals(True)
-        try:
-            while block.isValid():
-                it = block.begin()
-                while not it.atEnd():
-                    frag = it.fragment()
-                    if frag.isValid() and frag.charFormat().hasProperty(prop):
-                        cur.setPosition(frag.position())
-                        cur.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
-                        cur.mergeCharFormat(self._char_format({"size": float(frag.charFormat().property(prop))}))
-                    it += 1
-                block = block.next()
-        finally:
-            self.editor.blockSignals(False)
+    def _strip_user_formats(self, cur: QTextCursor) -> None:
+        """Remove the user's formatting from the characters of ``cur``."""
+        doc = self.editor.document()
+        a, b = cur.selectionStart(), cur.selectionEnd()
+        q = doc.findBlock(a)
+        while q.isValid() and q.position() <= b:
+            it = q.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid() and frag.position() < b and frag.position() + frag.length() > a:
+                    fmt = frag.charFormat()
+                    if any(fmt.hasProperty(p) for p in FORMAT_PROPS.values()):
+                        for p in FORMAT_PROPS.values():
+                            fmt.clearProperty(p)
+                        c = QTextCursor(doc)
+                        c.setPosition(max(a, frag.position()))
+                        c.setPosition(min(b, frag.position() + frag.length()), QTextCursor.MoveMode.KeepAnchor)
+                        c.setCharFormat(fmt)
+                it += 1
+            q = q.next()
 
     def has_text_selection(self) -> bool:
         return self.editor is not None and self.editor.textCursor().hasSelection()
@@ -1915,23 +2296,16 @@ class EditTextTool(Tool):
             c = QTextCursor(doc)
             for pos in range(a, b):
                 c.setPosition(pos + 1)
-                if doc.characterAt(pos) not in ("\u2029", "\n"):
+                if doc.characterAt(pos) not in (" ", "\n", _LS):
                     fmts.append(c.charFormat())
         else:
             fmts = [self.editor.currentCharFormat()]
         if not fmts:
             return out
-        base = self.editor.font()  # what characters without an own format show
-
-        def eff(f: QTextCharFormat, prop, own, inherited) -> bool:
-            return own(f) if f.hasProperty(prop) else inherited
-
-        P = QTextFormat.Property
-        out["bold"] = all(eff(f, P.FontWeight, lambda f: f.fontWeight() >= 600, base.bold()) for f in fmts)
-        out["italic"] = all(eff(f, P.FontItalic, QTextCharFormat.fontItalic, base.italic()) for f in fmts)
-        out["underline"] = all(eff(f, P.TextUnderlineStyle, QTextCharFormat.fontUnderline, base.underline())
-                               for f in fmts)
-        out["strike"] = all(eff(f, P.FontStrikeOut, QTextCharFormat.fontStrikeOut, base.strikeOut()) for f in fmts)
+        out["bold"] = all(f.fontWeight() >= 600 for f in fmts)
+        out["italic"] = all(f.fontItalic() for f in fmts)
+        out["underline"] = all(f.fontUnderline() for f in fmts)
+        out["strike"] = all(f.fontStrikeOut() for f in fmts)
         return out
 
     def toggle_format(self, kind: str) -> None:
@@ -1944,49 +2318,48 @@ class EditTextTool(Tool):
 
     def _selection_moved(self) -> None:
         if self._panel is not None:
-            self._panel.refresh_selection()
+            self._panel.refresh()
 
-    def collect_formats(self) -> list[tuple[int, int, dict]]:
-        """The user's formatting as core ``formats`` (offsets into the plain text)."""
+    def _selected_blocks(self) -> list:
         if self.editor is None:
             return []
-        out: list[tuple[int, int, dict]] = []
-        block = self.editor.document().begin()
-        while block.isValid():
-            it = block.begin()
-            while not it.atEnd():
-                frag = it.fragment()
-                if frag.isValid():
-                    fmt = frag.charFormat()
-                    changes = {}
-                    for key, prop in FORMAT_PROPS.items():
-                        if fmt.hasProperty(prop):
-                            v = fmt.property(prop)
-                            changes[key] = tuple(v) if key == "color" else v
-                    if changes:
-                        a, b = frag.position(), frag.position() + frag.length()
-                        if out and out[-1][1] == a and out[-1][2] == changes:
-                            out[-1] = (out[-1][0], b, changes)
-                        else:
-                            out.append((a, b, changes))
-                it += 1
-            block = block.next()
-        return out
+        cur = self.editor.textCursor()
+        doc = self.editor.document()
+        a, b = cur.selectionStart(), cur.selectionEnd()
+        out = []
+        q = doc.findBlock(a)
+        while q.isValid() and q.position() <= b:
+            out.append(q)
+            if q.position() + q.length() > b:
+                break
+            q = q.next()
+        return out or [cur.block()]
 
     def set_paragraph(self, align: str | None = "", spacing: float | None = -1.0) -> None:
         """Alignment ("left" | "center" | "right" | "justify", ``None`` =
         original) and line spacing (× single, ``None`` = original) of the
-        paragraph being edited; the editor previews it."""
-        if self.block is None:
+        paragraphs in the selection (or the one at the caret)."""
+        if self.editor is None or self.story is None:
             return
-        if align != "":
-            self.align_override = align
-        if spacing is None or spacing >= 0:
-            self.spacing_override = spacing
-        self._layout = self._layout_for(self.block)
-        self._apply_editor_style()
-        if self.editor is not None:
-            self.editor.setFocus()
+        for q in self._selected_blocks():
+            fmt = q.blockFormat()
+            if align != "":
+                fmt.setProperty(_ALIGN, align or None)
+            if spacing is None or spacing >= 0:
+                fmt.setProperty(_SPACING, spacing or None)
+            k = self._piece_index(q)
+            if k is not None and k < len(self.story.pieces):
+                look = self._look_for(self.story.pieces[k], str(fmt.property(_ALIGN) or "") or None,
+                                      float(fmt.property(_SPACING)) if fmt.property(_SPACING) else None)
+                g = self._geom(q)
+                g[0], g[1], g[2], g[3] = look.left, look.right, look.indent, look.pitch
+                fmt.setProperty(_GEOM, g)
+                s0, s1, t0 = self._box
+                self._box = (min(s0, look.left), max(s1, look.right), t0)
+            self._set_block_format(q, fmt)
+        self._apply_px()
+        self._reposition()
+        self.editor.setFocus()
         if self._panel is not None:
             self._panel.refresh()
 

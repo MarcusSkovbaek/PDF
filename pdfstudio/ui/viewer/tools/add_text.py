@@ -13,18 +13,21 @@ Saving calls :func:`pdfstudio.core.insert.add_text_box`.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pymupdf
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QPen
 from PySide6.QtWidgets import QGraphicsRectItem
 
+from ....core import flow
 from ....core import fonts as core_fonts
 from ....core import insert as core_insert
 from ....core import text_edit as te
 from ....i18n import tr
 from ...theme import tokens as T
 from .base import ToolMouseEvent, ToolRegistry
-from .edit_text import EditTextTool, _settings
+from .edit_text import _GEOM, EditTextTool, _settings
 
 MIN_BOX = 12.0       # pt; smaller drags count as a click
 CLICK_MARGIN = 36.0  # pt kept free at the page edges for click-placed boxes
@@ -63,7 +66,7 @@ class AddTextTool(EditTextTool):
         super().__init__(parent)
         self._press: tuple[int, QPointF] | None = None
         self._drag_item: QGraphicsRectItem | None = None
-        self._anchor: tuple[int, float, float] | None = None  # click point of a click-placed box
+        self._click_anchor: tuple[int, float, float] | None = None  # click point of a click-placed box
         try:
             align = str(_settings().value(ALIGN_KEY, "left"))
         except Exception:
@@ -79,19 +82,32 @@ class AddTextTool(EditTextTool):
         except Exception:
             return core_fonts.SpanStyle("Helvetica", 11.0)
 
-    def _block_pitch(self) -> float:
-        return _metrics(self.ctx.pdf.doc, self.block.page, self.block.style)[1]
+    # -- the new text's look (hooks of the editor) ------------------------------
+    def _wants_background(self) -> bool:
+        return False  # nothing to hide: the page stays visible under new text
 
-    def _editor_background(self):
-        from PySide6.QtGui import QColor
+    def _layout_of(self, piece, align, spacing):
+        return te.LayoutInfo(self.align, float(piece.block.bbox.width))
 
-        return QColor(0, 0, 0, 0)  # nothing to hide: keep the page visible under new text
+    def _look_for(self, piece, align=None, spacing=None):
+        from .edit_text import _Look, _local
 
-    def _layout_for(self, block):
-        return te.LayoutInfo(self.align, float(block.bbox.width))
+        b = piece.block
+        style = self.current_style() or b.style
+        u, v = self._axes
+        left, _t = _local(self._anchor, u, v, b.bbox.x0, b.bbox.y0)
+        right, _t = _local(self._anchor, u, v, b.bbox.x1, b.bbox.y0)
+        first = _local(self._anchor, u, v, *b.lines[0].origin)
+        _asc, pitch = _metrics(self.ctx.pdf.doc, b.page, style)
+        return _Look(style=style, pitch=pitch, align=self.align, left=left, right=right, indent=0.0, first=first)
 
-    def _wrap_width(self) -> float:
-        return self.block.bbox.width
+    def current_style(self):
+        b = self.block
+        if b is None:
+            return None
+        changes = self._changes_of(self._qblock())
+        return replace(b.style, **{k: (tuple(v) if k == "color" else v) for k, v in changes.items()}) \
+            if changes else b.style
 
     # -- alignment ------------------------------------------------------------
     def set_align(self, align: str) -> None:
@@ -104,17 +120,26 @@ class AddTextTool(EditTextTool):
             _settings().setValue(ALIGN_KEY, align)
         except Exception:
             pass
-        if self.block is not None and self.editor is not None:
-            if self._anchor is not None and self._anchor[0] == self.block.page:
-                box = self._click_box(*self._anchor, self.block.style)
-                self.block.bbox = box
-                for ln in self.block.lines:
+        if self.story is not None and self.editor is not None:
+            piece = self.story.pieces[0]
+            if self._click_anchor is not None and self._click_anchor[0] == self.story.page:
+                box = self._click_box(*self._click_anchor, piece.block.style)
+                piece.block.bbox = box
+                for ln in piece.block.lines:
                     ln.bbox = pymupdf.Rect(box)
                     ln.origin = (box.x0, ln.origin[1])
-                if self._frame is not None:
-                    self._frame.setRect(QRectF(box.x0, box.y0, box.width, box.height))
-            self._layout = self._layout_for(self.block)
-            self._apply_editor_style()
+                self._anchor = piece.block.lines[0].origin
+            look = self._look_for(piece)
+            self._looks[0] = look
+            self._box = (look.left, look.right, self._box[2])
+            q = self.editor.document().begin()
+            while q.isValid():
+                fmt = q.blockFormat()
+                fmt.setProperty(_GEOM, [look.left, look.right, 0.0, look.pitch, self._geom(q)[4]])
+                self._set_block_format(q, fmt)
+                q = q.next()
+            self._apply_px()
+            self._reposition()
             self.editor.setFocus()
         if self._panel is not None:
             self._panel.refresh()
@@ -139,6 +164,9 @@ class AddTextTool(EditTextTool):
 
     # -- placing ----------------------------------------------------------------
     def block_at(self, page, pos):  # never pick up existing text
+        return None
+
+    def story_at(self, page, pos):
         return None
 
     def mouse_move(self, ev: ToolMouseEvent) -> None:
@@ -182,21 +210,37 @@ class AddTextTool(EditTextTool):
             box = self._click_box(page, start.x(), start.y(), style)
             anchor = (page, start.x(), start.y())
         self.start_new(page, box, style)
-        self._anchor = anchor
+        self._click_anchor = anchor
 
     def start_new(self, page: int, box: pymupdf.Rect, style: core_fonts.SpanStyle) -> None:
         asc, _lh = _metrics(self.ctx.pdf.doc, page, style)
         line = te.TextLine(text="", bbox=pymupdf.Rect(box), origin=(box.x0, box.y0 + asc), style=style)
-        self._anchor = None
-        self.start_edit(te.TextBlock(page=page, bbox=pymupdf.Rect(box), lines=[line], style=style))
+        block = te.TextBlock(page=page, bbox=pymupdf.Rect(box), lines=[line], style=style)
+        self._click_anchor = None
+        piece = flow.Piece(block=block, text="", layout=te.LayoutInfo(self.align, float(box.width)))
+        story = flow.Story(page=page, kind="new", pieces=[piece], lo=box.x0, hi=box.x1, rect=pymupdf.Rect(box),
+                           role="new")
+        self.start_story(story)
 
-    def _write(self, block: te.TextBlock, text: str, style: core_fonts.SpanStyle | None) -> None:
-        final = style or block.style
-        AddTextTool._session_style = final
-        core_insert.add_text_box(self.ctx.pdf, block.page, block.bbox, text, final, align=self.align)
+    def _write_story(self, story, edits, session) -> bool:
+        """The typed text becomes a text box in the PDF (one undo step)."""
+        text = "\n".join(e.text for e in edits)
+        if not text.strip():
+            return False
+        piece = story.pieces[0]
+        formats, offset = [], 0
+        for e in edits:
+            for a, b, ch in e.formats or ():
+                formats.append((a + offset, b + offset, ch))
+            offset += len(e.text) + 1
+        style = edits[0].style or piece.block.style
+        AddTextTool._session_style = style
+        core_insert.add_text_box(self.ctx.pdf, story.page, piece.block.bbox, text, style, align=self.align,
+                                 formats=formats or None)
+        return True
 
     def _teardown(self) -> None:
-        self._anchor = None
+        self._click_anchor = None
         super()._teardown()
 
     def deactivate(self) -> None:

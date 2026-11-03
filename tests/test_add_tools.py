@@ -114,7 +114,7 @@ def test_alignment_buttons_center_and_right(ws, qapp):
     assert tool.align == "center"
     tool.mouse_press(ev(ws.view, 0, 300, 500))                       # click: centred on the click
     tool.mouse_release(ev(ws.view, 0, 300, 500, buttons=Qt.MouseButton.NoButton))
-    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignHCenter
+    assert tool.editor.document().begin().blockFormat().alignment() & Qt.AlignmentFlag.AlignHCenter
     tool.editor.setPlainText("Midt på")
     _ctrl_enter(tool.editor)
     new = next(b for b in te.text_blocks(ws.pdf.doc, 0) if b.text == "Midt på")
@@ -137,7 +137,7 @@ def test_alignment_change_while_typing_updates_the_editor(ws, qapp):
     assert abs(tool.block.bbox.x0 - 300) < 0.01
     tool.set_align("right")                                           # point text: now ends at the click
     assert tool.editor is not None and abs(tool.block.bbox.x1 - 300) < 0.01
-    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignRight
+    assert tool.editor.document().begin().blockFormat().alignment() & Qt.AlignmentFlag.AlignRight
     tool.commit()
     new = next(b for b in te.text_blocks(ws.pdf.doc, 0) if b.text == "Skifter justering")
     assert abs(new.bbox.x1 - 300) < 1.0

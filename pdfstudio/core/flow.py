@@ -356,7 +356,10 @@ def _analyze_page(doc, page: int) -> _PageInfo:
             r = raw_rect(b)
             inside = [o for o in obstacles if (o & r).get_area() > 0.5 * max(r.get_area(), 1e-6)]
             if inside:
-                role = "box" if any(o.get_area() > 4 * r.get_area() for o in inside) else "figure"
+                # text in a frame of its own (a callout box) or on an image / chart
+                boxed = any(o.x0 <= r.x0 + 1 and o.y0 <= r.y0 + 1 and o.x1 >= r.x1 - 1 and o.y1 >= r.y1 - 1
+                            and o.get_area() > 1.05 * r.get_area() for o in inside)
+                role = "box" if boxed else "figure"
             else:
                 # running headers / footers: in the top or bottom 13 % of the
                 # page along the line direction (rotated pages too)
@@ -514,7 +517,8 @@ def story_at(doc, page: int, point) -> tuple[Story, int] | None:
         return None
     x, y = float(point[0]), float(point[1])
     best = None
-    for s in page_stories(doc, page):
+    stories = page_stories(doc, page)
+    for s in stories:
         for i, p in enumerate(s.pieces):
             r = pymupdf.Rect(p.block.bbox)
             if p.bullet is not None:
@@ -524,6 +528,16 @@ def story_at(doc, page: int, point) -> tuple[Story, int] | None:
                 area = r.width * r.height
                 if best is None or area < best[2]:
                     best = (s, i, area)
+    if best is None:
+        # between two paragraphs of a column: the nearest one (as in Word)
+        for s in stories:
+            if s.kind != "flow" or not (s.rect.x0 - 2 <= x <= s.rect.x1 + 2 and s.rect.y0 - 2 <= y <= s.rect.y1 + 2):
+                continue
+            for i, p in enumerate(s.pieces):
+                r = p.block.bbox
+                dist = max(r.y0 - y, y - r.y1, 0.0)
+                if best is None or dist < best[2]:
+                    best = (s, i, dist)
     return (best[0], best[1]) if best else None
 
 
@@ -535,8 +549,12 @@ def _compatible(doc, a: int, b: int) -> bool:
     return pa.rotation == pb.rotation and pa.mediabox == pb.mediabox and pa.rect == pb.rect
 
 
-def _matching(story: Story, other: list[Story]) -> Story | None:
+def _matching(story: Story, other: list[Story], columns: int | None = None) -> Story | None:
+    """The same column on another page (same width and place; on a page
+    with as many columns, when ``columns`` is given)."""
     w = story.hi - story.lo
+    if columns is not None and sum(1 for s in other if s.kind == "flow" and s.dir == story.dir) != columns:
+        return None
     for s in other:
         if s.kind != "flow" or s.dir != story.dir:
             continue
@@ -565,6 +583,7 @@ def _type_area(doc, page: int, story: Story, info: _PageInfo) -> _Area:
     own_bottom = max(_band(p.block.lines[-1], n)[1] for p in story.pieces)
     tops.append(min(own))
     last_page = doc.page_count - 1
+    columns = sum(1 for s in info.stories if s.kind == "flow" and s.dir == story.dir)
     for q in range(max(0, page - 3), min(doc.page_count, page + 4)):
         if q == page or not _compatible(doc, page, q):
             continue
@@ -572,18 +591,20 @@ def _type_area(doc, page: int, story: Story, info: _PageInfo) -> _Area:
             other = _analyze(doc, q)
         except Exception:
             continue
-        m = _matching(story, other.stories)
+        m = _matching(story, other.stories, columns)
         if m is None:
             continue
         tops.append(min(_band(p.block.lines[0], n)[0] for p in m.pieces))
         if q != last_page:
             bottoms.append(max(_band(p.block.lines[-1], n)[1] for p in m.pieces))
-    if page != last_page:
-        bottoms.append(own_bottom)
     top = statistics.median(tops)
     if bottoms:
-        bottom = max(bottoms)
+        # pages the text ran over from are full: their lowest line is the
+        # bottom of the type area
+        bottom = max(bottoms + ([own_bottom] if page != last_page else []))
     else:
+        # nothing to measure it on (one page, or none like it): margins as
+        # at the top, as a word processor has them
         margin = max(36.0, top - pmin)
         bottom = pmax - margin
     bottom = max(bottom, own_bottom)
@@ -920,7 +941,8 @@ class _Chain:
         q = s.page + 1
         if q >= self.doc.page_count or not _compatible(self.doc, s.page, q):
             return None
-        return _matching(s, self.info(q).stories)
+        columns = sum(1 for x in self.info(s.page).stories if x.kind == "flow" and x.dir == s.dir)
+        return _matching(s, self.info(q).stories, columns)
 
     def continues(self, m: Story) -> bool:
         """Does ``m`` (next page) begin with the rest of our last paragraph?"""
@@ -1285,12 +1307,37 @@ def _apply_single(pdf, story: Story, edits: list[Edit], merge, result: FlowResul
         return result
     full = te.restore_soft_breaks(piece.text, piece.soft, text)
     with pdf.edit(te._label("core.undo.edit_text", "Redigér tekst"), CONTENT, (story.page,), merge=merge):
+        # (text below it in the same place moves along; what cannot move is reported as overflow)
         res = te.replace_block_text(pdf, piece.block, full, e0.style, formats=e0.formats, align=e0.align,
-                                    line_spacing=e0.line_spacing, reflow=False)
+                                    line_spacing=e0.line_spacing)
     result.substitutions = list(res.substitutions)
     result.overflow = res.overflow
     result.pages = (story.page,)
     return result
 
 
-__all__ = ["Edit", "FlowResult", "Piece", "Story", "apply_story", "page_stories", "story_at"]
+def render_without(doc, story: Story, zoom: float, *, clip=None, alpha: bool = False) -> pymupdf.Pixmap:
+    """The story's page rendered without the story's text (and its list
+    bullets) – images, drawings, colour and other text stay: the backdrop
+    an editor shows its live text on (``clip``: display rect, points)."""
+    src = doc[story.page]
+    tmp = pymupdf.open()
+    try:
+        tmp.insert_pdf(doc, from_page=story.page, to_page=story.page, annots=True)
+        page = tmp[0]
+        lines = [ln for p in story.pieces for ln in p.block.lines]
+        lines += [ln for p in story.pieces if p.bullet is not None for ln in p.bullet.lines]
+        if lines:
+            te._remove_lines(page, lines)
+        mat = pymupdf.Matrix(zoom, zoom)
+        kw = {"matrix": mat, "alpha": alpha, "annots": True}
+        if clip is not None:
+            kw["clip"] = pymupdf.Rect(clip)
+        pix = page.get_pixmap(**kw)
+    finally:
+        tmp.close()
+    del src
+    return pix
+
+
+__all__ = ["Edit", "FlowResult", "Piece", "Story", "apply_story", "page_stories", "render_without", "story_at"]

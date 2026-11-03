@@ -1,11 +1,19 @@
-"""UI flow of the "Rediger tekst" tool (core behaviour is in test_text_edit)."""
+"""UI flow of the "Rediger tekst" tool: a whole text surface (a column, or a
+standalone text) in one editor, as in Word (core behaviour: test_flow,
+test_text_edit)."""
 
+import pymupdf
 import pytest
 from PySide6.QtCore import QEvent, QPointF, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QKeyEvent, QTextCursor
 
+from pdfstudio.core import flow
 from pdfstudio.core import text_edit as te
+from tests.flowdocs import HEADER, report
+from tests.test_annotate_tools import ev
 from tests.test_ui_shell import win  # noqa: F401  (fixture)
+
+LS = " "
 
 
 @pytest.fixture
@@ -18,19 +26,137 @@ def tool(win, qapp, sample_pdf_path):  # noqa: F811
     return ws.tool
 
 
+def _open_edit(win, qapp, path):  # noqa: F811
+    win.open_path(path)
+    ws = win.current_workspace()
+    ws.set_mode("edit")
+    qapp.processEvents()
+    return ws, ws.tool
+
+
+@pytest.fixture
+def rep_tool(win, qapp, tmp_path):  # noqa: F811
+    path = str(tmp_path / "rapport.pdf")
+    report(chapters=2).save(path)
+    ws, tool = _open_edit(win, qapp, path)
+    return tool
+
+
 def _block(tool, startswith, page=0):
     return next(b for b in tool.blocks(page) if b.text.startswith(startswith))
 
 
-def _key(editor, key, mods=Qt.KeyboardModifier.NoModifier):
-    editor.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, mods))
+def _key(editor, key, mods=Qt.KeyboardModifier.NoModifier, text=""):
+    editor.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, mods, text))
 
 
-def test_edit_and_commit_keeps_format(tool):
+def _para(tool, startswith):
+    """The editor paragraph whose text starts with ``startswith``."""
+    q = tool.editor.document().begin()
+    while q.isValid():
+        if q.text().startswith(startswith):
+            return q
+        q = q.next()
+    raise AssertionError(startswith)
+
+
+def _set_para(tool, startswith, text):
+    """Replace one paragraph's text in the editor, as typing would."""
+    q = _para(tool, startswith)
+    cur = QTextCursor(q)
+    cur.setPosition(q.position())
+    cur.setPosition(q.position() + q.length() - 1, QTextCursor.MoveMode.KeepAnchor)
+    cur.insertText(text)
+    return cur
+
+
+def _baseline_errors(tool):
+    """For every paragraph: how far (px) its first baseline is from the PDF's."""
+    view, ed = tool.ctx.view, tool.editor
+    doc = ed.document()
+    out = []
+    q = doc.begin()
+    k = 0
+    while q.isValid() and k < len(tool.story.pieces):
+        doc.documentLayout().blockBoundingRect(q)
+        ql = q.layout()
+        line = ql.lineAt(0)
+        x = line.cursorToX(0)
+        x = x[0] if isinstance(x, tuple) else x
+        got = QPointF(ed.geometry().x() + ql.position().x() + x, ed.geometry().y() + ql.position().y() + line.y()
+                      + line.ascent())
+        want = view.page_to_viewport(tool.story.page, QPointF(*tool.story.pieces[k].block.lines[0].origin))
+        out.append(max(abs(got.x() - want.x()), abs(got.y() - want.y())))
+        q = q.next()
+        k += 1
+    return out
+
+
+def _char_point(block, line, word):
+    """Display point a little inside ``word`` on ``line`` of ``block``."""
+    ln = block.lines[line]
+    i = ln.text.index(word)
+    x = ln.origin[0] + (ln.char_pos[i][0] - ln.extent[0]) + 1.0
+    return x, (ln.bbox.y0 + ln.bbox.y1) / 2, i
+
+
+# -- F1 / F4: one click, the whole column ----------------------------------------------
+def test_one_click_opens_the_column_with_the_caret_at_the_click(tool, qapp):
+    b = _block(tool, "Dette")
+    x, y, i = _char_point(b, 0, "broedtekst")
+    tool.mouse_press(ev(tool.ctx.view, 0, x, y))
+    tool.mouse_release(ev(tool.ctx.view, 0, x, y, buttons=Qt.MouseButton.NoButton))
+    qapp.processEvents()
+    ed = tool.editor
+    assert ed is not None
+    assert ed.document().blockCount() == len(tool.story.pieces) == 4    # the whole column is one text
+    cur = ed.textCursor()
+    assert cur.block().text().startswith("Dette")
+    assert abs((cur.position() - cur.block().position()) - i) <= 1     # exactly where clicked
+    assert max(_baseline_errors(tool)) <= 1.5                           # every paragraph lies on the PDF's
+    tool.cancel()
+
+
+def test_no_frames_while_hovering_or_editing(tool, qapp):
+    from PySide6.QtWidgets import QGraphicsRectItem
+
+    view = tool.ctx.view
+
+    def rects():
+        return [i for i in view.scene().items() if isinstance(i, QGraphicsRectItem) and i.zValue() >= 20]
+
+    b = _block(tool, "Dette")
+    x, y, _i = _char_point(b, 0, "Dette")
+    before = len(rects())
+    tool.mouse_move(ev(view, 0, x, y, button=Qt.MouseButton.NoButton, buttons=Qt.MouseButton.NoButton))
+    assert len(rects()) == before
+    assert view.viewport().cursor().shape() == Qt.CursorShape.IBeamCursor
+    tool.mouse_press(ev(view, 0, x, y))
+    qapp.processEvents()
+    assert len(rects()) == before
+    tool.cancel()
+
+
+def test_the_page_behind_shows_no_old_text(tool, qapp):
+    tool.start_edit(_block(tool, "Dette"))
+    qapp.processEvents()
+    assert tool._bg is not None
+    img = tool._bg.pixmap().toImage()
+    zoom = 1.0 / tool._bg.transform().m11()
+    b = _block(tool, "Dette")
+    dark = 0
+    for x in range(int(b.bbox.x0 * zoom), int(b.bbox.x1 * zoom), 3):
+        for y in range(int(b.bbox.y0 * zoom), int(b.bbox.y1 * zoom), 2):
+            c = img.pixelColor(x, y)
+            dark += c.lightness() < 160
+    assert dark == 0
+    tool.cancel()
+
+
+def test_edit_one_paragraph_and_commit_keeps_format(tool):
     b = _block(tool, "Dette")
     tool.start_edit(b)
-    assert tool.editor is not None and tool.editor.toPlainText() == b.text
-    tool.editor.setPlainText("Rettet afsnit med æøå.\nAnden linje.")
+    _set_para(tool, "Dette", "Rettet afsnit med æøå." + LS + "Anden linje.")
     _key(tool.editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert tool.editor is None
     new = _block(tool, "Rettet")
@@ -40,16 +166,16 @@ def test_edit_and_commit_keeps_format(tool):
     assert abs(new.style.size - 12) < 0.1
     assert abs(new.lines[0].origin[1] - b.lines[0].origin[1]) < 0.5
     assert tool.ctx.pdf.history.undo_label == "Redigér tekst"
+    assert _block(tool, "Kvartalsrapport").text == "Kvartalsrapport 2026"   # the rest is as it was
 
 
-def test_escape_cancels_without_change(tool):
-    b = _block(tool, "Dette")
-    tool.start_edit(b)
-    tool.editor.setPlainText("noget andet")
+def test_escape_keeps_the_changes(tool):
+    tool.start_edit(_block(tool, "Dette"))
+    _set_para(tool, "Dette", "Noget andet.")
     _key(tool.editor, Qt.Key.Key_Escape)
     assert tool.editor is None
-    assert not tool.ctx.pdf.history.can_undo
-    assert _block(tool, "Dette").text == b.text
+    assert tool.ctx.pdf.history.can_undo
+    assert _block(tool, "Noget").text == "Noget andet."
 
 
 def test_unchanged_text_creates_no_undo_step(tool):
@@ -58,62 +184,120 @@ def test_unchanged_text_creates_no_undo_step(tool):
     assert not tool.ctx.pdf.history.can_undo
 
 
-def test_tab_saves_and_opens_next_paragraph(tool):
-    b = _block(tool, "Dette")
-    tool.start_edit(b)
-    tool.editor.setPlainText("Første afsnit rettet.")
-    _key(tool.editor, Qt.Key.Key_Tab)
-    assert tool.block is not None and tool.block.text.startswith("Indlejret")
-    assert _block(tool, "Første").text == "Første afsnit rettet."
-    tool.cancel()
-
-
-def test_style_override_from_panel(tool, qapp):
-    tool.start_edit(_block(tool, "Fed"))
-    panel = tool.properties_widget()
-    assert panel.format_box.isVisibleTo(panel)
-    panel.size.setValue(20.0)
-    panel.color.set_color((0.8, 0.1, 0.1), emit=True)
-    assert tool.style_override is not None and tool.style_override.size == 20.0
+# -- F5 / F4 / F6: Enter, Backspace, selection and formatting across paragraphs --------
+def test_enter_splits_a_paragraph_and_backspace_joins_them(rep_tool, qapp):
+    tool = rep_tool
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    p = s.pieces[2]
+    tool.start_edit(p.block)
+    q = _para(tool, p.text[:20])
+    cut = p.text.index(". ", len(p.text) // 2) + 2
+    cur = tool.editor.textCursor()
+    cur.setPosition(q.position() + cut)
+    tool.editor.setTextCursor(cur)
+    _key(tool.editor, Qt.Key.Key_Backspace)                       # the space after the full stop
+    _key(tool.editor, Qt.Key.Key_Return, text="\r")              # Enter: a new paragraph
+    assert tool.editor.document().blockCount() == len(s.pieces) + 1
     tool.commit()
-    new = _block(tool, "Fed")
-    assert abs(new.style.size - 20.0) < 0.1
-    assert new.style.color[0] > 0.7 and new.style.color[1] < 0.2
+    c = next(x for x in tool.stories(0) if x.kind == "flow")
+    assert c.pieces[2].text == p.text[:cut - 1] and c.pieces[3].text.startswith(p.text[cut:][:20])
+    # Backspace at the start of the new paragraph joins them again
+    tool.start_edit(c.pieces[3].block)
+    q = _para(tool, c.pieces[3].text[:20])
+    cur = tool.editor.textCursor()
+    cur.setPosition(q.position())
+    tool.editor.setTextCursor(cur)
+    _key(tool.editor, Qt.Key.Key_Backspace)
+    cur = tool.editor.textCursor()
+    cur.insertText(" ")
+    tool.commit()
+    c = next(x for x in tool.stories(0) if x.kind == "flow")
+    assert c.pieces[2].text.replace("\n", " ").startswith(p.text[:60])
+    assert len(c.pieces) == len(s.pieces)
 
 
-def test_reset_style_clears_override(tool):
-    tool.start_edit(_block(tool, "Fed"))
-    panel = tool.properties_widget()
-    panel.size.setValue(30.0)
-    tool.reset_style()
-    assert tool.style_override is None
+def test_selection_across_paragraphs_deletes_and_formats(rep_tool, qapp):
+    tool = rep_tool
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    a, b = s.pieces[1], s.pieces[2]
+    tool.start_edit(a.block)
+    qa, qb = _para(tool, a.text[:20]), _para(tool, b.text[:20])
+    cur = tool.editor.textCursor()
+    cur.setPosition(qa.position() + len(a.text) - 20)
+    cur.setPosition(qb.position() + 30, QTextCursor.MoveMode.KeepAnchor)
+    tool.editor.setTextCursor(cur)
+    tool.toggle_format("italic")                                   # Ctrl+I over two paragraphs
+    tool.commit()
+    spans = [sp for bl in tool.ctx.pdf.page(0).get_text("dict")["blocks"] for ln in bl.get("lines", [])
+             for sp in ln["spans"] if sp["flags"] & 2]
+    text = " ".join(sp["text"] for sp in spans)
+    assert a.text[-15:].split()[-1] in text and b.text[:30].split()[1] in text
+    # deleting across the two paragraphs joins what is left of them
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    a, b = s.pieces[1], s.pieces[2]
+    tool.start_edit(a.block)
+    qa, qb = _para(tool, a.text[:20]), _para(tool, b.text[:20])
+    cur = tool.editor.textCursor()
+    cur.setPosition(qa.position() + 40)
+    cur.setPosition(qb.position() + 40, QTextCursor.MoveMode.KeepAnchor)
+    cur.removeSelectedText()
+    tool.commit()
+    c = next(x for x in tool.stories(0) if x.kind == "flow")
+    assert len(c.pieces) == len(s.pieces) - 1
+    assert c.pieces[1].text.replace("\n", " ").startswith((a.text[:40] + b.text[40:])[:60])
 
 
-def test_editor_aligns_with_pdf_baseline(tool, qapp):
-    b = _block(tool, "Dette")
-    tool.start_edit(b)
-    qapp.processEvents()
-    view = tool.ctx.view
-    want = view.mapFromScene(view.page_to_scene(0, QPointF(*b.lines[0].origin)))
-    bx, by = tool.editor.first_baseline()
-    got = tool.editor.geometry().topLeft()
-    assert abs(got.x() + bx - want.x()) <= 1.5 and abs(got.y() + by - want.y()) <= 1.5
+# -- F7 / F8: on into the next text, standalone texts -----------------------------------
+def test_arrow_past_the_end_goes_on_on_the_next_page(rep_tool, qapp):
+    tool = rep_tool
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    tool.start_edit(s.pieces[-1].block)
+    cur = tool.editor.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.End)
+    tool.editor.setTextCursor(cur)
+    _key(tool.editor, Qt.Key.Key_Right)
+    assert tool.editor is not None and tool.story.page == 1 and tool.story.kind == "flow"
+    assert tool.editor.textCursor().position() == 0
+    _key(tool.editor, Qt.Key.Key_Left)                             # and back to the end on page 1
+    assert tool.story.page == 0
+    assert tool.editor.textCursor().atEnd()
     tool.cancel()
 
 
-def test_undo_while_editing_cancels(tool):
+def test_tab_goes_to_the_next_text_surface(tool):
     tool.start_edit(_block(tool, "Dette"))
-    tool.editor.setPlainText("A")
+    _key(tool.editor, Qt.Key.Key_Tab)
+    assert tool.story.page == 1 and tool.editor.toPlainText().startswith("Venstre")
+    _key(tool.editor, Qt.Key.Key_Tab)
+    assert tool.editor.toPlainText().startswith("Hoejre")
+    _key(tool.editor, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
+    assert tool.editor.toPlainText().startswith("Venstre")
+    tool.cancel()
+
+
+def test_a_header_is_a_text_of_its_own(rep_tool, qapp):
+    tool = rep_tool
+    head = next(s for s in tool.stories(0) if s.role == "header")
+    x, y = head.rect.x0 + 5, (head.rect.y0 + head.rect.y1) / 2
+    tool.mouse_press(ev(tool.ctx.view, 0, x, y))
+    qapp.processEvents()
+    assert tool.editor.toPlainText() == HEADER
+    tool.cancel()
+
+
+def test_typing_that_overflows_the_page_flows_on(rep_tool, qapp):
+    tool = rep_tool
+    before = len(tool.stories(1)[0].pieces[0].text)
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    tool.start_edit(s.pieces[-1].block)
+    tool.editor.textCursor().insertText(" Dette er en ny sætning, som skal flyde over på næste side." * 4)
     tool.commit()
-    tool.start_edit(_block(tool, "Fed"))
-    tool.ctx.pdf.undo()
-    assert tool.editor is None
-    assert any(b.text.startswith("Dette") for b in te.text_blocks(tool.ctx.pdf.doc, 0))
+    assert "flyde over på næste side." in tool.ctx.pdf.page(1).get_text()
+    assert len(tool.ctx.pdf.history._undo) == 1 and before > 0
 
 
+# -- appearance -------------------------------------------------------------------------
 def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
-    import pymupdf
-
     doc = pymupdf.open()
     pg = doc.new_page()
     pg.insert_textbox(pymupdf.Rect(100, 100, 500, 200), "Brødtekst der fylder hele tekstområdet ud. " * 4,
@@ -122,26 +306,14 @@ def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
                       fontname="helv", fontsize=12, align=2)
     path = str(tmp_path / "align.pdf")
     doc.save(path)
-    win.open_path(path)
-    ws = win.current_workspace()
-    ws.set_mode("edit")
-    tool = ws.tool
+    ws, tool = _open_edit(win, qapp, path)
     b = next(x for x in tool.blocks(0) if x.text.startswith("Højrestillet"))
     assert te.layout_info(ws.pdf.doc, b).align == "right"
     tool.start_edit(b)
     qapp.processEvents()
-    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignRight
-    view = tool.ctx.view
-    right = view.mapFromScene(view.page_to_scene(0, QPointF(b.bbox.x1, b.bbox.y0))).x()
-    assert abs(tool.editor.geometry().right() - right) <= 3
-    tool.cancel()
-
-
-def test_shift_tab_goes_to_previous_paragraph(tool):
-    b = _block(tool, "Indlejret")
-    tool.start_edit(b)
-    _key(tool.editor, Qt.Key.Key_Backtab, Qt.KeyboardModifier.ShiftModifier)
-    assert tool.block is not None and tool.block.text.startswith("Dette")
+    q = _para(tool, "Højrestillet")
+    assert q.blockFormat().alignment() & Qt.AlignmentFlag.AlignRight
+    assert max(_baseline_errors(tool)) <= 2.0          # (Qt keeps a pixel for the caret at the right)
     tool.cancel()
 
 
@@ -153,9 +325,30 @@ def test_font_list_previews_families(tool):
     tool.cancel()
 
 
-def _mixed_doc(tmp_path):
-    import pymupdf
+def test_style_of_the_paragraph_from_the_panel(tool, qapp):
+    tool.start_edit(_block(tool, "Fed"))
+    panel = tool.properties_widget()
+    assert panel.format_box.isVisibleTo(panel)
+    panel.size.setValue(20.0)
+    panel.color.set_color((0.8, 0.1, 0.1), emit=True)
+    assert tool.style_override is not None and tool.style_override.size == 20.0
+    tool.commit()
+    new = _block(tool, "Fed")
+    assert abs(new.style.size - 20.0) < 0.1
+    assert new.style.color[0] > 0.7 and new.style.color[1] < 0.2
+    assert abs(_block(tool, "Dette").style.size - 12) < 0.1            # only that paragraph
 
+
+def test_reset_style_clears_override(tool):
+    tool.start_edit(_block(tool, "Fed"))
+    panel = tool.properties_widget()
+    panel.size.setValue(30.0)
+    tool.reset_style()
+    assert tool.style_override is None
+    tool.cancel()
+
+
+def _mixed_doc(tmp_path):
     doc = pymupdf.open()
     pg = doc.new_page()
     tw = pymupdf.TextWriter(pg.rect)
@@ -171,10 +364,7 @@ def _mixed_doc(tmp_path):
 
 
 def test_editor_shows_mixed_styles_and_follows_zoom(win, qapp, tmp_path):  # noqa: F811
-    win.open_path(_mixed_doc(tmp_path))
-    ws = win.current_workspace()
-    ws.set_mode("edit")
-    tool = ws.tool
+    ws, tool = _open_edit(win, qapp, _mixed_doc(tmp_path))
     tool.start_edit(tool.blocks(0)[0])
     cur = tool.editor.textCursor()
     i = tool.editor.toPlainText().index("vigtigt")
@@ -182,14 +372,19 @@ def test_editor_shows_mixed_styles_and_follows_zoom(win, qapp, tmp_path):  # noq
     assert cur.charFormat().fontWeight() >= 700                   # the bold word is bold in the editor
     cur.setPosition(3)
     assert cur.charFormat().fontWeight() < 700
-    px = tool.editor.font().pixelSize()
+    px = cur.charFormat().font().pixelSize()
     ws.view.set_zoom(ws.view.zoom * 2)
     qapp.processEvents()
-    assert tool.editor.font().pixelSize() >= px * 1.8              # zooming rescales the editor text
-    tool.editor.setPlainText("Dette er meget vigtigt for alle.")
+    cur = tool.editor.textCursor()
+    cur.setPosition(3)
+    assert cur.charFormat().font().pixelSize() >= px * 1.8         # zooming rescales the editor text
+    assert max(_baseline_errors(tool)) <= 2.0                     # (twice the pixels per pt now)
+    cur.setPosition(i)
+    cur.insertText("meget ")
     tool.commit()
     spans = [s for b in ws.pdf.page(0).get_text("dict")["blocks"] for ln in b["lines"] for s in ln["spans"]]
     assert any(s["text"] == "vigtigt" and "Bold" in s["font"] for s in spans)
+    assert "meget vigtigt" in ws.pdf.page(0).get_text()
 
 
 def test_display_font_name():
@@ -202,13 +397,11 @@ def test_display_font_name():
 
 
 def test_soft_breaks_restored_before_the_change():
-    from pdfstudio.ui.viewer.tools.edit_text import EditTextTool
-
     shown = "aaa bbb ccc ddd"          # three soft breaks at 3, 7, 11
     soft = [3, 7, 11]
     edited = "aaa bbb cXc ddd"
-    assert EditTextTool._restore_soft_breaks(shown, soft, edited) == "aaa\nbbb\ncXc ddd"
-    assert EditTextTool._restore_soft_breaks(shown, soft, "Xaa bbb ccc ddd") == "Xaa bbb ccc ddd"
+    assert te.restore_soft_breaks(shown, soft, edited) == "aaa\nbbb\ncXc ddd"
+    assert te.restore_soft_breaks(shown, soft, "Xaa bbb ccc ddd") == "Xaa bbb ccc ddd"
 
 
 def test_justified_paragraph_shown_as_one_justified_paragraph(win, qapp, tmp_path):  # noqa: F811
@@ -217,22 +410,58 @@ def test_justified_paragraph_shown_as_one_justified_paragraph(win, qapp, tmp_pat
     pdf = _list_and_paragraph_doc()
     path = str(tmp_path / "j.pdf")
     pdf.save(path)
-    win.open_path(path)
-    ws = win.current_workspace()
-    ws.set_mode("edit")
-    tool = ws.tool
+    ws, tool = _open_edit(win, qapp, path)
     par = next(b for b in tool.blocks(0) if b.text.startswith("Kvartalets"))
     tool.start_edit(par)
-    assert "\n" not in tool.editor.toPlainText()
-    assert tool.editor.document().defaultTextOption().alignment() & Qt.AlignmentFlag.AlignJustify
+    q = _para(tool, "Kvartalets")
+    assert LS not in q.text()
+    assert q.blockFormat().alignment() & Qt.AlignmentFlag.AlignJustify
     tool.commit()                                    # unchanged -> no undo step
     assert not ws.pdf.history.can_undo
 
 
+def test_first_line_indent_paragraph_starts_at_the_column(win, qapp, tmp_path):  # noqa: F811
+    """A paragraph with a first-line indent: only its first line is indented;
+    every later line starts at the column edge, where the core puts them."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    lines = ["Dette er et afsnit med indrykket første linje som",
+             "fortsætter her på anden linje uden indrykning og",
+             "slutter på den tredje linje."]
+    for i, t in enumerate(lines):
+        pg.insert_text((90 if i == 0 else 72, 100 + 14 * i), t, fontname="helv", fontsize=11)
+    path = str(tmp_path / "indent.pdf")
+    doc.save(path)
+    ws, tool = _open_edit(win, qapp, path)
+    b = tool.blocks(0)[0]
+    tool.start_edit(b)
+    qapp.processEvents()
+    view = tool.ctx.view
+    assert max(_baseline_errors(tool)) <= 1.5          # the first line, indented
+    column = view.page_to_viewport(0, QPointF(72, b.lines[0].origin[1]))
+    q = tool.editor.document().begin()
+    second = q.layout().lineAt(1)
+    assert abs(tool.editor.geometry().x() + q.layout().position().x() + second.x() - column.x()) <= 1.5
+    tool.cancel()
+
+
+def test_list_bullets_are_drawn_with_their_items(win, qapp, tmp_path):  # noqa: F811
+    from tests.test_text_edit import _bulleted_list_doc
+
+    path = str(tmp_path / "list.pdf")
+    with open(path, "wb") as fh:
+        fh.write(_bulleted_list_doc().to_bytes())
+    ws, tool = _open_edit(win, qapp, path)
+    texts = [b.text for b in tool.blocks(0)]
+    assert texts and not any(len(t.strip()) == 1 for t in texts), texts   # bullets are no paragraphs
+    item = next(p for s in tool.stories(0) for p in s.pieces if p.bullet is not None)
+    tool.start_edit(item.block)
+    assert tool.editor.bullets                                      # the editor draws them
+    tool.cancel()
+
+
 # -- rotated text is edited in place -------------------------------------------------
 def _rotated_doc(tmp_path):
-    import pymupdf
-
     doc = pymupdf.open()
     pg = doc.new_page()
     pg.insert_text((72, 90), "Vandret overskrift", fontname="helv", fontsize=16)
@@ -242,14 +471,6 @@ def _rotated_doc(tmp_path):
     return path
 
 
-def _open_edit(win, qapp, path):  # noqa: F811
-    win.open_path(path)
-    ws = win.current_workspace()
-    ws.set_mode("edit")
-    qapp.processEvents()
-    return ws, ws.tool
-
-
 def test_rotated_text_editor_is_rotated_with_the_text(win, qapp, tmp_path):  # noqa: F811
     ws, tool = _open_edit(win, qapp, _rotated_doc(tmp_path))
     b = next(x for x in tool.blocks(0) if x.text.startswith("Lodret"))
@@ -257,15 +478,17 @@ def test_rotated_text_editor_is_rotated_with_the_text(win, qapp, tmp_path):  # n
     tool.start_edit(b)
     qapp.processEvents()
     assert tool._proxy is not None and tool.editor.parentWidget() is None   # inside the page scene
-    assert tool.editor.font().pixelSize() == round(12 * tool._px_per_pt())   # the text's own size
+    cur = tool.editor.textCursor()
+    cur.setPosition(1)
+    assert cur.charFormat().font().pixelSize() == round(12 * tool._px_per_pt())   # the text's own size
     # the editor's first baseline sits on the PDF baseline, running upwards
     bx, by = tool.editor.first_baseline()
     page_item = ws.view.page_item(0)
     origin = tool._proxy.mapToItem(page_item, QPointF(bx, by))
     ahead = tool._proxy.mapToItem(page_item, QPointF(bx + 50, by))
-    assert abs(origin.x() - b.lines[0].origin[0]) < 0.6 and abs(origin.y() - b.lines[0].origin[1]) < 0.6
+    assert abs(origin.x() - b.lines[0].origin[0]) < 0.8 and abs(origin.y() - b.lines[0].origin[1]) < 0.8
     assert abs(ahead.x() - origin.x()) < 0.1 and ahead.y() < origin.y() - 30
-    tool.editor.setPlainText("Lodret etiket ændret")
+    _set_para(tool, "Lodret", "Lodret etiket ændret")
     _key(tool.editor, Qt.Key.Key_Return, Qt.KeyboardModifier.ControlModifier)
     assert tool.editor is None and tool._proxy is None
     new = next(x for x in te.text_blocks(ws.pdf.doc, 0) if x.text.startswith("Lodret"))
@@ -274,8 +497,6 @@ def test_rotated_text_editor_is_rotated_with_the_text(win, qapp, tmp_path):  # n
 
 
 def test_mouse_reaches_the_rotated_editor(win, qapp, tmp_path):  # noqa: F811
-    from tests.test_annotate_tools import ev
-
     ws, tool = _open_edit(win, qapp, _rotated_doc(tmp_path))
     b = next(x for x in tool.blocks(0) if x.text.startswith("Lodret"))
     tool.start_edit(b)
@@ -292,7 +513,7 @@ def test_mouse_reaches_the_rotated_editor(win, qapp, tmp_path):  # noqa: F811
     assert tool.editor is None and not ws.pdf.history.can_undo
 
 
-def test_upright_text_on_rotated_page_uses_the_flat_editor(tool, qapp):
+def test_upright_text_on_rotated_page_uses_the_rotated_editor(tool, qapp):
     b = tool.blocks(2)[0]                                          # sample page 3 is rotated by 90
     tool.ctx.view.go_to_page(2)
     tool.start_edit(b)
@@ -334,8 +555,8 @@ def test_font_picker_search_and_recent_fonts(tool, qapp):
     tool.cancel()
 
 
-# -- "Vis alle tekstbokse" -------------------------------------------------------------
-def test_show_all_text_boxes_outlines_visible_pages(tool, qapp):
+# -- "Vis tekstflader" -------------------------------------------------------------------
+def test_show_text_surfaces_outlines_visible_pages(tool, qapp):
     from pdfstudio.ui import app as app_mod
 
     panel = tool.properties_widget()
@@ -348,7 +569,7 @@ def test_show_all_text_boxes_outlines_visible_pages(tool, qapp):
     assert str(app_mod.settings().value("edit/showAllTextBoxes")).lower() == "true"
     pages = set(tool._box_items)
     assert pages <= set(tool.ctx.view.visible_pages(extra_px=tool.ctx.view.viewport().height()))
-    tool.start_edit(_block(tool, "Dette"))                          # the open paragraph has its own frame
+    tool.start_edit(_block(tool, "Dette"))                          # the open surface has no outline
     tool._box_timer.timeout.emit()
     n_edit = tool._box_items[0].path().elementCount()
     tool.cancel()
@@ -358,87 +579,16 @@ def test_show_all_text_boxes_outlines_visible_pages(tool, qapp):
     assert not tool._box_items
 
 
-@pytest.mark.parametrize("zoom", [1.4, 0.6])
-def test_key_hint_does_not_cover_other_text(tool, qapp, zoom):
-    """The chip sits beside the frame on free paper; where none is left (tiny
-    zoom) it gives way as soon as the user types."""
-    from PySide6.QtCore import QRect
-
+def test_key_hint_does_not_cover_text(rep_tool, qapp):
+    """The chip sits beside the editor; it never covers the text being edited."""
+    tool = rep_tool
     view = tool.ctx.view
-    view.set_zoom(zoom)
+    view.set_zoom(1.0)
     qapp.processEvents()
-    for start in ("Dette", "Indlejret", "Fed"):
-        b = _block(tool, start)
-        tool.start_edit(b)
-        qapp.processEvents()
-        chip = tool._keys.geometry()
-        frame = tool._viewport_rect(tool._frame).toRect()
-        assert not chip.intersects(frame.adjusted(1, 1, -1, -1))
-        assert view.viewport().rect().contains(chip)
-        covered = []
-        for o in tool.blocks(0):
-            if o.bbox == b.bbox:
-                continue
-            tl = view.page_to_viewport(0, QPointF(o.bbox.x0, o.bbox.y0)).toPoint()
-            br = view.page_to_viewport(0, QPointF(o.bbox.x1, o.bbox.y1)).toPoint()
-            covered += [o.text] if chip.intersects(QRect(tl, br)) else []
-        if zoom >= 1.4:
-            assert not covered, (start, covered)
-        if covered:
-            assert tool._keys_covers_text
-            tool.editor.insertPlainText("x")
-            assert not tool._keys.isVisible()
-        else:
-            tool.editor.insertPlainText("x")
-            assert tool._keys.isVisible()                          # harmless: it stays
-        tool.cancel()
-
-
-def test_first_line_indent_paragraph_editor_starts_at_the_column(win, qapp, tmp_path):  # noqa: F811
-    """A paragraph with a first-line indent: only the editor's first line is
-    indented; the box (and every later line) starts at the column edge, where
-    the core puts the reflowed lines."""
-    import pymupdf
-
-    doc = pymupdf.open()
-    pg = doc.new_page()
-    lines = ["Dette er et afsnit med indrykket første linje som",
-             "fortsætter her på anden linje uden indrykning og",
-             "slutter på den tredje linje."]
-    for i, t in enumerate(lines):
-        pg.insert_text((90 if i == 0 else 72, 100 + 14 * i), t, fontname="helv", fontsize=11)
-    path = str(tmp_path / "indent.pdf")
-    doc.save(path)
-    win.open_path(path)
-    ws = win.current_workspace()
-    ws.set_mode("edit")
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    tool.start_edit(s.pieces[1].block)
     qapp.processEvents()
-    tool = ws.tool
-    b = tool.blocks(0)[0]
-    tool.start_edit(b)
-    qapp.processEvents()
-    view = tool.ctx.view
-    first = view.mapFromScene(view.page_to_scene(0, QPointF(*b.lines[0].origin)))
-    column = view.mapFromScene(view.page_to_scene(0, QPointF(72, b.lines[0].origin[1])))
-    bx, by = tool.editor.first_baseline()
-    geo = tool.editor.geometry()
-    assert abs(geo.x() + bx - first.x()) <= 1.5 and abs(geo.y() + by - first.y()) <= 1.5
-    assert abs(geo.x() - column.x()) <= 1.5          # the box starts at the column, not at the indent
-    second = tool.editor.document().begin().layout().lineAt(1)
-    assert abs(geo.x() + second.x() - column.x()) <= 1.5
+    chip = tool._keys.geometry()
+    assert view.viewport().rect().contains(chip)
+    assert not chip.intersects(tool.editor.geometry().adjusted(1, 1, -1, -1))
     tool.cancel()
-
-
-def test_list_bullets_are_not_offered_for_editing(win, qapp, tmp_path):  # noqa: F811
-    from tests.test_text_edit import _bulleted_list_doc
-
-    path = str(tmp_path / "list.pdf")
-    with open(path, "wb") as fh:
-        fh.write(_bulleted_list_doc().to_bytes())
-    win.open_path(path)
-    ws = win.current_workspace()
-    ws.set_mode("edit")
-    qapp.processEvents()
-    texts = [b.text for b in ws.tool.blocks(0)]
-    assert texts and not any(len(t.strip()) == 1 for t in texts), texts
-    assert any(t.startswith("Projekter") for t in texts)

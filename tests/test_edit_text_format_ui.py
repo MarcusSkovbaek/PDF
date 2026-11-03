@@ -80,13 +80,24 @@ def test_inspector_without_selection_formats_the_paragraph(tool):
     assert tool.style_override is not None and tool.style_override.bold
 
 
+def _end_of(tool, startswith):
+    """Put the caret at the end of the editor paragraph starting so."""
+    q = tool.editor.document().begin()
+    while not q.text().startswith(startswith):
+        q = q.next()
+    cur = tool.editor.textCursor()
+    cur.setPosition(q.position() + q.length() - 1)
+    tool.editor.setTextCursor(cur)
+    return q
+
+
 def test_typing_after_ctrl_b_is_bold(tool):
     tool.start_edit(_block(tool, "Indlejret"))
-    tool.editor.moveCursor(QTextCursor.MoveOperation.End)
+    q = _end_of(tool, "Indlejret")
     _key(tool.editor, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
     tool.editor.insertPlainText(" NY")
-    [(a, b, changes)] = tool.collect_formats()
-    assert tool.editor.toPlainText()[a:b] == " NY" and changes == {"bold": True}
+    [(a, b, changes)] = tool.collect_formats()          # of the paragraph at the caret
+    assert q.text()[a:b] == " NY" and changes == {"bold": True}
 
 
 def test_paragraph_alignment_and_spacing(tool):
@@ -97,7 +108,8 @@ def test_paragraph_alignment_and_spacing(tool):
     tool.set_paragraph(align="center")
     assert panel.para_align["center"].isChecked()
     tool.set_paragraph(spacing=2.0)
-    assert tool.editor._line_px == pytest.approx(2.0 * 1.2 * 12 * tool._px_per_pt(), rel=0.01)
+    q = tool.editor.textCursor().block()
+    assert q.blockFormat().lineHeight() == pytest.approx(2.0 * 1.2 * 12 * tool._px_per_pt(), rel=0.01)
     tool.commit()
     # (two lines this far apart are two blocks now: read them as lines)
     lines = [ln for blk in te.text_blocks(tool.ctx.pdf.doc, 0) for ln in blk.lines
@@ -109,19 +121,19 @@ def test_paragraph_alignment_and_spacing(tool):
 
 def test_paste_from_other_programs_is_plain_text(tool, qapp):
     tool.start_edit(_block(tool, "Indlejret"))
-    tool.editor.moveCursor(QTextCursor.MoveOperation.End)
+    q = _end_of(tool, "Indlejret")
     mime = QMimeData()
     mime.setHtml("<b style='color:red;font-size:40px'>fed tekst</b>")
     mime.setText("fed tekst")
     tool.editor.insertFromMimeData(mime)
-    assert tool.editor.toPlainText().endswith("fed tekst")
+    assert q.text().endswith("fed tekst")
     assert tool.collect_formats() == []          # no formatting came along
     # copied inside an editor: formatting is kept
     _select(tool.editor, "Hello")
     _key(tool.editor, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
     _select(tool.editor, "Hello")
     tool.editor.copy()
-    tool.editor.moveCursor(QTextCursor.MoveOperation.End)
+    _end_of(tool, "Indlejret")
     tool.editor.insertFromMimeData(QGuiApplication.clipboard().mimeData())
     assert sum(1 for a, b, c in tool.collect_formats() if c.get("bold")) == 2
 
@@ -139,12 +151,15 @@ def test_ctrl_z_in_editor_undoes_typing_not_the_document(tool, win):
     assert len(pdf.history._undo) == steps
 
 
-def test_overflow_offers_shrink_to_fit(win, qapp, tmp_path):  # noqa: F811
+def test_text_in_a_box_that_overflows_offers_shrink_to_fit(win, qapp, tmp_path):  # noqa: F811
+    """Text in a box cannot flow on: when it runs out of the box, the
+    toast offers "Formindsk så den passer"."""
     doc = pymupdf.open()
     page = doc.new_page()
-    page.insert_htmlbox(pymupdf.Rect(72, 60, 400, 200),
-                        "<p style='font-family:sans-serif;font-size:11pt'>" + "Tekst der fylder godt. " * 12 + "</p>")
-    page.draw_rect(pymupdf.Rect(72, 150, 400, 400), color=(0, 0, 0), fill=(0.8, 0.8, 0.9))
+    page.draw_rect(pymupdf.Rect(72, 60, 400, 160), color=(0, 0, 0), fill=(0.9, 0.92, 0.98))
+    page.insert_htmlbox(pymupdf.Rect(78, 66, 394, 154),
+                        "<p style='font-family:sans-serif;font-size:11pt'>" + "Tekst i en boks. " * 8 + "</p>")
+    page.draw_rect(pymupdf.Rect(72, 170, 400, 400), color=(0, 0, 0), fill=(0.8, 0.8, 0.9))
     path = str(tmp_path / "fuld.pdf")
     doc.save(path)
     ws = win.open_path(path)
@@ -152,16 +167,18 @@ def test_overflow_offers_shrink_to_fit(win, qapp, tmp_path):  # noqa: F811
     tool = ws.tool
     b = _block(tool, "Tekst")
     tool.start_edit(b)
-    tool.editor.setPlainText(b.text.replace("\n", " ") + " Ekstra tekst. " * 25)
+    assert tool.story.kind == "single" and tool.story.role == "box"
+    _end_of(tool, "Tekst")
+    tool.editor.insertPlainText(" Ekstra tekst. " * 25)
+    text = tool.editor.toPlainText()
     tool.commit()
     toasts = win.toasts.visible_messages()
     assert any("overlapper" in t for t in toasts)
     size_before = _block(tool, "Tekst").style.size
-    toast = win.toasts._toasts[-1] if hasattr(win.toasts, "_toasts") else None
-    tool._shrink_to_fit(b, b.text.replace("\n", " ") + " Ekstra tekst. " * 25, None, None, None, None)
+    tool._shrink_to_fit(b, text, None, None, None, None)
     nb = _block(tool, "Tekst")
     assert nb.style.size < size_before
-    assert max(ln.bbox.y1 for ln in nb.lines) <= 152
+    assert max(ln.bbox.y1 for ln in nb.lines) <= 172
     assert any("formindsket" in t for t in win.toasts.visible_messages())
 
 
@@ -175,8 +192,13 @@ def test_editor_shows_list_item_hanging_indent(win, qapp, tmp_path):  # noqa: F8
     for start in ("2.", "1."):   # wrapped item, single-line item
         tool.start_edit(_block(tool, start))
         qapp.processEvents()
-        fmt = tool.editor.document().begin().blockFormat()
+        q = tool.editor.textCursor().block()
+        assert q.text().startswith(start)
+        fmt = q.blockFormat()
         x_text = pymupdf.get_text_length(start + " ", "helv", 11)
-        assert abs(tool._hanging_indent() - x_text) < 0.8
-        assert fmt.leftMargin() > 0 and abs(fmt.textIndent() + fmt.leftMargin()) < 0.01
+        ppp = tool._px_per_pt()
+        assert abs(-fmt.textIndent() / ppp - x_text) < 0.8            # the wrapped lines start under the text
+        x0 = tool.editor.geometry().x() + fmt.leftMargin() + fmt.textIndent()
+        from PySide6.QtCore import QPointF
+        assert abs(x0 - tool.ctx.view.page_to_viewport(0, QPointF(72, 0)).x()) < 1.5   # "2." at the column
         tool.cancel()

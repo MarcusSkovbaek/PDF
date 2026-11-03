@@ -75,6 +75,7 @@ class Snapshot:
     label: str
     keys: tuple
     pool: _Pool = field(repr=False)
+    token: object = field(default=None, repr=False)   # edits with this token extend the step
 
     @property
     def data(self) -> bytes:
@@ -115,9 +116,20 @@ class History:
     def _snap(self, label: str, data: bytes) -> Snapshot:
         return Snapshot(label, self._pool.put(data), self._pool)
 
-    def push(self, label: str, before: bytes) -> None:
-        """Record the state *before* a new change. Clears the redo stack."""
-        self._undo.append(self._snap(label, before))
+    def can_extend(self, token: object) -> bool:
+        """Would an edit with ``token`` extend the latest step (the same
+        editing session, nothing undone since)?"""
+        return token is not None and bool(self._undo) and self._undo[-1].token is token and not self._redo
+
+    def push(self, label: str, before: bytes, token: object = None) -> None:
+        """Record the state *before* a new change. Clears the redo stack.
+        Edits with the ``token`` of the latest step are part of it: one
+        undo goes back to before the first of them."""
+        if self.can_extend(token):
+            return
+        snap = self._snap(label, before)
+        snap.token = token
+        self._undo.append(snap)
         for s in self._redo:
             self._pool.release(s.keys)
         self._redo.clear()

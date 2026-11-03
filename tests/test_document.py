@@ -121,3 +121,23 @@ def test_write_bytes_matches_tobytes(monkeypatch):
     assert reopened.needs_pass and reopened.authenticate("hemmelig") and "Side 2" in reopened[1].get_text()
     monkeypatch.setattr("pdfstudio.core.document.NATIVE_WRITE", False)   # the plain fallback
     assert _without_id(write_bytes(doc)) == _without_id(doc.tobytes())
+
+
+def test_edits_with_one_merge_token_are_one_undo_step(sample_pdf):
+    pdf = sample_pdf
+    original = pdf.page(0).get_text()
+    session = object()
+    for k in range(3):
+        with pdf.edit("Redigér tekst", merge=session) as doc:
+            doc[0].insert_text((72, 700 + 12 * k), f"linje {k}", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 1
+    with pdf.edit("Andet") as doc:                       # another step after the session
+        doc[0].insert_text((72, 760), "andet", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 2
+    assert pdf.undo() and "andet" not in pdf.page(0).get_text() and "linje 2" in pdf.page(0).get_text()
+    assert pdf.undo() and pdf.page(0).get_text() == original
+    # after an undo the old session cannot grow the redone step
+    assert pdf.redo()
+    with pdf.edit("Redigér tekst", merge=session) as doc:
+        doc[0].insert_text((72, 780), "ny", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 2

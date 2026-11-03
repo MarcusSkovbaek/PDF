@@ -1537,37 +1537,10 @@ class EditTextTool(Tool):
         return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
 
     def _display_text(self, block: te.TextBlock) -> tuple[str, list[int]]:
-        """Editor text: lines joined with a space where the original line
-        merely wrapped (soft break), so Qt reflows/justifies the paragraph like
-        the PDF; hard breaks stay newlines. Returns (text, soft break offsets)."""
-        soft = set(self._layout.soft_breaks) if self._layout is not None else set()
-        parts, positions, pos = [], [], 0
-        for i, line in enumerate(block.lines):
-            parts.append(line.text)
-            pos += len(line.text)
-            if i < len(block.lines) - 1:
-                if i in soft:
-                    parts.append(" ")
-                    positions.append(pos)
-                else:
-                    parts.append("\n")
-                pos += 1
-        return "".join(parts), positions
+        text, soft = te.editor_text(block, self._layout)
+        return text, list(soft)
 
-    @staticmethod
-    def _restore_soft_breaks(shown: str, soft: list[int], text: str) -> str:
-        """Put the original line breaks back where the text before them is
-        unchanged: those lines stay pixel-identical; the rest reflows."""
-        common = 0
-        for a, c in zip(shown, text):
-            if a != c:
-                break
-            common += 1
-        chars = list(text)
-        for p in soft:
-            if p < common and p < len(chars) and chars[p] == " ":
-                chars[p] = "\n"
-        return "".join(chars)
+    _restore_soft_breaks = staticmethod(te.restore_soft_breaks)
 
     def _layout_for(self, block: te.TextBlock) -> te.LayoutInfo:
         """How the core will lay out this block (alignment, wrap width) –

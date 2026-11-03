@@ -343,12 +343,14 @@ class PdfDocument:
         old.close()
 
     @contextmanager
-    def edit(self, label: str, kind: str = CONTENT, pages: Iterator[int] | tuple[int, ...] | None = None):
+    def edit(self, label: str, kind: str = CONTENT, pages: Iterator[int] | tuple[int, ...] | None = None, *,
+             merge: object = None):
         """Run a mutation as one undoable step.
 
         Nested ``edit`` blocks are merged into the outermost one. If the body
         raises, the document is restored to its previous state and the
-        exception propagates.
+        exception propagates. Consecutive edits with the same ``merge`` token
+        (any object, e.g. one per editing session) form a single undo step.
         """
         if self._edit_depth:
             self._edit_depth += 1
@@ -367,7 +369,7 @@ class PdfDocument:
             self._emit(ChangeEvent(RELOADED, None, label))
             raise
         self._edit_depth = 0
-        self.history.push(label, before)
+        self.history.push(label, before, merge)
         self._dirty = True
         self._emit(ChangeEvent(kind, tuple(pages) if pages is not None else None, label))
 

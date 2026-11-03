@@ -30,6 +30,7 @@ import re
 import struct
 import sys
 import threading
+import weakref
 from dataclasses import dataclass, field
 
 import pymupdf
@@ -287,11 +288,45 @@ def prepare_text(font: pymupdf.Font, text: str) -> str:
     return text
 
 
-def has_space(font: pymupdf.Font) -> bool:
+# advance widths per font object and character (PyMuPDF looks every
+# character up anew – the text flow measures tens of thousands)
+_advances: "weakref.WeakKeyDictionary[pymupdf.Font, dict]" = weakref.WeakKeyDictionary()
+
+
+def _advance_table(font: pymupdf.Font) -> dict:
     try:
-        return font.has_glyph(32) > 0
-    except Exception:
-        return False
+        table = _advances.get(font)
+        if table is None:
+            table = {}
+            _advances[font] = table
+        return table
+    except TypeError:          # not weak-referenceable: no cache
+        return {}
+
+
+def has_space(font: pymupdf.Font) -> bool:
+    table = _advance_table(font)
+    hit = table.get("has_space")
+    if hit is None:
+        try:
+            hit = font.has_glyph(32) > 0
+        except Exception:
+            hit = False
+        table["has_space"] = hit
+    return hit
+
+
+def _length(font: pymupdf.Font, text: str, size: float) -> float:
+    """``font.text_length(text, fontsize=size)``, from cached advances."""
+    table = _advance_table(font)
+    total = 0.0
+    for ch in text:
+        a = table.get(ch)
+        if a is None:
+            a = font.text_length(ch, fontsize=1.0)
+            table[ch] = a
+        total += a
+    return total * size
 
 
 def text_width(font: pymupdf.Font, text: str, size: float, space: float | None = None) -> float:
@@ -299,9 +334,9 @@ def text_width(font: pymupdf.Font, text: str, size: float, space: float | None =
     spaces when the font has no space glyph."""
     text = prepare_text(font, text)
     if has_space(font) or " " not in text:
-        return font.text_length(text, fontsize=size)
+        return _length(font, text, size)
     sp = space if space else 0.25 * size
-    return sum(font.text_length(w, fontsize=size) for w in text.split(" ") if w) + sp * text.count(" ")
+    return sum(_length(font, w, size) for w in text.split(" ") if w) + sp * text.count(" ")
 
 
 # ---------------------------------------------------------------------------

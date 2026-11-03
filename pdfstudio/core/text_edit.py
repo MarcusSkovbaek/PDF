@@ -72,6 +72,8 @@ __all__ = [
     "text_blocks",
     "block_at",
     "warm_page",
+    "editor_text",
+    "restore_soft_breaks",
     "fit_scale",
     "replace_block_text",
     "write_runs",
@@ -159,6 +161,7 @@ class TextRun:
     width: float = 0.0          # advance width (pt) – for underline / strike-through
     underline: tuple | None = None   # (offset below the baseline, thickness) to draw
     strike: tuple | None = None      # (offset above the baseline, thickness)
+    stretch: float = 1.0             # a space glyph drawn this many times wider (a wide justified gap)
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +388,97 @@ def _join_fragments(lines: list[TextLine]) -> set[int]:
     return gone
 
 
+def _join_spanning_rows(lines: list[TextLine]) -> set[int]:
+    """Across MuPDF blocks: the words of a very loose justified line that
+    MuPDF split into separate blocks. Pieces on one baseline whose union
+    spans exactly the width of the whole lines right above and below them
+    (the paragraph they sit in), with gaps of at most a few ems, are one
+    line. Returns the ids of the lines merged into others."""
+    gone: set[int] = set()
+    cand = [ln for ln in lines if _is_axis(ln.dir) and len(ln.char_pos) == len(ln.text)]
+    rows: dict[tuple, list[TextLine]] = {}
+    for ln in cand:
+        n = _perp(ln.dir)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+    singles = [r[0] for r in rows.values() if len(r) == 1]
+    for row in rows.values():
+        if len(row) < 2:
+            continue
+        row.sort(key=lambda ln: ln.extent[0])
+        size = max(max(ln.style.size for ln in row), 1.0)
+        n = _perp(row[0].dir)
+        lo, hi = row[0].extent[0], row[-1].extent[1]
+        b = _dot(row[0].raw_origin, n)
+        gaps = [y.extent[0] - x.extent[1] for x, y in zip(row, row[1:])]
+        if any(not (0.0 <= g <= 6.0 * size) for g in gaps) or any(_is_bullet(ln) for ln in row):
+            continue
+        if any(abs(_dot(x.raw_origin, n) - b) > 0.35 for x in row):
+            continue
+
+        def spanning(sign: int) -> bool:
+            for ln in singles:
+                db = (_dot(ln.raw_origin, n) - b) * sign
+                if ln.dir == row[0].dir and 0.6 * size <= db <= 1.7 * size \
+                        and abs(ln.extent[0] - lo) <= 1.0 and abs(ln.extent[1] - hi) <= 1.0 \
+                        and abs((ln.style.size or size) - size) <= 0.1 * size:
+                    return True
+            return False
+
+        if not (spanning(-1) and spanning(1)):
+            continue
+        for ln in row[1:]:
+            _absorb(row[0], ln, ln.extent[0] - row[0].extent[1])
+            gone.add(id(ln))
+    return gone
+
+
+def _join_justified_rows(lines: list[TextLine]) -> set[int]:
+    """Words of one justified line that MuPDF reports as separate lines (a
+    writer that places each word of a stretched line on its own, gaps of an
+    em or more): within one MuPDF block, pieces on one baseline that
+    together span the block's full width with evenly spread gaps – as
+    justification spreads them – are one line, when at least two other rows
+    of the block span that width too. Returns the ids of the lines merged
+    into others."""
+    gone: set[int] = set()
+    cand = [ln for ln in lines if _is_axis(ln.dir) and len(ln.char_pos) == len(ln.text)]
+    if len(cand) < 4:
+        return gone
+    rows: dict[tuple, list[TextLine]] = {}
+    for ln in cand:
+        n = _perp(ln.dir)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+    lo = min(ln.extent[0] for ln in cand)
+    hi = max(ln.extent[1] for ln in cand)
+
+    def spans(row: list[TextLine]) -> bool:
+        return abs(min(ln.extent[0] for ln in row) - lo) <= 1.0 and abs(max(ln.extent[1] for ln in row) - hi) <= 1.0
+
+    full_rows = [r for r in rows.values() if spans(r)]
+    if len(full_rows) < 3:
+        return gone
+    for row in full_rows:
+        if len(row) < 2:
+            continue
+        row.sort(key=lambda ln: ln.extent[0])
+        size = max(max(ln.style.size for ln in row), 1.0)
+        n = _perp(row[0].dir)
+        gaps = [b.extent[0] - a.extent[1] for a, b in zip(row, row[1:])]
+        if any(not (-0.5 <= g <= 3.0 * size) for g in gaps) or any(
+                abs(_dot(b.raw_origin, n) - _dot(a.raw_origin, n)) > 0.35 for a, b in zip(row, row[1:])):
+            continue
+        if len(gaps) >= 2 and max(gaps) - min(gaps) > max(0.3 * size, 0.2 * (sum(gaps) / len(gaps))):
+            continue        # uneven gaps: cells of a table, not one stretched line
+        if len(gaps) == 1 and gaps[0] > 1.6 * size:
+            continue        # two far-apart pieces could be two cells
+        if any(_is_bullet(ln) for ln in row):
+            continue
+        for ln in row[1:]:
+            _absorb(row[0], ln, ln.extent[0] - row[0].extent[1])
+            gone.add(id(ln))
+    return gone
+
+
 def _absorb(a: TextLine, b: TextLine, gap: float) -> None:
     """Append line ``b`` (to the right of ``a`` on its baseline) to ``a``."""
     size = max(a.style.size, 1.0)
@@ -478,6 +572,9 @@ def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, f
         per_block.append(lines)
         raw_lines.extend(lines)
     gone = _join_fragments(raw_lines)
+    for lines in per_block:
+        gone |= _join_justified_rows([ln for ln in lines if id(ln) not in gone])
+    gone |= _join_spanning_rows([ln for ln in raw_lines if id(ln) not in gone])
     if gone:
         raw_lines = [ln for ln in raw_lines if id(ln) not in gone]
         per_block = [[ln for ln in lines if id(ln) not in gone] for lines in per_block]
@@ -991,6 +1088,42 @@ def _reading_order(groups: list) -> list:
     return [g for row in rows for g in sorted(row, key=lambda g: g[0].raw_origin[0])]
 
 
+def editor_text(block: TextBlock, layout: "LayoutInfo | None") -> tuple[str, tuple[int, ...]]:
+    """The block's text as an editor shows it: lines joined with a space
+    where the original line merely wrapped (a soft break, so the editor
+    re-wraps and justifies the paragraph like the PDF), hard breaks stay
+    "\n". Returns ``(text, offsets of the soft-break spaces)``."""
+    soft = set(layout.soft_breaks) if layout is not None else set()
+    parts, positions, pos = [], [], 0
+    for i, line in enumerate(block.lines):
+        parts.append(line.text)
+        pos += len(line.text)
+        if i < len(block.lines) - 1:
+            if i in soft:
+                parts.append(" ")
+                positions.append(pos)
+            else:
+                parts.append("\n")
+            pos += 1
+    return "".join(parts), tuple(positions)
+
+
+def restore_soft_breaks(shown: str, soft, text: str) -> str:
+    """Put the original line breaks (``soft``: offsets from
+    :func:`editor_text`) back where the text before them is unchanged: those
+    lines stay pixel-identical; the rest reflows."""
+    common = 0
+    for a, c in zip(shown, text):
+        if a != c:
+            break
+        common += 1
+    chars = list(text)
+    for p in soft:
+        if p < common and p < len(chars) and chars[p] == " ":
+            chars[p] = "\n"
+    return "".join(chars)
+
+
 def warm_page(doc: pymupdf.Document, page: int) -> None:
     """Precompute what opening an editor on ``page`` needs – its text
     blocks and the proof of its embedded fonts – so the next edit opens at
@@ -1125,13 +1258,44 @@ def _morph_degrees(d) -> float:
     return math.degrees(math.atan2(-d[1], d[0]))
 
 
+def _bridge_gaps(runs: list[TextRun]) -> list[TextRun]:
+    """A word placed far after the space ending the run before it (a
+    justified line kept glyph for glyph): MuPDF would read the two as
+    separate lines. The trailing space becomes one widened space glyph
+    that fills the gap, so the line extracts in one piece."""
+    out: list[TextRun] = []
+    for i, r in enumerate(runs):
+        nxt = runs[i + 1] if i + 1 < len(runs) else None
+        horizontal = abs(r.dir[0] - 1.0) < 1e-4 and abs(r.dir[1]) < 1e-4
+        if (nxt is None or not horizontal or r.stretch != 1.0 or not r.text.endswith(" ") or not r.text.strip()
+                or r.space or abs(nxt.origin[1] - r.origin[1]) > 0.01 or nxt.dir != r.dir or not has_space(r.font)):
+            out.append(r)
+            continue
+        try:
+            body = r.text.rstrip(" ")
+            end = r.origin[0] + r.font.text_length(body, fontsize=r.size)
+            sw = r.font.text_length(" ", fontsize=r.size)
+        except Exception:
+            out.append(r)
+            continue
+        gap = nxt.origin[0] - end
+        if sw <= 0 or gap - sw <= 0.6 * r.size:
+            out.append(r)
+            continue
+        out.append(replace(r, text=body, width=r.width - (r.font.text_length(r.text, fontsize=r.size)
+                                                           - (end - r.origin[0])) if r.width else 0.0))
+        out.append(replace(r, text=" ", origin=(end, r.origin[1]), width=0.0, underline=None, strike=None,
+                           stretch=gap / sw))
+    return out
+
+
 def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
     """Write text runs (raw page coordinates) with TextWriter – in their
     order (so text extraction sees each line in one piece), one writer per
     stretch of horizontal runs of one colour and one per rotated run; then
     their underline / strike-through strokes."""
     all_runs = runs
-    runs = [r for r in runs if r.text]
+    runs = _bridge_gaps([r for r in runs if r.text])
     if not runs:
         _draw_decorations(page, all_runs)
         return
@@ -1141,20 +1305,25 @@ def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
     for r in runs:
         horizontal = abs(r.dir[0] - 1.0) < 1e-4 and abs(r.dir[1]) < 1e-4
         color = tuple(round(float(c), 4) for c in r.color)
-        key = ("h", color) if horizontal else ("r", id(r))
+        if r.stretch != 1.0 and horizontal:
+            key = ("s", id(r))          # a widened space: its own writer, in order
+        else:
+            key = ("h", color) if horizontal else ("r", id(r))
         if groups and groups[-1][0] == key:
             groups[-1][1].append(r)
         else:
             groups.append((key, [r]))
     for key, group in groups:
-        color = key[1] if key[0] == "h" else tuple(group[0].color)
+        r = group[0]
+        color = key[1] if key[0] == "h" else tuple(r.color)
         tw = pymupdf.TextWriter(page.rect, color=color)
-        for r in group:
-            _append(tw, r)
+        for x in group:
+            _append(tw, x)
         if key[0] == "h":
             tw.write_text(page, color=color)
+        elif key[0] == "s":
+            tw.write_text(page, color=color, morph=(pymupdf.Point(r.origin), pymupdf.Matrix(r.stretch, 1)))
         else:
-            r = group[0]
             tw.write_text(page, color=color,
                           morph=(pymupdf.Point(r.origin), pymupdf.Matrix(_morph_degrees(r.dir))))
     _fix_space_unicode(doc, first_new, runs)
@@ -1722,10 +1891,12 @@ def _frame(ctx: _PageContext, block: TextBlock, d, lmin: float, rmax: float) -> 
 
 
 def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle | None, *,
-          formats=None, align: str | None = None, line_spacing: float | None = None) -> _Plan:
+          formats=None, align: str | None = None, line_spacing: float | None = None,
+          emit_all: bool = False) -> _Plan:
     """``align`` ("left" | "center" | "right" | "justify") and
     ``line_spacing`` (baseline distance in multiples of the text size)
-    re-typeset the whole block."""
+    re-typeset the whole block. ``emit_all``: runs for every line, also the
+    unchanged ones (the text flow moves them)."""
     old = block.lines
     n_old = len(old)
     override = style is not None and _style_key(style) != _style_key(block.style)
@@ -2004,7 +2175,7 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         if _rich_text(rich).strip():
             last_base = _dot(base, n)
 
-        if j < n_old and pi == j and unchanged(j, rich):
+        if j < n_old and pi == j and unchanged(j, rich) and not emit_all:
             continue  # unchanged line: leave the original glyphs alone
         if j < n_old:
             remove.append(old[j])
@@ -2029,8 +2200,10 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         if align_override == "justify":
             if continues and n_spaces and width < frame[1] - target:
                 extra = (frame[1] - target - width) / n_spaces
-        elif (justified_block and continues and j < n_old - 1 and at_right[j] and n_spaces
+        elif (justified_block and continues and (j >= n_old - 1 or at_right[j]) and n_spaces
                 and 0.6 * (rmax - target) <= width < rmax - target):
+            # a justified paragraph: every line that runs on is stretched,
+            # also the ones it grew by
             extra = (rmax - target - width) / n_spaces
         decor = old[min(j, n_old - 1)].decor
         if (j < n_old and pi == j and intact and not override and not relayout and not extra and _is_axis(ld)
@@ -2421,12 +2594,19 @@ def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = 
             if piece[0] == " " and not piece.strip():
                 gap = w + extra * len(piece)
                 if extra and has_space(font):
-                    # the space glyph itself, centred in the stretched gap:
-                    # text extraction keeps the line in one piece
-                    mid = x + extra * len(piece) / 2
-                    out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
-                                       origin=(origin[0] + d[0] * mid, origin[1] + d[1] * mid), dir=d,
-                                       space=space))
+                    # the space glyph itself in the stretched gap, so text
+                    # extraction keeps the line in one piece: centred in it,
+                    # or – a gap too wide for that – drawn as wide as the gap
+                    horizontal = abs(d[0] - 1.0) < 1e-4 and abs(d[1]) < 1e-4
+                    if horizontal and w > 0 and gap - w > 1.4 * st.size:
+                        out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
+                                           origin=(origin[0] + d[0] * x, origin[1] + d[1] * x), dir=d,
+                                           space=space, stretch=gap / w))
+                    else:
+                        mid = x + extra * len(piece) / 2
+                        out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
+                                           origin=(origin[0] + d[0] * mid, origin[1] + d[1] * mid), dir=d,
+                                           space=space))
                 if (under or strike) and out:
                     # underline the space between two underlined words too
                     out.append(TextRun(text="", font=font, size=st.size, color=tuple(st.color),

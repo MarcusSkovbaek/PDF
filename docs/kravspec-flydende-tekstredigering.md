@@ -1,6 +1,6 @@
 # Kravspecifikation – Flydende tekstredigering (som i Word)
 
-Version 1.0 · 2026-11-03 · Folio PDF 1.1 → 1.2 · Status: **til godkendelse**
+Version 1.0 · 2026-11-03 · Folio PDF 1.1 → 1.2 · Status: **godkendt 2026-11-03**
 
 Prioritet: **SKAL** = indgår og testes. **BØR** = indgår, medmindre det viser sig at stride mod en SKAL
 (fx stabilitet), og det meldes i så fald. **KAN** = kun hvis der er tid. Alle krav har et ID, så du kan

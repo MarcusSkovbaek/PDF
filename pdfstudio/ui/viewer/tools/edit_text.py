@@ -1672,13 +1672,18 @@ class EditTextTool(Tool):
         res = self._last_flow
         where = res.locate(k, offset) if res is not None else None
         doc = self.ctx.pdf.doc
-        if where is None:
-            return True
-        page, (x, y) = where
-        found = flow.story_at(doc, page, (x, y))
-        if found is None:
-            return True
-        self.start_story(found[0], click=(page, QPointF(x, y)), session=session)
+        found = flow.story_at(doc, where[0], where[1]) if where is not None else None
+        if found is not None:
+            page, (x, y) = where
+            self.start_story(found[0], click=(page, QPointF(x, y)), session=session)
+        else:
+            # (the caret's place is unknown) the column again, in the same paragraph
+            first = story.pieces[0].block.lines[0] if story.pieces and story.pieces[0].block.lines else None
+            again = flow.story_at(doc, story.page, first.origin) if first is not None and \
+                story.page < self.ctx.pdf.page_count else None
+            if again is None:
+                return True
+            self.start_story(again[0], piece=min(k, len(again[0].pieces) - 1), session=session)
         self._caret_after(typed)
         return True
 

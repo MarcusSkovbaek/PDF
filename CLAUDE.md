@@ -56,6 +56,8 @@ pdfstudio/
     comments.py               comment threads: replies, status, author, summary
     identity.py               comment author (Windows display name), PDF dates
     replace.py                search & replace in text blocks
+    flow.py                   text surfaces ("stories"), Word-like flow over columns/pages, new pages
+    running.py                running headers/footers on new pages, page-number update ("Side 13 af 58")
     recovery.py               autosave / crash-recovery store (local folder)
     optimize.py               "Reducér filstørrelse"
   ui/
@@ -203,6 +205,26 @@ def is_list_bullet(block) -> bool ; marker_end(text) -> int                  # l
 # text_blocks is cached per page content hash – never mutate returned blocks
 def warm_page(doc, page) -> None                     # precompute blocks + font proofs (UI calls it when idle)
 
+# flow.py  (a page = stories: body columns "flow" + standalone "single" texts; display coords)
+@dataclass class Piece: block; text; soft; layout; cont_prev; cont_next; bullet   # one paragraph
+@dataclass class Story: page; kind "flow"|"single"; pieces; lo; hi; dir; rect; role  # role body|header|footer|cell|caption|box|figure|rotated|wide
+@dataclass class Edit: piece (index | None = new); text; like; formats; align; line_spacing; style
+def page_stories(doc, page) -> list[Story]; story_at(doc, page, point) -> (Story, piece) | None   # cached per page content
+def apply_story(pdf, story, edits, *, merge=None) -> FlowResult   # one undo step (merge token joins a session)
+    # lays the column out line by line into frames on this and the next pages (type area from the
+    # neighbour pages, around images/figures/tables, chapter starts keep their page, widow/orphan control),
+    # new pages after the last one (header/footer copied, page numbers renumbered), pulls text back and
+    # removes empty Folio pages; only changed/moved lines are rewritten
+@dataclass class FlowResult: pages; inserted; removed; renumbered; overflow; substitutions; locate(edit, offset) -> (page, (x, y))
+def column_limits(doc, story) -> Limits(area, obstacles)     # where the column's text may go on its page
+def render_without(doc, story, zoom, *, clip=None, alpha=False) -> Pixmap ; prepare_without(doc, story)  # backdrop
+# markers in page /PieceInfo/FolioPDF/Private: /Cont [x y ...] continued pieces, /Inserted, /Running [rects]
+
+# running.py
+def copy_running(doc, src, dst, lines) -> list[Rect]       # header/footer lines, rules, logos onto a new page
+def number_lines(doc, page) -> list[NumberLine]            # page numbers in the top/bottom band
+def renumber(doc, origin, old_count, *, template=None) -> list[int]   # inside pdf.edit; origin[p] = old index | None
+
 # insert.py
 def document_text_style(doc) -> SpanStyle                # dominant body style – default for new text
 def add_text_box(pdf, page, rect, text, style: SpanStyle, align="left", *, formats=None) -> None
@@ -229,6 +251,12 @@ def add_image(pdf, page, rect, image: str | bytes, keep_aspect=True) -> None
 * `ui/viewer/text_selection.py` – `TextSelection` (character-precise drag/double/triple click, Shift-extend)
   + `SelectionBar` (floating mini bar); `tools/_text_actions.py` – `SelectionUI.run(key)` for comment,
   highlight/underline/strikeout, replace/insert text, copy. Tools get `context_menu(ev, global_pos)`.
+* `ui/viewer/tools/edit_text.py` – `EditTextTool` edits a whole text surface (`flow.Story`) in ONE
+  transparent `InlineTextEditor` over a text-free backdrop (`flow.render_without`): one click puts the caret,
+  one QTextBlock per piece (tag `_PIECE`, geometry `_GEOM`), Enter/Backspace split/join paragraphs, arrows
+  past the end / Tab go to the next surface (`leave`), Esc/click-out commits (`apply_story`, one undo step per
+  session via a merge token). Typing pauses (`FLOW_PAUSE_MS`) let overflowing text flow on (`flow_now`), the
+  caret follows. Idle time prepares the visible pages (`_warm_step`). `AddTextTool` reuses the editor.
 * `ui/saving.py` – `SaveController` on the window: `save/save_as/save_copy`, background writing (QThread),
   autosave every `save/autosave_minutes` (default 2) to the recovery store, recovery prompt at start.
 * `DocumentWorkspace` (one per tab) owns the `PdfDocument`, `PageView`, side

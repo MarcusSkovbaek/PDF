@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 
 import pymupdf
 
+from . import running
 from . import text_edit as te
 from .document import CONTENT, STRUCTURE, PdfDocument
 from .fonts import SpanStyle
@@ -101,6 +102,7 @@ class FlowResult:
     pages: tuple = ()               # pages whose text changed (final indices)
     inserted: tuple = ()            # pages Folio added
     removed: tuple = ()             # pages Folio removed again
+    renumbered: tuple = ()          # pages whose page number was brought up to date
     overflow: float = 0.0
     substitutions: list = field(default_factory=list)
     lines: dict = field(default_factory=dict)   # unit's first edit index -> [_Placed]
@@ -204,17 +206,33 @@ def _is_inserted(doc, page: int) -> bool:
         return False
 
 
-def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: bool | None = None) -> None:
+def _running_rects(doc, page: int) -> list[pymupdf.Rect]:
+    """Header / footer areas Folio copied onto a page it inserted."""
+    try:
+        kind, val = doc.xref_get_key(doc[page].xref, f"PieceInfo/{_MARKER_KEY}/Private/Running")
+    except Exception:
+        return []
+    if kind != "array":
+        return []
+    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", val)]
+    return [pymupdf.Rect(nums[i:i + 4]) for i in range(0, len(nums) - 3, 4)]
+
+
+def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: bool | None = None,
+                 running: list | None = None) -> None:
     pg = doc[page]
     if inserted is None:
         inserted = _is_inserted(doc, page)
+    if running is None:
+        running = _running_rects(doc, page) if inserted else []
     if not conts and not inserted:
         if doc.xref_get_key(pg.xref, f"PieceInfo/{_MARKER_KEY}")[0] != "null":
             doc.xref_set_key(pg.xref, f"PieceInfo/{_MARKER_KEY}", "null")
         return
     arr = " ".join(f"{x:.2f} {y:.2f}" for x, y in conts)
     from .identity import pdf_date
-    priv = f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + ">>"
+    run = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in running)
+    priv = f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + (f"/Running[{run}]" if run else "") + ">>"
     doc.xref_set_key(pg.xref, "PieceInfo", f"<</{_MARKER_KEY}<</LastModified({pdf_date()})/Private{priv}>>>>")
 
 
@@ -995,24 +1013,29 @@ class _Chain:
 def _place(units: list[_Unit], frames: list[_Frame], seq_of: dict, grow) -> tuple[list, bool]:
     """Lay the units' lines into the frames. ``grow()`` adds a frame (or
     returns False: stop and report overflow). Returns ``(placements,
-    overflowed)``; a placement is ``(unit, line, frame, base, jumped)``."""
-    placed = []
-    fi = 0
-    prev: float | None = None
-    first = True
-    for u in units:
-        want = seq_of.get(u.min_page, 0)
-        while fi < want and fi + 1 < len(frames):
-            fi += 1
-            prev = None
+    overflowed)``; a placement is ``(unit, line, frame, base, jumped)``.
+    A paragraph never leaves a single line at the bottom or the top of a
+    page (widow / orphan control, as in Word)."""
+    placed: list = []
+    st = {"fi": 0, "prev": None, "first": True}
+
+    def place_unit(u: _Unit, breaks: set) -> bool:
         for li, ln in enumerate(u.lines):
+            fi = st["fi"]
             jumped = False
-            if first:
+            if st["first"]:
                 base = ln.base                      # the story's first line stays where it is
-            elif prev is None or ln.gap is None:
+            elif li in breaks and placed and placed[-1][2] is frames[fi]:
+                # kept together with the lines after it: on to the next frame
+                if fi + 1 >= len(frames) and not grow():
+                    return False
+                fi += 1
+                base = frames[fi].top + ln.asc
+                jumped = True
+            elif st["prev"] is None or ln.gap is None:
                 base = frames[fi].top + ln.asc
             else:
-                base = prev + ln.gap
+                base = st["prev"] + ln.gap
             for _guard in range(400):
                 ok, nxt = _fits(ln, base, frames[fi])
                 if ok:
@@ -1020,15 +1043,70 @@ def _place(units: list[_Unit], frames: list[_Frame], seq_of: dict, grow) -> tupl
                 jumped = True
                 if nxt is None:                     # past the frame's end: on to the next one
                     if fi + 1 >= len(frames) and not grow():
-                        return placed, True
+                        return False
                     fi += 1
                     base = frames[fi].top + ln.asc
                 else:
                     base = nxt
             placed.append((u, ln, frames[fi], base, jumped and li > 0))
-            prev = base
-            first = False
+            st["fi"], st["prev"], st["first"] = fi, base, False
+        return True
+
+    for u in units:
+        want = seq_of.get(u.min_page, 0)
+        while st["fi"] < want and st["fi"] + 1 < len(frames):
+            st["fi"] += 1
+            st["prev"] = None
+        saved = (dict(st), len(placed))
+        breaks: set = set()
+        tried: list[set] = []
+        while True:
+            st.update(saved[0])
+            del placed[saved[1]:]
+            if not place_unit(u, breaks):
+                if not tried:
+                    return placed, True
+                breaks = tried.pop()                # keeping lines together does not fit: as it was
+                st.update(saved[0])
+                del placed[saved[1]:]
+                if not place_unit(u, breaks):
+                    return placed, True
+                break
+            fix = _keep_together(u, placed[saved[1]:], breaks) if len(tried) < 3 else None
+            if fix is None:
+                break
+            tried.append(breaks)
+            breaks = fix
     return placed, False
+
+
+def _keep_together(u: _Unit, rows: list, breaks: set) -> set | None:
+    """Widow / orphan control for one placed paragraph: the line indices
+    that must start a new frame, or None when it is fine. A paragraph that
+    stands exactly where it stood is left as the document has it."""
+    n = len(rows)
+    if n < 2:
+        return None
+    if u.text is None and all(ln.orig is not None and fr.page == ln.orig_page and abs(base - ln.base) < 0.05
+                              for _u, ln, fr, base, _j in rows):
+        return None
+    segs: list[list[int]] = [[0]]
+    for i in range(1, n):
+        if rows[i][2] is rows[i - 1][2]:
+            segs[-1].append(i)
+        else:
+            segs.append([i])
+    if len(segs) < 2:
+        return None
+    if len(segs[0]) == 1 and 0 not in breaks:
+        return breaks | {0}                         # orphan: the first line alone at the bottom
+    if len(segs[-1]) == 1:                          # widow: the last line alone at the top
+        before = segs[-2]
+        if len(before) >= 3:
+            return breaks | {segs[-1][0] - 1}
+        if before[0] == 0 and 0 not in breaks:
+            return breaks | {0}                     # two lines + one: the paragraph moves on as a whole
+    return None
 
 
 def apply_story(pdf: PdfDocument, story: Story, edits: list[Edit], *, merge: object = None) -> FlowResult:
@@ -1193,15 +1271,32 @@ def _write(pdf, story: Story, chain: _Chain, units: list[_Unit], placed, merge, 
                 _update_markers(doc, s.page, s, conts.get(s.page, []))
         tmpl = doc[story.page]
         width, height, rotation = tmpl.mediabox.width, tmpl.mediabox.height, tmpl.rotation
+        old_count = doc.page_count
+        origin: list = list(range(old_count))     # new index -> old index (None: added) for page numbers
+        template: dict = {}
+        running_lines = [ln for s in chain.info(after).stories if s.role in ("header", "footer")
+                         for p in s.pieces for ln in p.block.lines] if new else []
         for order, k in enumerate(sorted(new, reverse=True)):   # -1 first: right after ``after``
             at = after + 1 + order
             page = doc.new_page(pno=at, width=width, height=height)
             if rotation:
                 page.set_rotation(rotation)
+            # F13: the header and footer of the page before
+            covered = running.copy_running(doc, after, at, running_lines)
             if writes.get(k):
-                te.write_runs(page, writes[k])
-            _set_markers(doc, at, conts.get(k, []), inserted=True)
-        result.removed = tuple(_drop_empty_inserted(pdf, [final[s.page] for s in chain.stories if s.page in final]))
+                te.write_runs(doc[at], writes[k])
+            _set_markers(doc, at, conts.get(k, []), inserted=True, running=covered)
+            origin.insert(at, ("new", after))
+        removed = _drop_empty_inserted(pdf, [final[s.page] for s in chain.stories if s.page in final])
+        for gone in sorted(removed, reverse=True):
+            del origin[gone]
+        result.removed = tuple(removed)
+        if new or removed:
+            # F13: page numbers ("Side 13 af 58") on the pages after
+            template = {p: o[1] for p, o in enumerate(origin) if isinstance(o, tuple)}
+            renumbered = running.renumber(doc, [o if isinstance(o, int) else None for o in origin], old_count,
+                                          template=template)
+            result.renumbered = tuple(renumbered)
     result.inserted = tuple(final[k] for k in sorted(new, reverse=True))
     for gone in sorted(result.removed, reverse=True):
         final = {k: (v - 1 if v > gone else v) for k, v in final.items()}
@@ -1236,11 +1331,29 @@ def _drop_empty_inserted(pdf, pages: list[int]) -> list[int]:
     doc = pdf.doc
     gone = []
     for pg in sorted(set(pages), reverse=True):
-        if 0 <= pg < doc.page_count and _is_inserted(doc, pg) and not doc[pg].get_text().strip() \
-                and not doc[pg].get_images() and doc.page_count > 1:
+        if 0 <= pg < doc.page_count and _is_inserted(doc, pg) and doc.page_count > 1 and _only_running(doc, pg):
             doc.delete_page(pg)
             gone.append(pg)
     return sorted(gone)
+
+
+def _only_running(doc, pg: int) -> bool:
+    """Does a page Folio inserted hold nothing but the header / footer it
+    copied (no body text, no images of its own)?"""
+    page = doc[pg]
+    keep = [r + (-1, -1, 1, 1) for r in _running_rects(doc, pg)]
+
+    def ours(r) -> bool:
+        r = pymupdf.Rect(r)
+        return any(k.contains(r) or (k & r).get_area() >= 0.6 * max(r.get_area(), 1e-6) for k in keep)
+
+    for w in page.get_text("words"):
+        if w[4].strip() and not ours(w[:4]):
+            return False
+    for info in page.get_image_info():
+        if not ours(info["bbox"]):
+            return False
+    return True
 
 
 def _moved(r: TextRun, n, s: float) -> TextRun:

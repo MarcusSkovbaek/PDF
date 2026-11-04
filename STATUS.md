@@ -1,5 +1,28 @@
 # Status / handover – Folio PDF
 
+## 2026-11-04: flowing text editing like Word (spec `docs/kravspec-flydende-tekstredigering.md`, F1–F19)
+Spec approved 2026-11-03 (section G: text flows to the next page – yes; each column is its own surface).
+**Core** `core/flow.py`: a page = stories (body columns "flow", standalone "single" texts with roles
+header/footer/cell/caption/box/figure/rotated/wide); `apply_story` lays a column out line by line into frames
+on this and the following pages (type area measured on the neighbour pages, obstacle bands for images,
+figures, tables and other text, chapter starts keep their page, widow/orphan control), adds pages after the
+last one (header/footer copied, page numbers renumbered – `core/running.py`), pulls continued text back and
+removes empty Folio pages, one undo step per session (`pdf.edit(merge=token)`), only changed/moved lines are
+rewritten. Continuation markers in `/PieceInfo/FolioPDF/Private`. Text read back stays one paragraph after
+growing (list-item tails split off, ragged text wraps at the column edge, real glyph widths for the
+soft-break test, wide justified gaps bridged with a widened space so MuPDF keeps the line together).
+**Editor** `tools/edit_text.py`: one transparent editor per surface over a text-free backdrop
+(`flow.render_without`, cached), one click = caret, no frames, Enter/Backspace, selection and formats across
+paragraphs, arrows/Tab move on, Esc keeps, typing pauses flow the text on with the caret following
+(`flow_now`), symbol-font bullets drawn readable, idle preparation of the visible and neighbour pages.
+**Measured** (58-page LibreOffice report): click → caret 66 ms on a prepared page (213 ms cold, F19 target
+150 ms), flow while typing 355–640 ms for two pages, stress test (`tests/stress_flow.py`, every 4th page grown):
+13 edits avg ~200 ms, 0 problems (text order, overlaps, headers/footers incl. page numbers, undo).
+Speed-ups on the way: one redaction annotation with QuadPoints instead of one per rect (render_without
+200 → 40 ms), cheap page keys (font dict instead of `get_fonts`), no inspector re-layout on tool state changes.
+**Limitations** (spec): no selection across columns/pages, figures do not move, no column-to-column flow on
+the same page; editor Ctrl+Z history restarts after an automatic flow (the document undo covers the session).
+
 ## 2026-10-25: tekstredigering, gem og kommentarer (spec `docs/kravspec-tekst-gem-kommentarer.md`)
 Spec approved 2026-10-25 (decisions in its section F: author = Windows name without asking, comments as one
 Acrobat-like list, no spell check, autosave every 2 min on by default). Built in the order C → B → A.

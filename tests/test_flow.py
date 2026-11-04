@@ -79,19 +79,35 @@ def test_growing_paragraph_flows_over_the_following_pages(rep):
     before = body(pdf.doc)
     s = column(pdf.doc, 0)
     res = flow.apply_story(pdf, s, edits_for(s, {2: s.pieces[2].text + EXTRA * 3}))
-    assert res.pages == (0, 1, 2) and not res.inserted
+    assert res.pages[:3] == (0, 1, 2)          # (with widow control the last page runs over: a 4th page)
+    n = pdf.doc.page_count
     assert body(pdf.doc) == with_extra(before, s.pieces[2].text, EXTRA * 3)
     assert overlaps(pdf.doc) == 0
-    # headers and footers stay where they are
-    for p in range(3):
+    # headers and footers stay where they are (page numbers follow)
+    for p in range(n):
         texts = [st.pieces[0].text for st in flow.page_stories(pdf.doc, p) if st.kind == "single"]
-        assert HEADER in texts and f"Side {p + 1} af 3" in texts
+        assert HEADER in texts and f"Side {p + 1} af {n}" in texts
     # the column never runs into the footer
-    for p in range(3):
+    for p in range(n):
         c = column(pdf.doc, p)
         assert max(pc.block.bbox.y1 for pc in c.pieces) < 790
     assert len(pdf.history._undo) == 1
     assert pdf.undo() and body(pdf.doc) == before
+
+
+def test_no_single_line_alone_at_a_page_end_or_start(rep):
+    """F14: a paragraph split over a page break keeps two lines on each side."""
+    pdf = _pdf(rep)
+    for grow in (1, 2, 3, 5, 8):
+        work = _pdf(rep)
+        s = column(work.doc, 0)
+        flow.apply_story(work, s, edits_for(s, {2: s.pieces[2].text + EXTRA * grow}))
+        for p in range(work.doc.page_count - 1):
+            a, b = column(work.doc, p), column(work.doc, p + 1)
+            if b.pieces and b.pieces[0].cont_prev:
+                assert len(a.pieces[-1].block.lines) >= 2, (grow, p, "orphan")
+                assert len(b.pieces[0].block.lines) >= 2, (grow, p, "widow")
+    assert pdf.doc.page_count == 3
 
 
 def test_overflow_on_the_last_page_adds_a_page(rep):
@@ -179,6 +195,51 @@ def test_a_chapter_start_keeps_its_page():
     assert body(pdf.doc) == with_extra(before, s.pieces[last].text, EXTRA * 40)
 
 
+def _footer(doc, p) -> str:
+    return " ".join(w[4] for w in doc[p].get_text("words") if w[1] > 790)
+
+
+def test_a_new_page_gets_header_footer_and_page_numbers_follow():
+    """F13: the inserted page has the header and footer of the page before;
+    "Side N af M" is right on every page afterwards – also after undo."""
+    pdf = _pdf(report(chapters=2, chapter_breaks=True))
+    n = pdf.doc.page_count
+    chapter_page = next(p for p in range(n) if column(pdf.doc, p).pieces[0].text.startswith("2."))
+    s = column(pdf.doc, chapter_page - 1)
+    last = len(s.pieces) - 1
+    res = flow.apply_story(pdf, s, edits_for(s, {last: s.pieces[last].text + EXTRA * 40}))
+    new = res.inserted[0]
+    doc = pdf.doc
+    assert doc.page_count == n + 1
+    assert HEADER in doc[new].get_text()                                   # the header came along
+    for p in range(doc.page_count):
+        assert _footer(doc, p) == f"Side {p + 1} af {n + 1}", p
+    roles = {st.role for st in flow.page_stories(doc, new)}
+    assert {"header", "footer"} <= roles
+    # the footer stays where it was on the page (centred)
+    a = [w for w in doc[new - 1].get_text("words") if w[1] > 790]
+    b = [w for w in doc[new].get_text("words") if w[1] > 790]
+    assert abs((a[0][0] + a[-1][2]) / 2 - (b[0][0] + b[-1][2]) / 2) < 0.6
+    assert pdf.undo() and pdf.doc.page_count == n
+    assert all(_footer(pdf.doc, p) == f"Side {p + 1} af {n}" for p in range(n))
+
+
+def test_an_inserted_page_that_runs_empty_goes_again_and_numbers_follow():
+    pdf = _pdf(report(chapters=2, chapter_breaks=True))
+    n = pdf.doc.page_count
+    chapter_page = next(p for p in range(n) if column(pdf.doc, p).pieces[0].text.startswith("2."))
+    s = column(pdf.doc, chapter_page - 1)
+    last = len(s.pieces) - 1
+    text = s.pieces[last].text
+    flow.apply_story(pdf, s, edits_for(s, {last: text + EXTRA * 40}))
+    assert pdf.doc.page_count == n + 1
+    s = column(pdf.doc, chapter_page - 1)
+    last = len(s.pieces) - 1
+    res = flow.apply_story(pdf, s, edits_for(s, {last: text}))     # back to the old text
+    assert res.removed == (chapter_page,) and pdf.doc.page_count == n
+    assert all(_footer(pdf.doc, p) == f"Side {p + 1} af {n}" for p in range(n))
+
+
 def test_text_flows_around_a_figure():
     doc = report(chapters=1, figure=True)
     pdf = _pdf(doc)
@@ -202,10 +263,15 @@ def test_flow_on_rotated_pages():
     pdf = _pdf(doc)
     before = body(pdf.doc)
     s = column(pdf.doc, 0)
-    flow.apply_story(pdf, s, edits_for(s, {2: s.pieces[2].text + EXTRA * 3}))
-    assert pdf.doc.page_count == 3
+    res = flow.apply_story(pdf, s, edits_for(s, {2: s.pieces[2].text + EXTRA * 3}))
+    assert res.pages[:3] == (0, 1, 2)               # (widow control: the last page runs over)
+    assert all(pdf.doc[p].rotation == 90 for p in range(pdf.doc.page_count))
     assert body(pdf.doc) == with_extra(before, s.pieces[2].text, EXTRA * 3)
     assert overlaps(pdf.doc) == 0
+    n = pdf.doc.page_count
+    for p in range(n):                               # header, footer and page numbers on rotated pages too
+        texts = [st.pieces[0].text for st in flow.page_stories(pdf.doc, p) if st.kind == "single"]
+        assert HEADER in texts and f"Side {p + 1} af {n}" in texts, (p, texts)
 
 
 def test_each_column_flows_on_its_own():

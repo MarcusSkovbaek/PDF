@@ -1335,6 +1335,56 @@ def _bridge_gaps(runs: list[TextRun]) -> list[TextRun]:
     return out
 
 
+_SPACER: list = []
+
+
+def _spacer_font() -> pymupdf.Font:
+    """Helvetica (a standard PDF font – referenced, never embedded): its
+    space fills wide gaps of fonts that have no space glyph."""
+    if not _SPACER:
+        _SPACER.append(pymupdf.Font("helv"))
+    return _SPACER[0]
+
+
+def _bridge_line(runs: list[TextRun]) -> list[TextRun]:
+    """The runs of ONE line, its words placed where they were: a wide gap
+    between two of them (a justified line) would make MuPDF read the line
+    as several – the gap gets a widened space glyph (the font's own, or a
+    standard font's space when a subset has none: referenced, never
+    embedded), so the line extracts in one piece."""
+    gaps: list[tuple[int, float, float]] = []      # (index, line end of run i, gap after it)
+    for i, r in enumerate(runs[:-1]):
+        nxt = runs[i + 1]
+        horizontal = abs(r.dir[0] - 1.0) < 1e-4 and abs(r.dir[1]) < 1e-4
+        if (not horizontal or r.stretch != 1.0 or nxt.dir != r.dir or abs(nxt.origin[1] - r.origin[1]) > 0.01
+                or not r.text.strip() or r.text.endswith(" ") or nxt.text.startswith(" ")):
+            continue
+        try:
+            end = r.origin[0] + text_width(r.font, prepare_text(r.font, r.text), r.size, r.space)
+        except Exception:
+            continue
+        gap = nxt.origin[0] - end
+        if gap > 0.6 * r.size:
+            gaps.append((i, end, gap))
+    # only a justified line (several wide gaps, all alike) – a table row's
+    # column gap stays a gap
+    if len(gaps) < 2 or max(g for _i, _e, g in gaps) > 1.25 * min(g for _i, _e, g in gaps) + 0.5:
+        return runs
+    wide = {i: (end, gap) for i, end, gap in gaps}
+    out: list[TextRun] = []
+    for i, r in enumerate(runs):
+        out.append(r)
+        if i not in wide:
+            continue
+        end, gap = wide[i]
+        font = r.font if has_space(r.font) else _spacer_font()
+        sw = font.text_length(" ", fontsize=r.size)
+        if sw > 0:
+            out.append(TextRun(text=" ", font=font, size=r.size, color=r.color, origin=(end, r.origin[1]),
+                               dir=r.dir, stretch=gap / sw))
+    return out
+
+
 def write_runs(page: pymupdf.Page, runs: list[TextRun]) -> None:
     """Write text runs (raw page coordinates) with TextWriter – in their
     order (so text extraction sees each line in one piece), one writer per
@@ -2304,10 +2354,12 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
             ends = [x + measure(piece, em) for piece, x in pieces]
             if not ends or max(ends) <= max(rmax, old[j].extent[1]) + 0.5:
                 b0 = _dot(base, ld)
+                line_runs: list[TextRun] = []
                 for piece, x in pieces:
                     off = x - b0
-                    runs.extend(_emit_line(piece, (base[0] + ld[0] * off, base[1] + ld[1] * off), ld, em, 0.0,
-                                           font_of, decor))
+                    line_runs.extend(_emit_line(piece, (base[0] + ld[0] * off, base[1] + ld[1] * off), ld, em,
+                                                0.0, font_of, decor))
+                runs.extend(_bridge_line(line_runs) if len(pieces) > 1 else line_runs)
                 continue
             # the old (stretched) gaps push the text past the column: re-typeset
             # it; a full-width line of a justified paragraph stays justified
@@ -2901,10 +2953,12 @@ def _moved_runs(page: pymupdf.Page, block_page: int, lines: list[TextLine], shif
             pieces = _place_line(rich, ln, ln.space_em, font_of)
         else:
             pieces = [(rich, b0)]
+        line_runs: list[TextRun] = []
         for piece, x in pieces:
             off = x - b0
-            runs.extend(_emit_line(piece, (base[0] + ln.dir[0] * off, base[1] + ln.dir[1] * off), ln.dir,
-                                   ln.space_em, 0.0, font_of, ln.decor))
+            line_runs.extend(_emit_line(piece, (base[0] + ln.dir[0] * off, base[1] + ln.dir[1] * off), ln.dir,
+                                        ln.space_em, 0.0, font_of, ln.decor))
+        runs.extend(_bridge_line(line_runs) if len(pieces) > 1 else line_runs)
     return runs
 
 

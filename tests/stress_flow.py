@@ -48,10 +48,18 @@ for page in range(0, orig.page_count, step):
     if over > base_over:
         problems.append((page, f"overlaps {base_over} -> {over}"))
     shift = len(res.inserted)
+    import re as _re
+    numbered = lambda hs, p, n: [_re.sub(r"\bSide \d+ af \d+", f"Side {p + 1} af {n}", x) for x in hs]
     for q, h in heads.items():
         qq = q + (shift if res.inserted and q >= res.inserted[0] else 0)
-        if qq < pdf.doc.page_count and singles(pdf.doc, qq) != h:
-            problems.append((page, f"header/footer on page {q}: {h} -> {singles(pdf.doc, qq)}"))
+        # headers / footers stay, page numbers follow the new page (F13)
+        want = numbered(h, qq, pdf.doc.page_count)
+        if qq < pdf.doc.page_count and singles(pdf.doc, qq) != want:
+            problems.append((page, f"header/footer on page {q}: {want} -> {singles(pdf.doc, qq)}"))
+    for q in res.inserted:
+        want = numbered(heads.get(q - 1, []), q, pdf.doc.page_count)
+        if singles(pdf.doc, q) != want:
+            problems.append((page, f"new page {q}: header/footer {singles(pdf.doc, q)} (want {want})"))
     pdf.undo()
     if body(pdf.doc) != base_body or pdf.doc.page_count != orig.page_count:
         problems.append((page, "undo does not restore"))

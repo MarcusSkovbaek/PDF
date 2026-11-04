@@ -798,7 +798,11 @@ def test_bulleted_list_items_are_blocks_of_their_own():
     assert info.soft_breaks == (0,) and info.wrap_width < 540 - 98
     replace_block_text(pdf, item, item.text.replace("Projekter", "Nye projekter"))
     new = next(b for b in text_blocks(pdf.doc, 0) if b.text.startswith("Nye projekter"))
-    assert len(new.lines) == 2 and new.bbox.x1 <= item.bbox.x1 + 1.0   # reflowed inside the item
+    body_right = max(ln.bbox.x1 for b in text_blocks(pdf.doc, 0) if b.text.startswith("Omsætningen")
+                     for ln in b.lines)
+    # reflowed like Word: up to the column's edge (the item wrapped there – "måned." did not fit)
+    assert len(new.lines) == 2 and new.bbox.x1 <= body_right + 1.0
+    assert te.layout_info(pdf.doc, new).soft_breaks == (0,)           # read back as one paragraph
     assert all(abs(ln.origin[0] - 98) < 0.5 for ln in new.lines)
 
 

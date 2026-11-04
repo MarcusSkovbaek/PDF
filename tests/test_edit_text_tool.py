@@ -296,6 +296,43 @@ def test_typing_that_overflows_the_page_flows_on(rep_tool, qapp):
     assert len(tool.ctx.pdf.history._undo) == 1 and before > 0
 
 
+def test_text_flows_on_while_typing_and_the_caret_follows(rep_tool, qapp):
+    tool = rep_tool
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    tool.start_edit(s.pieces[-1].block)
+    ed = tool.editor
+    cur = ed.textCursor()
+    cur.movePosition(QTextCursor.MoveOperation.End)
+    ed.setTextCursor(cur)
+    assert not tool.flow_now()                       # nothing changed yet: nothing to flow
+    extra = " Dette er en ny sætning, som skal flyde over på næste side."
+    ed.textCursor().insertText(extra * 4 + " SLUTORD")
+    assert tool._flow_timer.isActive()               # flows after a pause
+    assert tool.flow_now()
+    pdf = tool.ctx.pdf
+    assert "SLUTORD" in pdf.page(1).get_text() and "SLUTORD" not in pdf.page(0).get_text()
+    # the editor is open again – on the next page, with the caret right after what was typed
+    assert tool.editor is not None and tool.story.page == 1
+    cur = tool.editor.textCursor()
+    assert cur.block().text()[:cur.positionInBlock()].endswith("SLUTORD")
+    tool.editor.textCursor().insertText(" og mere")
+    tool.commit()
+    assert "SLUTORD og mere" in pdf.page(1).get_text()
+    assert len(pdf.history._undo) == 1             # one undo step for the whole session
+    pdf.undo()
+    assert "SLUTORD" not in pdf.doc[1].get_text()
+
+
+def test_typing_without_overflow_does_not_flow(rep_tool, qapp):
+    tool = rep_tool
+    s = next(x for x in tool.stories(0) if x.kind == "flow")
+    tool.start_edit(s.pieces[0].block)
+    tool.editor.textCursor().insertText("Ny ")
+    assert not tool.flow_now()
+    assert tool.editor is not None and not tool.ctx.pdf.history._undo
+    tool.cancel()
+
+
 # -- appearance -------------------------------------------------------------------------
 def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
     doc = pymupdf.open()

@@ -44,6 +44,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -79,6 +80,7 @@ from .base import Tool, ToolMouseEvent, ToolRegistry
 HOVER_PAD = 2.0      # pt around a hovered paragraph
 EDIT_PAD = 3.0       # pt around the paragraph being edited
 KEYS_GAP = 6         # px between the edit frame and the key-hint chip
+FLOW_PAUSE_MS = 500  # typing pause after which text that no longer fits flows on (F9)
 RECENT_FONTS_KEY = "edit/recentFonts"
 RECENT_FONTS_MAX = 5
 SHOW_BOXES_KEY = "edit/showAllTextBoxes"
@@ -1081,6 +1083,14 @@ class EditTextTool(Tool):
         self._warm_timer.setInterval(350)
         self._warm_timer.timeout.connect(self._warm_step)
         self._warm_queue: list[tuple[str, int]] = []
+        # text that no longer fits its column flows on while typing (after a pause)
+        self._flow_timer = QTimer(self)
+        self._flow_timer.setSingleShot(True)
+        self._flow_timer.setInterval(FLOW_PAUSE_MS)
+        self._flow_timer.timeout.connect(self.flow_now)
+        self._limits: tuple | None = None    # (area bottom t, s range, obstacles in the story frame)
+        self._flow_sig: tuple | None = None  # line counts the page layout reflects
+        self._last_flow: flow.FlowResult | None = None
 
     # -- lifecycle ---------------------------------------------------------
     def activate(self, ctx) -> None:
@@ -1327,8 +1337,6 @@ class EditTextTool(Tool):
         button = ev.button if kind != QEvent.Type.MouseMove else Qt.MouseButton.NoButton
         if button == Qt.MouseButton.NoButton and kind != QEvent.Type.MouseMove:
             button = Qt.MouseButton.LeftButton
-        from PySide6.QtWidgets import QApplication
-
         QApplication.sendEvent(target, QMouseEvent(kind, pos, glob, button, ev.buttons, ev.modifiers))
         return True
 
@@ -1517,6 +1525,8 @@ class EditTextTool(Tool):
         self._keys_covers_text = False
         ed.textChanged.connect(self._on_typed)
         self._reposition()
+        self._story_limits()
+        self._flow_sig = self._line_counts()
         self._render_background()
         ed.show()
         self._keys.show()
@@ -1558,6 +1568,145 @@ class EditTextTool(Tool):
     def _on_typed(self) -> None:
         if self._keys is not None and self._keys_covers_text:
             self._keys.hide()
+        if self.story is not None and self.story.kind == "flow" and not self._committing:
+            self._flow_timer.start()
+
+    # -- flowing on while typing (F9) ---------------------------------------------
+    def _story_limits(self) -> None:
+        """The column's bottom and what the text flows around, in the
+        editor's frame (pt along the text and from line to line)."""
+        self._limits = None
+        story = self.story
+        if story is None or story.kind != "flow":
+            return
+        try:
+            lim = flow.column_limits(self.ctx.pdf.doc, story)
+        except Exception:  # noqa: BLE001 – flowing on is a convenience
+            return
+        u, v = self._axes
+
+        def local(r: pymupdf.Rect) -> tuple[float, float, float, float]:
+            pts = [_local(self._anchor, u, v, x, y) for x in (r.x0, r.x1) for y in (r.y0, r.y1)]
+            return (min(p[0] for p in pts), max(p[0] for p in pts), min(p[1] for p in pts), max(p[1] for p in pts))
+
+        area = local(lim.area)
+        self._limits = (area[3], [local(o) for o in lim.obstacles])
+
+    def _line_counts(self) -> tuple:
+        out = []
+        q = self.editor.document().begin()
+        layout = self.editor.document().documentLayout()
+        while q.isValid():
+            layout.blockBoundingRect(q)
+            ql = q.layout()
+            out.append(ql.lineCount() if ql is not None else 0)
+            q = q.next()
+        return tuple(out)
+
+    def _flow_needed(self) -> bool:
+        """Did the text grow into the page's bottom margin or into an image,
+        figure or table? (Only then does the page have to change now – text
+        that got shorter is pulled back when editing ends.)"""
+        if self.editor is None or self._limits is None:
+            return False
+        sig = self._line_counts()
+        if sig == self._flow_sig:
+            return False
+        bottom, obstacles = self._limits
+        s0, _s1, t0 = self._box
+        ppp = self._ppp
+        doc = self.editor.document()
+        q = doc.begin()
+        k = 0
+        while q.isValid():
+            ql = q.layout()
+            idx = self._piece_index(q)
+            look = self._looks[idx] if idx is not None and idx < len(self._looks) else (
+                self._looks[min(k, len(self._looks) - 1)] if self._looks else None)
+            em = look.style.size if look is not None else 10.0
+            if ql is not None:
+                pos = ql.position()
+                for i in range(ql.lineCount()):
+                    line = ql.lineAt(i)
+                    base = t0 + (pos.y() + line.y() + line.ascent()) / ppp
+                    a = s0 + (pos.x() + line.x()) / ppp
+                    b = a + line.naturalTextWidth() / ppp
+                    if base + 0.2 * em > bottom + 0.5:
+                        return True
+                    top, bot = base - 0.7 * em, base + 0.2 * em
+                    for o0, o1, c0, c1 in obstacles:
+                        if min(b, o1) - max(a, o0) > 0.5 and bot > c0 and top < c1:
+                            return True
+            q = q.next()
+            k += 1
+        return False
+
+    def flow_now(self) -> bool:
+        """F9: write the text and let it flow on to the next page (one undo
+        step with the rest of the session), then go on typing where the
+        caret ended up. Returns True if it flowed."""
+        ed, story = self.editor, self.story
+        if ed is None or story is None or story.kind != "flow" or self._committing:
+            return False
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton or ed.textCursor().hasSelection():
+            self._flow_timer.start()          # mid-drag / a selection: later
+            return False
+        if not self._flow_needed():
+            return False
+        cur = ed.textCursor()
+        k = cur.block().blockNumber()
+        offset = cur.position() - cur.block().position()
+        typed = cur.block().text()[:offset]
+        session = self._session
+        edits = self.collect_edits()
+        self._teardown()
+        self._committing = True
+        self._last_flow = None
+        try:
+            self._write_story(story, edits, session)
+        except Exception as exc:  # noqa: BLE001 – never lose the user's session silently
+            self.ctx.toast(tr("edit.text.error", err=str(exc)), "error")
+            return False
+        finally:
+            self._committing = False
+        res = self._last_flow
+        where = res.locate(k, offset) if res is not None else None
+        doc = self.ctx.pdf.doc
+        if where is None:
+            return True
+        page, (x, y) = where
+        found = flow.story_at(doc, page, (x, y))
+        if found is None:
+            return True
+        self.start_story(found[0], click=(page, QPointF(x, y)), session=session)
+        self._caret_after(typed)
+        return True
+
+    def _caret_after(self, typed: str) -> None:
+        """Put the caret right after ``typed`` (the text before it before
+        the flow) near where the click put it – the position on the page is
+        only as exact as the on-screen font."""
+        ed = self.editor
+        if ed is None or not typed.strip():
+            return
+        cur = ed.textCursor()
+        q = cur.block()
+        text = q.text().replace(_LS, "\n")
+        here = cur.position() - q.position()
+        typed = typed.replace(_LS, "\n")
+        for n in (40, 20, 10, 4):
+            tail = typed[-n:]
+            ends = []
+            i = text.find(tail)
+            while i >= 0:
+                ends.append(i + len(tail))
+                i = text.find(tail, i + 1)
+            if ends:
+                best = min(ends, key=lambda e: abs(e - here))
+                if abs(best - here) <= 40:
+                    cur.setPosition(q.position() + best)
+                    ed.setTextCursor(cur)
+                return
 
     def _px_per_pt(self) -> float:
         """Viewport pixels per pt, exactly (a column is hundreds of pt tall:
@@ -2045,6 +2194,8 @@ class EditTextTool(Tool):
     def _teardown(self) -> None:
         page = self.story.page if self.story is not None else None
         self._bg_timer.stop()
+        self._flow_timer.stop()
+        self._limits = self._flow_sig = None
         if self._proxy is not None:
             if self.ctx is not None:
                 self.ctx.view.remove_overlay(self._proxy)
@@ -2158,6 +2309,7 @@ class EditTextTool(Tool):
         offer to make it smaller."""
         pdf = self.ctx.pdf
         res = flow.apply_story(pdf, story, edits, merge=session if story.kind == "flow" else None)
+        self._last_flow = res
         for wanted, used in res.substitutions[:2]:
             self.ctx.toast(tr("edit.text.substituted", font=display_font_name(wanted), used=display_font_name(used)),
                            "info")
@@ -2215,8 +2367,12 @@ class EditTextTool(Tool):
             return                       # still scrolling: the timer comes back
         if not self._warm_queue:
             here = self.ctx.view.current_page
-            pages = [p for p in (here, here + 1) if 0 <= p < self.ctx.pdf.page_count]
+            count = self.ctx.pdf.page_count
+            pages = [p for p in (here, here + 1) if 0 <= p < count]
             self._warm_queue = [(what, p) for p in pages for what in ("stories", "fonts", "backdrop")]
+            # the pages around: the text flow measures the type area on them
+            self._warm_queue += [("stories", p) for p in (here - 1, here + 2, here - 2, here + 3, here - 3)
+                                 if 0 <= p < count]
         what, page = self._warm_queue.pop(0)
         self._warm_one(what, page)
         if self._warm_queue:

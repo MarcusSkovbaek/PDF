@@ -977,6 +977,18 @@ def _embedded_covers(font: pymupdf.Font, text: str, pairs: dict[int, int]) -> bo
 _EMBEDDED_CACHE_MAX = 64
 
 
+def _font_resources(page: pymupdf.Page) -> bytes:
+    """The page's font resources (cheap: the /Font dictionary itself; only
+    pages that inherit their resources need the full scan)."""
+    doc = page.parent
+    kind, val = doc.xref_get_key(page.xref, "Resources/Font")
+    if kind == "xref":
+        return doc.xref_object(int(val.split()[0]), compressed=True).encode()
+    if kind == "dict":
+        return val.encode()
+    return str(page.get_fonts(full=False)).encode()
+
+
 def _page_key(page: pymupdf.Page) -> bytes:
     """Identifies a page's content (and so the fonts it uses) – equal bytes
     on equal pages, also across undo (which replaces the document object)."""
@@ -984,7 +996,7 @@ def _page_key(page: pymupdf.Page) -> bytes:
 
     try:
         data = page.read_contents()
-        fonts = str(page.get_fonts(full=False)).encode()
+        fonts = _font_resources(page)
     except Exception:
         data, fonts = b"", b""
     return hashlib.blake2b(data + fonts + str((page.number, page.rotation)).encode(), digest_size=16).digest()

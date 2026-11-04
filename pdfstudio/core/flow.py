@@ -1317,6 +1317,36 @@ def _apply_single(pdf, story: Story, edits: list[Edit], merge, result: FlowResul
     return result
 
 
+@dataclass
+class Limits:
+    """Where a flow story's text may go on its own page (display space)."""
+
+    area: pymupdf.Rect                                   # the column within the type area
+    obstacles: list = field(default_factory=list)        # rects the text must keep clear of
+
+
+def column_limits(doc, story: Story) -> Limits:
+    """The column of ``story`` on its page: the type area (between header
+    and footer) and what text flows around (images, figures, tables,
+    other text) – an editor uses it to see when the text must flow on."""
+    pg = doc[story.page]
+    rot = pg.rotation_matrix
+    if story.kind != "flow" or not story.pieces:
+        return Limits(area=pymupdf.Rect(story.rect))
+    d = story.dir
+    n = _perp(d)
+    info = _analyze(doc, story.page)
+    area = _type_area(doc, story.page, story, info)
+    frame = _frame(doc, story.page, story, info, area, n, d, set())
+
+    def display(a0: float, a1: float, c0: float, c1: float) -> pymupdf.Rect:
+        pts = [pymupdf.Point(a * d[0] + c * n[0], a * d[1] + c * n[1]) * rot for a in (a0, a1) for c in (c0, c1)]
+        return pymupdf.Rect(min(p.x for p in pts), min(p.y for p in pts), max(p.x for p in pts), max(p.y for p in pts))
+
+    return Limits(area=display(story.lo, story.hi, frame.top, frame.bottom),
+                  obstacles=[display(a0, a1, c0, c1) for a0, a1, c0, c1 in frame.bands])
+
+
 def _story_sig(story: Story) -> tuple:
     return (story.page, story.kind, tuple(tuple(round(v, 1) for v in p.block.bbox) for p in story.pieces))
 
@@ -1375,5 +1405,5 @@ def render_without(doc, story: Story, zoom: float, *, clip=None, alpha: bool = F
     return page.get_pixmap(**kw)
 
 
-__all__ = ["Edit", "FlowResult", "Piece", "Story", "apply_story", "page_stories", "prepare_without", "render_without",
-           "story_at"]
+__all__ = ["Edit", "FlowResult", "Limits", "Piece", "Story", "apply_story", "column_limits", "page_stories",
+           "prepare_without", "render_without", "story_at"]

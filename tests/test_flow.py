@@ -275,3 +275,22 @@ def test_backdrop_without_the_story_is_cached_and_follows_edits():
     flow.apply_story(pdf, st, edits)
     st2 = next(s for s in flow.page_stories(pdf.doc, 0) if s.kind == "flow")
     assert flow._text_free_page(pdf.doc, st2) is not text_free        # the page changed: built anew
+
+
+def test_a_growing_list_item_stays_one_item_over_repeated_edits():
+    """The item's new lines and the paragraph after the list end up in one
+    MuPDF block: they are still read back as the item and a paragraph, and
+    the item's line breaks stay soft (wide capitals included)."""
+    pdf = _pdf(report(1))
+    add = " Endnu en sætning med nye ord, som fylder en hel linje i spalten her. MÆRKE"
+    for i in range(3):
+        st = next(s for s in flow.page_stories(pdf.doc, 0) if s.kind == "flow")
+        k = max(j for j, p in enumerate(st.pieces) if p.bullet is not None)      # the last list item
+        after = st.pieces[k + 1].text
+        edits = [flow.Edit(piece=j, text=p.text + (add + str(i) if j == k else "")) for j, p in enumerate(st.pieces)]
+        flow.apply_story(pdf, st, edits)
+        st = next(s for s in flow.page_stories(pdf.doc, 0) if s.kind == "flow")
+        item = st.pieces[k]
+        assert item.bullet is not None and item.text.endswith(f"MÆRKE{i}")
+        assert "\n" not in item.text                                   # one paragraph, soft breaks only
+        assert st.pieces[k + 1].text.split()[:4] == after.split()[:4]  # the next paragraph is its own

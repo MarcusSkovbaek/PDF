@@ -970,6 +970,8 @@ def _merge_groups(groups: list[list[TextLine]], items: dict[int, float] | None =
         return groups
     import bisect
 
+    groups = _split_item_tails(groups, items)
+
     by_dir: dict[tuple, list[list[TextLine]]] = {}
     for g in groups:
         by_dir.setdefault((round(g[0].dir[0], 3), round(g[0].dir[1], 3)), []).append(g)
@@ -1014,6 +1016,50 @@ def _merge_groups(groups: list[list[TextLine]], items: dict[int, float] | None =
         n = _perp(g[0].dir)
         g.sort(key=lambda ln: (round(_dot(ln.raw_origin, n), 1), _dot(ln.raw_origin, ln.dir)))
     return _reading_order(out)
+
+
+def _split_item_tails(groups: list[list[TextLine]], items: dict[int, float]) -> list[list[TextLine]]:
+    """A block that continues a list item (its first lines at the item's
+    indentation, right below it or below another such block) and then goes
+    back to the margin holds the end of the item and the paragraph after
+    the list – MuPDF puts them in one block when an edit wrote them one
+    after the other."""
+    heads = [(g, g[0].extent[0]) for g in groups if g and id(g[0]) in items and not _is_bullet(g[0])]
+    if not heads:
+        return groups
+    out = list(groups)
+    seen = {id(g) for g, _x in heads}
+    changed = True
+    while changed:
+        changed = False
+        for gi, g in enumerate(out):
+            if not g or id(g) in seen or id(g[0]) in items or _is_bullet(g[0]):
+                continue
+            first = g[0]
+            n = _perp(first.dir)
+            size = max(first.style.size, 1.0)
+            item_x = None
+            for ig, x in heads:
+                if ig[-1].dir != first.dir:
+                    continue
+                gap = _dot(first.raw_origin, n) - _dot(ig[-1].raw_origin, n)
+                if 0.85 * size <= gap <= 1.65 * size and first.extent[0] >= x - 0.5 * size:
+                    item_x = x
+                    break
+            if item_x is None:
+                continue
+            seen.add(id(g))
+            cut = next((i for i, ln in enumerate(g) if ln.extent[0] < item_x - 0.5 * max(ln.style.size, 1.0)), None)
+            if cut:
+                head, tail = g[:cut], g[cut:]
+                out[gi:gi + 1] = [head, tail]
+                seen.update((id(head), id(tail)))
+                heads.append((head, item_x))
+            else:
+                heads.append((g, item_x))
+            changed = True
+            break
+    return out
 
 
 def _merge_spaced_runs(groups: list[list[TextLine]], items: dict[int, float]) -> list[list[TextLine]]:
@@ -2069,6 +2115,10 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         word = text.split(" ", 1)[0] if text else ""
         if not word or not ln.text:
             return 0.0
+        if len(ln.char_pos) == len(ln.text):
+            i0 = len(ln.text) - len(text)
+            i1 = i0 + len(word) - 1
+            return max(0.0, ln.char_pos[i1][1] - ln.char_pos[i0][0])   # the real glyph advances
         return (ln.extent[1] - ln.extent[0]) * len(word) / max(len(ln.text), 1)
 
     def soft_break_after(i: int) -> bool:
@@ -2101,6 +2151,14 @@ def _plan(page: pymupdf.Page, block: TextBlock, new_text: str, style: SpanStyle 
         # that may grow sideways like point text instead of reflowing
         paragraph = False
         max_width = _available_width(ctx, block, d, align, lmin, rmax, False)
+    elif paragraph and align == "left" and not justified_block and column_hi > rmax + 0.5:
+        # ragged text whose every wrap is one where the next word did not fit
+        # up to the column's edge: it was set to that edge (its widest line
+        # just happens to be shorter) – new text wraps there too, as the
+        # breaks are read back
+        wraps = [i for i in range(n_old - 1) if full[i] and abs(old[i + 1].extent[0] - cont_x) <= 1.0]
+        if wraps and all(soft_break_after(i) for i in wraps):
+            max_width = max(max_width, column_hi - lmin)
     if not paragraph and n_old == 1 and _is_axis(d) and max_width > 0:
         # a single line (a table cell, a label) grows sideways only until the
         # next text on its row: beyond that it would print over its neighbour

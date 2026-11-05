@@ -21,6 +21,7 @@ Extension points: ``InlineTextEditor`` (the editor widget),
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from dataclasses import dataclass, replace
 
@@ -1536,7 +1537,12 @@ class EditTextTool(Tool):
         ed.setFocus(Qt.FocusReason.MouseFocusReason)
         # the caret: where the click was, or in the given paragraph
         cur = ed.textCursor()
-        if click is not None and self._proxy is None:
+        at = self._caret_from_pdf(click[1]) if click is not None else None
+        if at is not None:
+            # where the click was among the PDF's own glyphs (the screen font
+            # may be narrower or wider than the PDF's)
+            cur.setPosition(at)
+        elif click is not None and self._proxy is None:
             page, pos = click
             vp = view.page_to_viewport(page, pos)
             cur = ed.cursorForPosition(ed.viewport().mapFrom(view.viewport(), vp.toPoint()))
@@ -1555,6 +1561,37 @@ class EditTextTool(Tool):
         self.changed.emit()
         if self._panel is not None:
             self._panel.refresh()
+
+    def _caret_from_pdf(self, pos) -> int | None:
+        """Editor position of the character boundary nearest to the display
+        point ``pos``, from the glyph positions of the story's paragraphs."""
+        story, ed = self.story, self.editor
+        if story is None or ed is None:
+            return None
+        px, py = pos.x(), pos.y()
+        best = None
+        for k, piece in enumerate(story.pieces):
+            for li, ln in enumerate(piece.block.lines):
+                r = ln.bbox
+                dy = 0.0 if r.y0 <= py <= r.y1 else min(abs(py - r.y0), abs(py - r.y1))
+                dx = 0.0 if r.x0 <= px <= r.x1 else min(abs(px - r.x0), abs(px - r.x1))
+                key = (round(dy, 3), round(dx, 3))
+                if best is None or key < best[0]:
+                    best = (key, k, li, ln)
+        if best is None:
+            return None
+        _key, k, li, ln = best
+        if len(ln.char_pos) != len(ln.text) or not ln.text:
+            return None
+        u = _unit(story.pieces[k].block)[0]
+        s_along = ln.extent[0] + (px - ln.origin[0]) * u[0] + (py - ln.origin[1]) * u[1]
+        bounds = [a for a, _b in ln.char_pos] + [ln.char_pos[-1][1]]
+        j = min(range(len(bounds)), key=lambda i: abs(bounds[i] - s_along))
+        offset = sum(len(x.text) + 1 for x in story.pieces[k].block.lines[:li]) + j
+        q = ed.document().findBlockByNumber(k)
+        if not q.isValid():
+            return None
+        return q.position() + max(0, min(offset, q.length() - 1))
 
     def _keys_html(self) -> str:
         """The key hints with the keys emphasised: "<b>Esc</b> afslutter · ..."."""
@@ -1812,14 +1849,32 @@ class EditTextTool(Tool):
         lines = [ln for ln in block.lines if len(ln.text.strip()) >= 4]
         if not lines:
             return 100.0
-        ln = max(lines, key=lambda ln: len(ln.text))
         ppp = self._ppp
-        font = self._qfont(look.style, ppp)
-        qt_w = QFontMetricsF(font).horizontalAdvance(ln.text.rstrip())
-        pdf_w = (ln.extent[1] - ln.extent[0]) * ppp
+        fm = QFontMetricsF(self._qfont(look.style, ppp))
+        qt_w = pdf_w = 0.0
+        longest = sorted(lines, key=lambda ln: -len(ln.text))[:4]
+        if look.align == "justify":
+            # the words' own widths (the stretched gaps do not count)
+            for ln in longest:
+                if len(ln.char_pos) != len(ln.text):
+                    continue
+                for m in re.finditer(r"\S+", ln.text):
+                    a, b = m.start(), m.end() - 1
+                    pdf_w += (ln.char_pos[b][1] - ln.char_pos[a][0]) * ppp
+                    qt_w += fm.horizontalAdvance(m.group())
+        else:
+            for ln in longest:
+                qt_w += fm.horizontalAdvance(ln.text.rstrip())
+                pdf_w += (ln.extent[1] - ln.extent[0]) * ppp
+        if qt_w <= 0 or pdf_w <= 0:
+            ln = max(lines, key=lambda ln: len(ln.text))
+            qt_w = fm.horizontalAdvance(ln.text.rstrip())
+            pdf_w = (ln.extent[1] - ln.extent[0]) * ppp
         if qt_w <= 0:
             return 100.0
-        return max(85.0, min(115.0, 100.0 * pdf_w / qt_w))
+        # (a screen font far from the PDF's – e.g. no such family installed –
+        # still lines up: its letters are spaced to the PDF's widths)
+        return max(50.0, min(200.0, 100.0 * pdf_w / qt_w))
 
     def _char_base(self, look: _Look, changes: dict | None = None) -> QTextCharFormat:
         style = look.style

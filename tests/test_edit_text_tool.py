@@ -354,6 +354,34 @@ def test_editor_follows_core_alignment(win, qapp, tmp_path):  # noqa: F811
     tool.cancel()
 
 
+def test_editor_lines_up_with_a_screen_font_unlike_the_pdfs(win, qapp, tmp_path, monkeypatch):  # noqa: F811
+    """The screen font may be far from the PDF's (a family that is not
+    installed – Windows' offscreen platform): the click still lands on the
+    clicked character and the lines still start where the PDF's do."""
+    from pdfstudio.core import fonts
+
+    monkeypatch.setattr(fonts, "qt_family_hint", lambda style: "Courier New")
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_textbox(pymupdf.Rect(100, 100, 500, 200), "Brødtekst der fylder hele tekstområdet ud. " * 4,
+                      fontname="helv", fontsize=12)
+    pg.insert_textbox(pymupdf.Rect(100, 260, 500, 360), "Højrestillet adresse\nPostnummer og by",
+                      fontname="helv", fontsize=12, align=2)
+    path = str(tmp_path / "mono.pdf")
+    doc.save(path)
+    ws, tool = _open_edit(win, qapp, path)
+    b = next(x for x in tool.blocks(0) if x.text.startswith("Brødtekst"))
+    x, y, i = _char_point(b, 1, "tekstområdet")
+    tool.mouse_press(ev(tool.ctx.view, 0, x, y))
+    tool.mouse_release(ev(tool.ctx.view, 0, x, y, buttons=Qt.MouseButton.NoButton))
+    qapp.processEvents()
+    cur = tool.editor.textCursor()
+    line0 = len(b.lines[0].text) + 1
+    assert abs(cur.positionInBlock() - (line0 + i)) <= 1
+    assert max(_baseline_errors(tool)) <= 2.5
+    tool.cancel()
+
+
 def test_font_list_previews_families(tool):
     tool.start_edit(_block(tool, "Dette"))
     panel = tool.properties_widget()

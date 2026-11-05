@@ -16,8 +16,15 @@ soft-break test, wide justified gaps bridged with a widened space so MuPDF keeps
 paragraphs, arrows/Tab move on, Esc keeps, typing pauses flow the text on with the caret following
 (`flow_now`), symbol-font bullets drawn readable, idle preparation of the visible and neighbour pages.
 **Measured** (58-page LibreOffice report): click → caret 66 ms on a prepared page (213 ms cold, F19 target
-150 ms), flow while typing 355–640 ms for two pages, stress test (`tests/stress_flow.py`, every 4th page grown):
-13 edits avg ~200 ms, 0 problems (text order, overlaps, headers/footers incl. page numbers, undo).
+150 ms), flow while typing 355–640 ms for two pages. Stress test (`tests/stress_flow.py`, a paragraph grown on
+EVERY page): 55 edits, avg 305 ms, max 1.2 s (the three edits that add a page and renumber all 58 footers),
+0 problems (text order and spaces, overlaps, headers/footers incl. page numbers, undo). The first full run found
+words glued together after a bold/italic word (3 of 55) – fixed (spaces of their own style are drawn, a space
+without glyph keeps MuPDF's 0.2 em word gap, wide gaps get a plain centred space; a widened space is read by
+MuPDF as a bigger text size, so only for gaps over 1.4 em).
+**Windows**: CI green (run 12); the editor no longer relies on the screen font's metrics (Windows' offscreen
+platform substitutes fonts): the first click places the caret from the PDF's glyph positions, letter spacing
+matches the words' widths (50–200 %).
 Speed-ups on the way: one redaction annotation with QuadPoints instead of one per rect (render_without
 200 → 40 ms), cheap page keys (font dict instead of `get_fonts`), no inspector re-layout on tool state changes.
 **Limitations** (spec): no selection across columns/pages, figures do not move, no column-to-column flow on

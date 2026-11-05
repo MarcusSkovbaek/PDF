@@ -1313,6 +1313,9 @@ def _bridge_gaps(runs: list[TextRun]) -> list[TextRun]:
     for i, r in enumerate(runs):
         nxt = runs[i + 1] if i + 1 < len(runs) else None
         horizontal = abs(r.dir[0] - 1.0) < 1e-4 and abs(r.dir[1]) < 1e-4
+        if horizontal and r.stretch == 1.0 and " " in r.text and r.text.strip() and not has_space(r.font):
+            out.extend(_narrow_spaces(r, nxt))
+            continue
         if (nxt is None or not horizontal or r.stretch != 1.0 or not r.text.endswith(" ") or not r.text.strip()
                 or r.space or abs(nxt.origin[1] - r.origin[1]) > 0.01 or nxt.dir != r.dir or not has_space(r.font)):
             out.append(r)
@@ -1330,8 +1333,9 @@ def _bridge_gaps(runs: list[TextRun]) -> list[TextRun]:
             continue
         out.append(replace(r, text=body, width=r.width - (r.font.text_length(r.text, fontsize=r.size)
                                                            - (end - r.origin[0])) if r.width else 0.0))
-        out.append(replace(r, text=" ", origin=(end, r.origin[1]), width=0.0, underline=None, strike=None,
-                           stretch=gap / sw))
+        space = _gap_space(r.font, r.size, r.color, (end, r.origin[1]), gap, r.dir)   # centred / widened
+        if space is not None:
+            out.append(space)
     return out
 
 
@@ -1344,6 +1348,70 @@ def _spacer_font() -> pymupdf.Font:
     if not _SPACER:
         _SPACER.append(pymupdf.Font("helv"))
     return _SPACER[0]
+
+
+#: a gap between glyphs narrower than this (× size) reads as no space in MuPDF
+_SPACE_GAP = 0.2
+#: a space glyph keeps a line together across a gap up to its width + this (× size);
+#: wider gaps need a widened space (which MuPDF reads as a larger text size)
+_SPACE_SPAN = 1.4
+
+
+def _gap_space(font: pymupdf.Font, size: float, color, start: tuple[float, float], gap: float,
+               d=(1.0, 0.0)) -> TextRun | None:
+    """A space glyph for a gap of ``gap`` pt starting at ``start``: centred
+    in the gap (or at its start when the gap is narrower than the glyph),
+    widened only when the gap is too wide for a plain one."""
+    try:
+        sw = font.text_length(" ", fontsize=size)
+    except Exception:
+        return None
+    if sw <= 0:
+        return None
+    if gap - sw > _SPACE_SPAN * size:
+        return TextRun(text=" ", font=font, size=size, color=color, origin=start, dir=d, stretch=gap / sw)
+    off = max(0.0, (gap - sw) / 2)
+    return TextRun(text=" ", font=font, size=size, color=color,
+                   origin=(start[0] + d[0] * off, start[1] + d[1] * off), dir=d)
+
+
+def _narrow_spaces(r: TextRun, nxt: TextRun | None) -> list[TextRun]:
+    """A run in a font without a space glyph (a subset): its spaces are
+    gaps only, and a gap narrower than MuPDF's word-space threshold (a
+    tight line, or the space before a word in another style that pushed
+    up against it) would glue the words together. Such gaps get a real
+    space glyph of a standard font (referenced, never embedded), sized to
+    the gap; wider gaps stay plain gaps."""
+    text = prepare_text(r.font, r.text)
+    sp = r.space if r.space else 0.25 * r.size
+    pieces = [p for p in re.split(r"( +)", text) if p]
+    trailing = pieces[-1][0] == " "
+    end_gap = None
+    if trailing and nxt is not None and abs(nxt.origin[1] - r.origin[1]) < 0.01 and nxt.dir == r.dir:
+        body = text.rstrip(" ")
+        end_gap = nxt.origin[0] - (r.origin[0] + text_width(r.font, body, r.size, r.space))
+    narrow = sp < _SPACE_GAP * r.size and len(pieces) > 1
+    if not narrow and not (end_gap is not None and 0 < end_gap < _SPACE_GAP * r.size):
+        return [r]
+    spacer = _spacer_font()
+    sw = spacer.text_length(" ", fontsize=r.size)
+    out: list[TextRun] = []
+    x = 0.0
+    for k, piece in enumerate(pieces):
+        if piece[0] == " ":
+            last = k == len(pieces) - 1
+            gap = end_gap if last and end_gap is not None else sp * len(piece)
+            if sw > 0 and gap > 0 and (gap < _SPACE_GAP * r.size or (narrow and not last)):
+                run = _gap_space(spacer, r.size, r.color, (r.origin[0] + x, r.origin[1]), gap, r.dir)
+                if run is not None:
+                    out.append(run)
+            x += gap if gap > 0 else sp * len(piece)
+            continue
+        w = text_width(r.font, piece, r.size, r.space)
+        out.append(replace(r, text=piece, origin=(r.origin[0] + x, r.origin[1]), width=w,
+                           underline=None, strike=None))
+        x += w
+    return out      # (underline / strike strokes are drawn from the runs as given)
 
 
 def _bridge_line(runs: list[TextRun]) -> list[TextRun]:
@@ -1378,10 +1446,9 @@ def _bridge_line(runs: list[TextRun]) -> list[TextRun]:
             continue
         end, gap = wide[i]
         font = r.font if has_space(r.font) else _spacer_font()
-        sw = font.text_length(" ", fontsize=r.size)
-        if sw > 0:
-            out.append(TextRun(text=" ", font=font, size=r.size, color=r.color, origin=(end, r.origin[1]),
-                               dir=r.dir, stretch=gap / sw))
+        run = _gap_space(font, r.size, r.color, (end, r.origin[1]), gap, r.dir)
+        if run is not None:
+            out.append(run)
     return out
 
 
@@ -2641,7 +2708,11 @@ def _place_line(rich, old: TextLine, em, font_of, *, align: str = "left",
             elif prev is not None:
                 x = cursor + prev[2]           # keep the old gap width
             if cursor is not None:
-                x = max(x, cursor + 0.5 * (nat_gap or space_width(rich[a][1])))  # never touch
+                min_gap = 0.5 * (nat_gap or space_width(rich[a][1]))           # never touch
+                if gap is not None and not has_space(font_of(rich[gap[0]][1])):
+                    # a space that is only a gap (no space glyph): wide enough to read as one
+                    min_gap = max(min_gap, (_SPACE_GAP + 0.02) * rich[a][1].size)
+                x = max(x, cursor + min_gap)
             if faithful and a >= suffix_from:
                 delta = x - pos[a + to_old_suffix][0]
             if pieces and gap is not None and abs(x - flow) < 0.01:
@@ -2696,6 +2767,34 @@ def _place_line(rich, old: TextLine, em, font_of, *, align: str = "left",
         out.extend(pieces)
         if end is not None:
             cursor = end
+    # last guard: a space between two pieces that is not drawn as a glyph
+    # (a dropped cell gap, a font without space glyph) must stay a gap wide
+    # enough to read as a word space – the font we write with may be wider
+    # than the old glyphs
+    push = 0.0
+    for k in range(1, len(out)):
+        pa, pb, px = out[k - 1]
+        a, _b, x = out[k]
+        x += push
+        if a > pb:
+            sp = pb                                   # the space is between the pieces: not drawn
+        elif a == pb and pb > pa and text[pb - 1] == " ":
+            sp = pb - 1                               # the previous piece ends with the space
+        else:
+            out[k][2] = x
+            continue
+        word_end = pb
+        while word_end > pa and text[word_end - 1] == " ":
+            word_end -= 1
+        drawn = sp >= pa and sp < pb and has_space(font_of(rich[sp][1]))
+        if drawn or word_end <= pa:
+            out[k][2] = x
+            continue
+        need = px + natural(pa, word_end) + (_SPACE_GAP + 0.01) * rich[sp][1].size
+        if x < need:
+            push += need - x
+            x = need
+        out[k][2] = x
     return [(rich[a:b], x) for a, b, x in out]
 
 
@@ -2747,6 +2846,11 @@ def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = 
                         out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
                                            origin=(origin[0] + d[0] * mid, origin[1] + d[1] * mid), dir=d,
                                            space=space))
+                elif not extra and has_space(font) and len(pieces) == 1 and out and out[-1].text:
+                    # a space of its own style between two words (a bold word, then
+                    # a plain space): drawn, so the words never read as one
+                    out.append(TextRun(text=piece, font=font, size=st.size, color=tuple(st.color),
+                                       origin=(origin[0] + d[0] * x, origin[1] + d[1] * x), dir=d, space=space))
                 if (under or strike) and out:
                     # underline the space between two underlined words too
                     out.append(TextRun(text="", font=font, size=st.size, color=tuple(st.color),

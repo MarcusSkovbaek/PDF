@@ -830,3 +830,33 @@ def test_one_redaction_with_quads_removes_exactly_its_rects(rotation):
     assert "two" not in words and "four" not in words
     assert words.count("Line") == 4 and "one" in words and "three" in words
     assert not list(doc[0].annots())
+
+
+def test_a_space_between_two_styles_is_written_as_a_space():
+    """A bold word, a plain space, a plain word: the space is drawn (so the
+    words never read as one, however tight the gap), and with a plain space
+    glyph – not a widened one, which MuPDF reads as a bigger text size."""
+    from pdfstudio.core import text_edit as te
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    bold = SpanStyle(font="Helvetica-Bold", size=11, color=(0, 0, 0), bold=True)
+    plain = SpanStyle(font="Helvetica", size=11, color=(0, 0, 0))
+    fonts = {"b": pymupdf.Font("hebo"), "p": pymupdf.Font("helv")}
+
+    def font_of(st):
+        return fonts["b" if st.bold else "p"]
+
+    # two pieces of a line kept in place: the bold word with its (plain) space,
+    # then the next word pinned close behind it (the font we write with is wider)
+    first = [(c, bold, 0.0) for c in "Efterspørgsel"] + [(" ", plain, 0.0)]
+    runs = te._emit_line(first, (72, 100), (1.0, 0.0), None, 0.0, font_of)
+    assert [r.text for r in runs] == ["Efterspørgsel", " "]
+    end = 72 + fonts["b"].text_length("Efterspørgsel", fontsize=11)
+    runs += te._emit_line([(c, plain, 0.0) for c in "leverandører"], (end + 1.2, 100), (1.0, 0.0), None, 0.0,
+                          font_of)
+    te.write_runs(page, runs)
+    words = [w[4] for w in page.get_text("words")]
+    assert words == ["Efterspørgsel", "leverandører"]
+    sizes = {round(s["size"], 1) for b in page.get_text("dict")["blocks"] for ln in b["lines"] for s in ln["spans"]}
+    assert sizes == {11.0}

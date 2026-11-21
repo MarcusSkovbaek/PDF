@@ -104,6 +104,49 @@ STRINGS: dict[str, str] = {
     "objects.badge.size": "{w} × {h} mm",
     "objects.badge.pos": "X {x}   Y {y} mm",
     "objects.badge.width": "B {w} mm",
+    # -- inspector panels (WP-D2) ------------------------------------------------------
+    "objects.title.graphic.shape": "Figur",
+    "objects.title.graphic.line": "Linje",
+    "objects.title.graphic.background": "Baggrundsflade",
+    "objects.title.graphic.template": "Skabelongrafik",
+    "objects.title.graphic.table": "Tabellinje",
+    "objects.section.text": "Tekst",
+    "objects.section.style": "Udseende",
+    "objects.field.text_w.tip": "Tekstblokkens bredde – teksten ombrydes igen med samme skrift",
+    "objects.field.text_h.tip": "Højden følger teksten",
+    "objects.action.edit_text": "Redigér tekst",
+    "objects.action.edit_text.tip": "Åbn tekstblokken i Redigér tekst for at skrive i den eller ændre skriften "
+                                    "(også dobbeltklik)",
+    "objects.action.front": "Læg forrest",
+    "objects.action.back": "Læg bagerst",
+    "objects.action.front.tip": "Læg det markerede forrest, over alt andet på siden",
+    "objects.action.back.tip": "Læg det markerede bagerst, under alt andet på siden",
+    "objects.action.delete_sel.tip": "Slet det markerede",
+    "objects.stroke": "Streg",
+    "objects.fill": "Fyld",
+    "objects.width": "Stregtykkelse",
+    "objects.unit.pt": " pt",
+    "objects.stroke.title": "Stregfarve",
+    "objects.fill.title": "Fyldfarve",
+    "objects.stroke.tip": "Stregfarve – klik for at vælge",
+    "objects.fill.tip": "Fyldfarve – klik for at vælge",
+    "objects.stroke.none.tip": "Ingen streg",
+    "objects.fill.none.tip": "Intet fyld",
+    "objects.width.tip": "Stregtykkelse i punkter – bevares, når figuren skaleres",
+    "objects.style.need_one": "En figur skal have streg eller fyld – begge kan ikke fjernes",
+    "objects.style.fill_only": "Kun fyld",
+    "objects.style.with_fill": "{stroke} · med fyld",
+    "objects.style.no_fill": "{stroke} · uden fyld",
+    "objects.include": "Medtag indhold",
+    "objects.include.tip": "Et klik på en kasse markerer også teksten og det andet indhold i den, så de "
+                           "flyttes sammen",
+    "objects.tips.text": "Træk for at flytte, træk i siderne for at ændre bredden. Dobbeltklik for at "
+                         "redigere teksten. Ctrl+Shift+] / Ctrl+Shift+[ lægger forrest / bagerst.",
+    "objects.tips.graphic": "Træk for at flytte. Hjørnerne skalerer med samme forhold (Shift: frit, Alt: fra "
+                            "midten) – stregen bevarer sin tykkelse. Alt-klik når baggrunde og enkelte streger "
+                            "i en gruppe.",
+    "objects.tips.multi": "Træk for at flytte alt det markerede sammen (Shift: lige linje, Alt: uden "
+                          "hjælpelinjer). Shift-klik tilføjer eller fjerner et objekt.",
     # -- undo labels (UI) --------------------------------------------------------------
     "objects.undo.width": "Skift tekstbredde",
 }

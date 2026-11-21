@@ -338,19 +338,19 @@ def test_hover_outlines_text_and_graphics(sws):
 
 
 def test_click_selects_text_graphic_and_shift_click_toggles(sws):
-    from pdfstudio.ui.viewer.tools.edit_object import ObjectPanel
+    from pdfstudio.ui.viewer.tools._object_panels import TextObjectPanel
 
     tool = sws.tool
     click(tool, sws.view, 0, 150, 245)
     assert sel_kinds(tool) == ["text"] and PARA in tool.selected.text
     assert len(tool._frame.childItems()) == 2                                   # side handles (width)
     panel = sws.inspector.scroll.widget()
-    assert isinstance(panel, ObjectPanel) and panel.title.text() == "Tekst"
+    assert isinstance(panel, TextObjectPanel) and panel.title.text() == "Tekst"
     assert "almindelig" in panel.detail.text()
     click(tool, sws.view, 0, 150, 130)
     assert sel_kinds(tool) == ["graphic"] and rect_close(tool.selection()[0].rect, A)
     assert len(tool._frame.childItems()) == 4                                   # corner handles
-    assert sws.inspector.scroll.widget().title.text() == "Grafik"
+    assert sws.inspector.scroll.widget().title.text() == "Figur"           # WP-D2: the graphic's kind
     click(tool, sws.view, 0, 150, 245, mods=SHIFT)                              # add the text
     assert sel_kinds(tool) == ["graphic", "text"]
     assert len(tool._frame.childItems()) == 0                                   # text in it: no scaling

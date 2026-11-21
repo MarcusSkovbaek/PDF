@@ -28,8 +28,10 @@ design tool).
   Ctrl+A selects every object of the page, Ctrl+C / Ctrl+X / Ctrl+V copy,
   cut and paste (in-app clipboard: across pages, tabs and documents),
   Ctrl+D duplicates. A double-click on text opens *Redigér tekst* there.
-* The inspector shows a panel per selection kind (:attr:`EditObjectTool.PANELS`):
-  the image panel for one image, a general panel otherwise.
+* Ctrl+Shift+] / Ctrl+Shift+[ bring the selection to the front / send it
+  to the back.
+* The inspector shows a panel per selection kind (:attr:`EditObjectTool.PANELS`,
+  filled by :mod:`._object_panels`): text, graphic, several objects, image.
 
 All geometry is display space (page points, rotation applied), so every zoom
 level and rotated pages work; :mod:`pdfstudio.core.pageobjects` (and, for a
@@ -1278,6 +1280,8 @@ class EditObjectTool(Tool):
 
     # -- keyboard ---------------------------------------------------------------------------------
     _CTRL_KEYS = (Qt.Key.Key_C, Qt.Key.Key_X, Qt.Key.Key_V, Qt.Key.Key_D)
+    _RESTACK_KEYS = {Qt.Key.Key_BracketRight: 1, Qt.Key.Key_BraceRight: 1,
+                     Qt.Key.Key_BracketLeft: -1, Qt.Key.Key_BraceLeft: -1}
 
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802
         """Window shortcuts (Ctrl+D "Duplikér sider", Ctrl+C …) must not fire
@@ -1288,9 +1292,24 @@ class EditObjectTool(Tool):
             return True
         return False
 
+    @classmethod
+    def _restack_key(cls, ev: QKeyEvent) -> int:
+        """Ctrl+Shift+] (1 = "Læg forrest") / Ctrl+Shift+[ (-1 = "Læg bagerst"),
+        0 for any other key. Shift+] arrives as "}" on many layouts and the
+        brackets need AltGr on Nordic ones: both are accepted."""
+        mods = ev.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+        need = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier
+        if (mods & need) != need or mods & Qt.KeyboardModifier.MetaModifier:
+            return 0
+        return cls._RESTACK_KEYS.get(ev.key(), 0)
+
     def _wants_key(self, ev: QKeyEvent) -> bool:
         mods = ev.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
         ctrl = Qt.KeyboardModifier.ControlModifier
+        if self._restack_key(ev):
+            if self.ctx is not None and self.ctx.view.scene().focusItem() is not None:
+                return False
+            return bool(self._sel)
         if mods != ctrl or ev.key() not in self._CTRL_KEYS:
             return False
         if self.ctx is not None and self.ctx.view.scene().focusItem() is not None:
@@ -1304,6 +1323,12 @@ class EditObjectTool(Tool):
         mods = ev.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        front = self._restack_key(ev)
+        if front:
+            if not self._sel:
+                return False
+            self.restack(front > 0)
+            return True
         if ctrl and not shift and key in self._CTRL_KEYS:
             if key == Qt.Key.Key_V:
                 return self.paste()
@@ -2066,3 +2091,6 @@ class ImageObjectPanel(QWidget):
 
 
 __all__ = ["EditObjectTool", "ImageObjectPanel", "ObjectPanel", "snap_delta"]
+
+# WP-D2: the per-kind inspector panels register themselves in EditObjectTool.PANELS
+from . import _object_panels  # noqa: F401

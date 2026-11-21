@@ -1122,6 +1122,65 @@ def _geom_sig(u: _Unit) -> tuple:
     return tuple(out)
 
 
+_MAX_SEG_PAIRS = 40000
+
+
+def _segments(ev: _Ev) -> list:
+    """Flattened outline segments of a path in display space (closed
+    subpaths closed – also when the paint operator closes or fills)."""
+    segs = []
+    for pts, closed in ev.polys:
+        n = len(pts)
+        if n == 1:
+            segs.append((pts[0], pts[0]))
+            continue
+        last = n if (closed or ev.close or ev.fill) and n > 2 else n - 1
+        for i in range(last):
+            segs.append((pts[i], pts[(i + 1) % n]))
+    return segs
+
+
+def _orient(a, b, c) -> float:
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _seg_seg_dist2(p0, p1, q0, q1) -> float:
+    d1, d2 = _orient(q0, q1, p0), _orient(q0, q1, p1)
+    d3, d4 = _orient(p0, p1, q0), _orient(p0, p1, q1)
+    if ((d1 > 0 > d2) or (d1 < 0 < d2)) and ((d3 > 0 > d4) or (d3 < 0 < d4)):
+        return 0.0                                   # proper crossing
+    return min(_seg_dist2(p0[0], p0[1], q0[0], q0[1], q1[0], q1[1]),
+               _seg_dist2(p1[0], p1[1], q0[0], q0[1], q1[0], q1[1]),
+               _seg_dist2(q0[0], q0[1], p0[0], p0[1], p1[0], p1[1]),
+               _seg_dist2(q1[0], q1[1], p0[0], p0[1], p1[0], p1[1]))
+
+
+def _paths_touch(a: _Ev, b: _Ev) -> bool:
+    """The outlines of two paths come within 1 pt + half their stroke widths
+    (lying inside the other's fill without outline contact is no contact)."""
+    reach = 1.0 + (a.wdisp + b.wdisp) / 2
+    if not _touch(_grow(a.bbox, reach), b.bbox):
+        return False
+    sa, sb = _segments(a), _segments(b)
+    if len(sa) * len(sb) > _MAX_SEG_PAIRS:
+        return True                                  # too complex: the bbox test decides
+    r2 = reach * reach
+    for p0, p1 in sa:
+        bx0, bx1 = min(p0[0], p1[0]) - reach, max(p0[0], p1[0]) + reach
+        by0, by1 = min(p0[1], p1[1]) - reach, max(p0[1], p1[1]) + reach
+        for q0, q1 in sb:
+            if (max(q0[0], q1[0]) < bx0 or min(q0[0], q1[0]) > bx1
+                    or max(q0[1], q1[1]) < by0 or min(q0[1], q1[1]) > by1):
+                continue
+            if _seg_seg_dist2(p0, p1, q0, q1) <= r2:
+                return True
+    return False
+
+
+def _contact(u: _Unit, v: _Unit) -> bool:
+    return any(_paths_touch(a, b) for a in u.evs for b in v.evs)
+
+
 def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
     groups: list[list[_Unit]] = []
     cur: list[_Unit] | None = None
@@ -1136,7 +1195,7 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
         g = _grow(u.bbox, 1.0)
         join = (cur is not None and u.groupable and last is not None and last.groupable
                 and u.ev.cont is last.ev.cont and u.ev.brk == last.ev.brk and _touch(g, cur_box)
-                and any(_touch(g, b) for b in cur_boxes))
+                and any(_touch(g, b) and _contact(u, m) for b, m in zip(cur_boxes, cur)))
         if join:
             cur.append(u)
             cur_boxes.append(g)

@@ -827,3 +827,40 @@ def test_libreoffice_callout_box_border_lines_join_the_fill():
     (moved,) = gr.move_graphics(pdf, 0, box, 0, 50)
     assert_rect(moved.rect, box.rect + (0, 50, 0, 50))
     assert "Kvartalsrapport" in pdf.doc[0].get_text()
+
+
+# ---------------------------------------------------------------------------
+# grouping by geometric contact, not bounding boxes
+# ---------------------------------------------------------------------------
+def circle(cx, cy, r, op=b"f", colour=b"0 0 1 rg") -> bytes:
+    k = 0.5523 * r
+    return (f"q {colour.decode()} {cx + r} {cy} m {cx + r} {cy + k} {cx + k} {cy + r} {cx} {cy + r} c "
+            f"{cx - k} {cy + r} {cx - r} {cy + k} {cx - r} {cy} c {cx - r} {cy - k} {cx - k} {cy - r} {cx} {cy - r} c "
+            f"{cx + k} {cy - r} {cx + r} {cy - k} {cx + r} {cy} c h {op.decode()} Q\n").encode()
+
+
+def test_line_inside_a_circles_bbox_but_not_touching_it_is_separate():
+    # the cover case: a rule within the circle's bbox, far from its outline
+    content = circle(300, 400, 150) + b"q 1 1 1 RG 1 w 160 270 m 200 270 l S Q\n"
+    pdf, _ = build(content)
+    circ, line = gr.list_graphics(pdf.doc, 0)
+    assert circ.paths == (0,) and line.paths == (1,) and line.kind == "line"
+    assert gr.graphic_at(pdf.doc, 0, (180, 842 - 270)).paths == (1,)
+    assert gr.graphic_at(pdf.doc, 0, (300, 842 - 400)).paths == (0,)
+
+
+def test_small_circle_inside_a_filled_circle_is_separate():
+    content = circle(300, 400, 150) + circle(300, 400, 20, colour=b"1 0 0 rg")
+    pdf, _ = build(content)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,)]
+    assert gr.graphic_at(pdf.doc, 0, (300, 842 - 400)).paths == (1,)
+
+
+def test_contact_groups_still_form():
+    arrow = b"q 0 0 0 RG 1 w 100 500 m 200 500 l S Q\nq 0 g 200 495 m 212 500 l 200 505 l h f Q\n"
+    zigzag = (b"q 0 G 1 w 300 100 m 340 140 l S Q\nq 0 G 1 w 340 140 m 380 100 l S Q\n"
+              b"q 0 G 1 w 380 100 m 420 140 l S Q\n")
+    # a stroked circle and a line starting on its outline
+    ring = circle(450, 600, 40, op=b"S", colour=b"0 G 2 w") + b"q 0 G 2 w 490 600 m 540 600 l S Q\n"
+    pdf, _ = build(arrow + TEXT + zigzag + TEXT + ring)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1), (2, 3, 4), (5, 6)]

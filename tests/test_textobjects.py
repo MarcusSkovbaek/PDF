@@ -3,6 +3,7 @@ move (glyph for glyph, nothing else changes), list items, headers,
 captions, cells, rotated pages and text, undo, O17 (moved text is
 standalone), delete, clipboard strip, width, stacking order."""
 
+import os
 import time
 
 import pymupdf
@@ -681,3 +682,98 @@ def test_mark_free_records_pasted_text_and_a_move_keeps_what_it_lay_on():
     assert len(flow._free_blocks(tmp2, 0)) == 1
     to.delete_text_doc(tmp2, 0, [o for o in to.list_text(tmp2, 0) if o.free])
     assert flow._free_blocks(tmp2, 0) == []
+
+
+def _glyph_origins(page) -> list:
+    return [(c["c"], c["origin"][0], c["origin"][1])
+            for b in page.get_text("rawdict")["blocks"] for ln in b.get("lines", ())
+            for s in ln["spans"] for c in s["chars"] if c["c"].strip()]
+
+
+def test_text_in_an_odd_size_keeps_its_glyph_positions_when_moved_and_back():
+    # a size of 21.997 pt (LibreOffice) was written again as 22 pt (SpanStyle rounds
+    # to 0.01): the glyphs drifted 0.03 pt along a heading and rendered differently
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_text((60, 120), "Grøn vækst med ansvar og omtanke", fontname="helv", fontsize=21.997)
+    pg.insert_text((60, 200), "Brødtekst der står stille.", fontname="helv", fontsize=10.006)
+    pdf = _pdf(doc)
+    before = _glyph_origins(pdf.doc[0])
+    head = next(o for o in to.list_text(pdf.doc, 0) if o.text.startswith("Grøn"))
+    moved = to.move_text(pdf, 0, [head], 30, 20)
+    back = to.move_text(pdf, 0, moved, -30, -20)
+    assert back
+    after = _glyph_origins(pdf.doc[0])
+    assert len(after) == len(before)
+    for (c0, x0, y0), (c1, x1, y1) in zip(sorted(before), sorted(after)):
+        assert c0 == c1 and abs(x0 - x1) < 0.005 and abs(y0 - y1) < 0.005
+
+
+def test_moving_text_keeps_the_kerning_numbers_of_the_other_text_exact():
+    # applying the redactions rewrote every TJ array through single precision
+    # (-242 -> -242.00002): untouched glyphs on the 1/4-pixel grid edge flipped
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_text((72, 100), "Overskrift", fontname="helv", fontsize=14)
+    font = pg.get_fonts()[0][4]
+    xref = pg.get_contents()[0]
+    stream = doc.xref_stream(xref).decode("latin-1")
+    stream += (f"\nBT /{font} 10.5 Tf 72 200 Td [(Bliver) -242 (st) 18 (aaende) -247 (her)] TJ ET\n"
+               f"BT /{font} 10.5 Tf 72 500 Td [(Flyttes) -242 (nu)] TJ ET\n")
+    doc.update_stream(xref, stream.encode("latin-1"))
+    pdf = _pdf(doc)
+    stay = [g for g in _glyph_origins(pdf.doc[0]) if abs(g[2] - 642) < 1]
+    assert stay
+    obj = next(o for o in to.list_text(pdf.doc, 0) if o.text.startswith("Flyttes"))
+    assert to.move_text(pdf, 0, [obj], 0, 120)
+    data = b"".join(pdf.doc.xref_stream(c) for c in pdf.doc[0].get_contents())
+    assert b"-242.0" not in data and b"18.0" not in data and b"-247" in data
+    assert [g for g in _glyph_origins(pdf.doc[0]) if abs(g[2] - 642) < 1] == stay   # bit for bit
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+def test_table_labels_on_row_rules_moved_and_back_keep_their_glyphs():
+    # moved onto the table's row rules the labels read as underlined, so a line
+    # is written as several runs (underlined / plain): each run after the first
+    # was placed by the font's exact advances while viewers use the
+    # whole-thousandth /W – the rest of the line landed 1/1000 em off
+    pdf = PdfDocument.open(CORPUS)
+    obj = next(o for o in to.list_text(pdf.doc, 49) if o.text.startswith("Goodwill"))
+    before = _glyph_origins(pdf.doc[49])
+    moved = to.move_text(pdf, 49, [obj], 30, 20)
+    assert to.move_text(pdf, 49, moved, -30, -20)
+    after = _glyph_origins(pdf.doc[49])
+    assert len(after) == len(before)
+    worst = max(abs(a[1] - b[1]) for a, b in zip(sorted(before), sorted(after)))
+    assert worst < 0.006
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+def test_a_word_moved_out_of_its_row_and_back_stays_its_own_object():
+    # the pieces of a loose row were joined into one line again – the free word
+    # with the page's own words – so the moved word was lost as an object and the
+    # row bound the paragraphs above and below into one
+    pdf = PdfDocument.open(CORPUS)
+    objs = to.list_text(pdf.doc, 48)
+    word = next(o for o in objs if o.text == "leveringssikkerheden")
+    moved = to.move_text(pdf, 48, [word], 30, 20)
+    back = to.move_text(pdf, 48, moved, -30, -20)
+    assert len(back) == 1 and back[0].free and back[0].text == "leveringssikkerheden"
+    assert abs(back[0].rect.y0 - word.rect.y0) < 0.6 and abs(back[0].rect.x0 - word.rect.x0) < 0.6
+    now = to.list_text(pdf.doc, 48)
+    assert len(now) == len(objs)
+    assert sorted(norm(o.text) for o in now) == sorted(norm(o.text) for o in objs)
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+@pytest.mark.parametrize("page,start", [(36, "Serviceforretningen forbedrede"), (32, "Datterselskabet i Sverige")])
+def test_a_moved_justified_paragraph_keeps_its_rows_read_word_by_word(page, start):
+    # rewritten loose justified rows extract word by word: their pieces are free
+    # too (they start on a free line's baseline inside its rect) – they must join
+    # among themselves, or the moved paragraph loses those rows
+    pdf = PdfDocument.open(CORPUS)
+    obj = next(o for o in to.list_text(pdf.doc, page) if o.text.startswith(start))
+    (moved,) = to.move_text(pdf, page, [obj], 30, 20)
+    assert abs(moved.rect.y1 - obj.rect.y1 - 20) < 0.6 and norm(moved.text) == norm(obj.text)
+    (back,) = to.move_text(pdf, page, [moved], -30, -20)
+    assert abs(back.rect.y1 - obj.rect.y1) < 0.6 and norm(back.text) == norm(obj.text)

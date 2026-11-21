@@ -670,13 +670,14 @@ def paste_clip(pdf, page: int, clip: Clip, *, offset=(0.0, 0.0)) -> list[PageObj
             raise ValueError("empty clip")
         before = Counter(o.key for o in page_objects(pdf.doc, page, alt=True))
         # where the pasted lines start (target display space)
-        starts = [(ln.origin[0] + dx, ln.origin[1] + dy) for t in tob.list_text(src, 0) for ln in t.lines]
+        starts = [[(ln.origin[0] + dx, ln.origin[1] + dy, _line_key(ln.text)) for ln in t.lines]
+                  for t in tob.list_text(src, 0)]
         with _step(pdf, _label("pageobj.undo.paste", "Indsæt"), page):
             d = pdf.doc
             had = Counter(o.key for o in tob.list_text(d, page))
             _place(d, page, src, clip, dx, dy)
             if starts:
-                tob.mark_free(d, page, _pasted_text(d, page, had, starts))
+                tob.mark_free_lines(d, page, _pasted_lines(d, page, had, starts))
     finally:
         src.close()
     out = []
@@ -688,19 +689,36 @@ def paste_clip(pdf, page: int, clip: Clip, *, offset=(0.0, 0.0)) -> list[PageObj
     return out
 
 
-def _pasted_text(d: pymupdf.Document, page: int, had: Counter, starts: list) -> list:
-    """The text objects a paste added: new ones made only of pasted lines (a
-    block the page's own text was merged into is left alone, so existing
-    text never becomes standalone by a paste)."""
+def _line_key(text: str) -> str:
+    return "".join(text.split())
+
+
+def _pasted_lines(d: pymupdf.Document, page: int, had: Counter, starts: list) -> list[list]:
+    """The lines a paste added, one group per pasted text object: lines that
+    start where a pasted line starts and read like it. Objects the page had
+    before are skipped; a pasted copy that extraction merged with the page's
+    own text (right under its original) is taken out of it – only its own
+    lines become standalone, the page's text never does."""
     had = Counter(had)
-    out = []
+    cands = []
     for o in tob.list_text(d, page):
         if had[o.key] > 0:
             had[o.key] -= 1
             continue
-        if o.lines and all(any(math.hypot(ln.origin[0] - x, ln.origin[1] - y) <= 0.6 for x, y in starts)
-                           for ln in o.lines):
-            out.append(o)
+        cands.extend(o.lines)
+    out = []
+    used: set[int] = set()
+    for group in starts:
+        found = []
+        for x, y, k in group:
+            for ln in cands:
+                if (id(ln) not in used and math.hypot(ln.origin[0] - x, ln.origin[1] - y) <= 0.6
+                        and _line_key(ln.text) == k):
+                    used.add(id(ln))
+                    found.append(ln)
+                    break
+        if found:
+            out.append(found)
     return out
 
 

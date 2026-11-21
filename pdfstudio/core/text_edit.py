@@ -306,8 +306,12 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
         sid = id(c[3])
         if sid not in span_styles:
             sp = c[3]
-            span_styles[sid] = style_from_span(sp.get("font", ""), sp.get("size", 11), sp.get("color", 0),
-                                               sp.get("flags", 0))
+            st = style_from_span(sp.get("font", ""), sp.get("size", 11), sp.get("color", 0), sp.get("flags", 0))
+            # the size as the PDF sets it (style_from_span rounds to 0.01 pt): text written
+            # again (moved lines, untouched lines of an edit) keeps exactly its glyph
+            # positions – 21.997 pt written as 22 pt drifts 0.03 pt over a heading line
+            exact = round(float(sp.get("size", 11) or 11), 4)
+            span_styles[sid] = replace(st, size=exact) if abs(exact - st.size) < 0.01 else st
     style = span_styles[id(dom)]
 
     raw_bbox = _union(c[2] for c in used)
@@ -356,7 +360,7 @@ def _line_from_chars(chars: list, d, rm: pymupdf.Matrix) -> TextLine | None:
     )
 
 
-def _join_fragments(lines: list[TextLine]) -> set[int]:
+def _join_fragments(lines: list[TextLine], side=None) -> set[int]:
     """Pieces of one text line that MuPDF reports as separate lines (text
     written out of order – e.g. words in another font of an edited line are
     written after the rest) are joined: same direction and baseline, and the
@@ -369,7 +373,8 @@ def _join_fragments(lines: list[TextLine]) -> set[int]:
     rows: dict[tuple, list[TextLine]] = {}
     for ln in cand:
         n = _perp(ln.dir)
-        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2),
+                         side(ln) if side else 0), []).append(ln)
     for row in rows.values():
         if len(row) < 2:
             continue
@@ -388,7 +393,7 @@ def _join_fragments(lines: list[TextLine]) -> set[int]:
     return gone
 
 
-def _join_spanning_rows(lines: list[TextLine]) -> set[int]:
+def _join_spanning_rows(lines: list[TextLine], side=None) -> set[int]:
     """Across MuPDF blocks: the words of a very loose justified line that
     MuPDF split into separate blocks. Pieces on one baseline whose union
     spans exactly the width of the whole lines right above and below them
@@ -399,7 +404,8 @@ def _join_spanning_rows(lines: list[TextLine]) -> set[int]:
     rows: dict[tuple, list[TextLine]] = {}
     for ln in cand:
         n = _perp(ln.dir)
-        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2),
+                         side(ln) if side else 0), []).append(ln)
     singles = [r[0] for r in rows.values() if len(r) == 1]
     for row in rows.values():
         if len(row) < 2:
@@ -432,7 +438,7 @@ def _join_spanning_rows(lines: list[TextLine]) -> set[int]:
     return gone
 
 
-def _join_justified_rows(lines: list[TextLine]) -> set[int]:
+def _join_justified_rows(lines: list[TextLine], side=None) -> set[int]:
     """Words of one justified line that MuPDF reports as separate lines (a
     writer that places each word of a stretched line on its own, gaps of an
     em or more): within one MuPDF block, pieces on one baseline that
@@ -447,7 +453,8 @@ def _join_justified_rows(lines: list[TextLine]) -> set[int]:
     rows: dict[tuple, list[TextLine]] = {}
     for ln in cand:
         n = _perp(ln.dir)
-        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2)), []).append(ln)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(_dot(ln.raw_origin, n) * 2),
+                         side(ln) if side else 0), []).append(ln)
     lo = min(ln.extent[0] for ln in cand)
     hi = max(ln.extent[1] for ln in cand)
 
@@ -549,7 +556,7 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     # the merged and the unmerged view share one extraction
     base = _BLOCK_CACHE.get(page_key + ("groups",))
     if base is None:
-        base = _extract_groups(pg)
+        base = _extract_groups(pg, free)
         _BLOCK_CACHE[page_key + ("groups",)] = base
     blocks = _extract_blocks(pg, page, merge, base, free)
     _BLOCK_CACHE[key] = blocks
@@ -558,9 +565,12 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     return list(blocks)
 
 
-def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, float]]:
+def _extract_groups(pg: pymupdf.Page, free=()) -> tuple[list[list[TextLine]], dict[int, float]]:
     """Lines of the page grouped into PyMuPDF's blocks (split at columns,
-    size changes and list items), before paragraphs are merged."""
+    size changes and list items), before paragraphs are merged. Pieces of
+    one row are joined among the lines of free blocks (``free``, text the
+    user moved or pasted) or among the other lines – never across: a moved
+    word put back into its row stays an object of its own."""
     rm = pg.rotation_matrix
     data = pg.get_text("rawdict", flags=_EXTRACT_FLAGS)
     groups: list[list[TextLine]] = []
@@ -572,10 +582,15 @@ def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, f
         lines = [ln for rl in b.get("lines", ()) for ln in _build_lines(rl, rm)]
         per_block.append(lines)
         raw_lines.extend(lines)
-    gone = _join_fragments(raw_lines)
+    free_ids: set[int] = set()
+    if free:
+        free_ids = {id(ln) for ln in raw_lines if _on_free_line(ln, free)}
+    # pieces of one row are only joined with pieces of the same side (free or not)
+    side = (lambda ln: id(ln) in free_ids) if free_ids else None
+    gone = _join_fragments(raw_lines, side)
     for lines in per_block:
-        gone |= _join_justified_rows([ln for ln in lines if id(ln) not in gone])
-    gone |= _join_spanning_rows([ln for ln in raw_lines if id(ln) not in gone])
+        gone |= _join_justified_rows([ln for ln in lines if id(ln) not in gone], side)
+    gone |= _join_spanning_rows([ln for ln in raw_lines if id(ln) not in gone], side)
     if gone:
         raw_lines = [ln for ln in raw_lines if id(ln) not in gone]
         per_block = [[ln for ln in lines if id(ln) not in gone] for lines in per_block]
@@ -593,6 +608,25 @@ def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, f
     if items:
         groups = [g for grp in groups for g in _split_list_items(grp, items)]
     return groups, items
+
+
+def _on_free_line(ln: TextLine, free) -> bool:
+    """``ln`` belongs to a free block – or is a piece of one of its lines
+    (a loose justified row extracted word by word): it starts inside the
+    block's rect on the baseline of one of its lines."""
+    from .flow import FREE_TOL, _free_of
+
+    if _free_of(ln, free) >= 0:
+        return True
+    x, y = float(ln.raw_origin[0]), float(ln.raw_origin[1])
+    n = _perp(ln.dir)
+    base = _dot((x, y), n)
+    for b in free:
+        r = b.rect
+        if r.x0 - FREE_TOL <= x <= r.x1 + FREE_TOL and r.y0 - FREE_TOL <= y <= r.y1 + FREE_TOL and any(
+                abs(_dot((fx, fy), n) - base) <= FREE_TOL for fx, fy, _h in b.lines):
+            return True
+    return False
 
 
 def _free_blocks(doc: pymupdf.Document, page: int) -> list:
@@ -1351,6 +1385,51 @@ def _append(tw: pymupdf.TextWriter, r: TextRun) -> None:
         x += r.font.text_length(piece, fontsize=r.size)
 
 
+def _tj_compensate(runs: list[TextRun], advance) -> list[TextRun]:
+    """Origins for the horizontal runs of ONE TextWriter so they render
+    where they should. MuPDF writes the runs of a baseline as one TJ array:
+    each run start becomes a whole number of thousandths of an em (rounded)
+    measured from where MuPDF *meant* the previous run to end (its exact
+    glyph advances) – the rounding errors add up along the line and the
+    viewer's widths (``advance``, the /W of the font) differ from MuPDF's
+    exact advances on top (a TOC line of 40 dot runs ended 0.5 pt too far
+    right). A change of font or size starts a new text matrix exactly at
+    the run's origin. Each run's origin is passed so the adjustment MuPDF writes is
+    the rounded distance from where the previous run really ends: every
+    run lands within half a thousandth of an em of its place, however many
+    runs came before it on that line."""
+    out: list[TextRun] = []
+    prev = None            # (MuPDF's end of the previous run, its real end, baseline y, font, size)
+    for r in runs:
+        try:
+            text = prepare_text(r.font, r.text)
+            simple = bool(text) and (has_space(r.font) or " " not in text) and r.size > 0
+            if simple:
+                w_mu = r.font.text_length(text, fontsize=r.size)
+                w_real = float(advance(r.font, text, r.size))
+        except Exception:
+            simple = False
+        if not simple:
+            out.append(r)
+            prev = None
+            continue
+        x, y = float(r.origin[0]), float(r.origin[1])
+        # another font or size starts a new text matrix at the exact origin
+        if prev is not None and abs(y - prev[2]) < 1e-6 and r.font is prev[3] and r.size == prev[4]:
+            u = r.size / 1000.0
+            n = round((x - prev[1]) / u)
+            # a quarter unit beyond n: rounded or cut off, MuPDF writes n
+            p = prev[0] + (n + (0.25 if n > 0 else -0.25 if n < 0 else 0.0)) * u
+            a = prev[1] + n * u
+            if abs(p - x) > 1e-9:
+                r = replace(r, origin=(p, r.origin[1]))
+        else:
+            p = a = x
+        prev = (p + w_mu, a + w_real, y, r.font, r.size)
+        out.append(r)
+    return out
+
+
 def _morph_degrees(d) -> float:
     return math.degrees(math.atan2(-d[1], d[0]))
 
@@ -1503,12 +1582,15 @@ def _bridge_line(runs: list[TextRun]) -> list[TextRun]:
     return out
 
 
-def write_runs(page: pymupdf.Page, runs: list[TextRun], *, overlay: bool = True) -> None:
+def write_runs(page: pymupdf.Page, runs: list[TextRun], *, overlay: bool = True, advance=None) -> None:
     """Write text runs (raw page coordinates) with TextWriter – in their
     order (so text extraction sees each line in one piece), one writer per
     stretch of horizontal runs of one colour and one per rotated run; then
     their underline / strike-through strokes. ``overlay=False`` puts them
-    behind everything else on the page (at the start of its content)."""
+    behind everything else on the page (at the start of its content).
+    ``advance(font, text, size)``: the width viewers will render a run with
+    (the /W the caller gives the new fonts) – then several runs on one
+    baseline are placed exactly (:func:`_tj_compensate`)."""
     all_runs = runs
     runs = _bridge_gaps([r for r in runs if r.text])
     if not runs:
@@ -1535,6 +1617,8 @@ def write_runs(page: pymupdf.Page, runs: list[TextRun], *, overlay: bool = True)
     for key, group in (groups if overlay else groups[::-1]):
         r = group[0]
         color = key[1] if key[0] == "h" else tuple(r.color)
+        if key[0] == "h" and advance is not None:
+            group = _tj_compensate(group, advance)
         tw = pymupdf.TextWriter(page.rect, color=color)
         for x in group:
             _append(tw, x)
@@ -1822,8 +1906,51 @@ def _remove_lines(page: pymupdf.Page, lines: list[TextLine]) -> None:
             page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE,
                                   graphics=pymupdf.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                                   text=pymupdf.PDF_REDACT_TEXT_NONE)
+        _snap_tj_numbers(page)
     finally:
         _restore_redactions(page, saved)
+
+
+_TJ_ARRAY = re.compile(rb"\[((?:<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\)|[^\]<(])*)\]\s*TJ")
+_TJ_NOISE = re.compile(rb"(?<![\w.])(-?\d*\.\d{5,})(?![\w.])")
+_TJ_STRING = re.compile(rb"<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\)")
+
+
+def _snap_tj_numbers(page: pymupdf.Page) -> None:
+    """Applying redactions rewrites the whole content stream, and MuPDF
+    writes the TJ adjustments of the text it keeps through single
+    precision (``-242`` becomes ``-242.00002``): untouched glyphs move by
+    a hundred-thousandth of a point – enough to flip the rasteriser's
+    quarter-pixel grid for a glyph lying on its edge, so text that was not
+    edited renders a few pixels differently. Adjustments that are a whole
+    number but for such noise get their whole value back."""
+    doc = page.parent
+
+    def snap_num(m: re.Match) -> bytes:
+        v = float(m.group(1))
+        r = round(v)
+        return str(int(r)).encode() if abs(v - r) < 1e-4 and r != 0 else m.group(1)
+
+    def snap_array(m: re.Match) -> bytes:
+        body = m.group(1)
+        out, pos = [], 0
+        for sm in _TJ_STRING.finditer(body):
+            out.append(_TJ_NOISE.sub(snap_num, body[pos:sm.start()]))
+            out.append(sm.group(0))
+            pos = sm.end()
+        out.append(_TJ_NOISE.sub(snap_num, body[pos:]))
+        return b"[" + b"".join(out) + m.group(0)[len(body) + 1:]
+
+    try:
+        for x in page.get_contents():
+            data = doc.xref_stream(x)
+            if not data or b"TJ" not in data:
+                continue
+            new = _TJ_ARRAY.sub(snap_array, data)
+            if new != data:
+                doc.update_stream(x, new)
+    except Exception:  # pragma: no cover - cosmetic; never fail an edit for it
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -2888,11 +3015,14 @@ def _decor_geometry(st: SpanStyle, decor: dict | None) -> tuple[tuple | None, tu
     return u, s
 
 
-def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = None) -> list[TextRun]:
+def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = None,
+               width=text_width) -> list[TextRun]:
     """Turn one laid-out rich line into positioned TextRuns. Runs of one
     style are written in one piece unless spaces must be stretched
     (justification) or the font has no space glyph. Underlined / struck
-    runs carry the stroke to draw (``decor``: the old line's strokes)."""
+    runs carry the stroke to draw (``decor``: the old line's strokes).
+    ``width(font, text, size, space)`` places each run after the previous
+    one (the advance the written font will render)."""
     n = _perp(d)
     out: list[TextRun] = []
     x = 0.0
@@ -2904,7 +3034,7 @@ def _emit_line(rich, origin, d, em, extra: float, font_of, decor: dict | None = 
         for piece in pieces:
             if not piece:
                 continue
-            w = text_width(font, piece, st.size, space)
+            w = width(font, piece, st.size, space)
             if piece[0] == " " and not piece.strip():
                 gap = w + extra * len(piece)
                 if extra and has_space(font):

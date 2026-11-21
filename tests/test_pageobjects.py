@@ -1023,6 +1023,55 @@ def test_corpus_copy_everything_into_a_new_document(name, pages):
     src.close()
 
 
+def _box_paragraph_doc(rotation: int = 0) -> PdfDocument:
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595, height=842)
+    pg.draw_rect(pymupdf.Rect(60, 80, 420, 400), color=(0.2, 0.4, 0.6), fill=(0.9, 0.95, 1.0), width=1)
+    for k, line in enumerate(("Sådan beregnes nøgletallene", "Nøgletallene er beregnet efter",
+                              "anbefalingerne fra Finansforeningen.")):
+        pg.insert_text((72, 110 + 14 * k), line, fontname="helv", fontsize=11)
+    if rotation:
+        pg.set_rotation(rotation)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_duplicate_right_under_its_original_stays_its_own_object(rotation):
+    # the copy continues the paragraph at its line pitch (offset = 3 lines): text
+    # extraction alone would read original + copy as one paragraph
+    pdf = _box_paragraph_doc(rotation)
+    objs = po.page_objects(pdf.doc, 0)
+    para = next(o for o in objs if o.kind == "text" and o.ref.text.startswith("Sådan"))
+    n = len(objs)
+    # 3 lines further along the paragraph, in display space
+    off = (0, 42) if rotation == 0 else (-42, 0)
+    (copy,) = po.duplicate_objects(pdf, 0, [para], offset=off)
+    assert copy.kind == "text" and copy.ref.free
+    assert_rect(copy.rect, para.rect + (*off, *off), tol=0.6)
+    now = po.page_objects(pdf.doc, 0)
+    assert len(now) == n + 1
+    orig = po.find_again(pdf.doc, 0, para)
+    assert orig is not None and not orig.ref.free
+    assert_rect(orig.rect, para.rect, tol=0.6)                     # the original did not absorb the copy
+    # the copy moves on its own; the original stays
+    (moved,) = po.move_objects(pdf, 0, [copy], 0, 100)
+    assert_rect(moved.rect, copy.rect + (0, 100, 0, 100), tol=0.6)
+    assert_rect(po.find_again(pdf.doc, 0, para).rect, para.rect, tol=0.6)
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_copy_a_paragraph_on_a_rotated_page_pastes_exactly_its_words(rotation):
+    src = scene(rotation=rotation)
+    objs = po.page_objects(src.doc, 0)
+    txt = text_obj(objs, BOX_TEXT)
+    clip = po.copy_objects(src.doc, 0, [txt])
+    w, h = src.doc[0].rect.width, src.doc[0].rect.height
+    dst = blank(w, h)
+    po.paste_clip(dst, 0, clip)
+    got = sorted(wd[4] for wd in dst.doc[0].get_text("words"))
+    assert got == sorted(txt.ref.text.split())
+
+
 def test_paste_balances_the_clips_marked_content():
     assert po._mc_balance(b"EMC /A BMC (EMC) Tj /B <</MCID 1>> BDC EMC BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI") == (1, 1)
     src = pymupdf.open()

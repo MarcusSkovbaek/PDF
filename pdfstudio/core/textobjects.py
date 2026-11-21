@@ -56,6 +56,7 @@ __all__ = [
     "set_text_width",
     "restack_text",
     "mark_free",
+    "mark_free_lines",
 ]
 
 #: padding (pt) around a moved block's raw rect stored as ``/Free``
@@ -312,7 +313,9 @@ def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new: 
         if 0 <= k < len(pieces) - 1:
             if o.piece.cont_next:
                 drop_here.append(pieces[k + 1].block.lines[0].raw_origin)
-        elif k == len(pieces) - 1 and page + 1 < doc.page_count:
+        elif k == len(pieces) - 1 and page + 1 < doc.page_count and flow._markers(doc, page + 1):
+            # (only a page that HAS continuation markers needs its columns
+            # analysed – most do not, and the analysis is the slow part)
             # the column's last paragraph: a marker at the start of the same
             # column on the next page says it ran on there
             try:
@@ -411,7 +414,7 @@ def _exact_runs(pg: pymupdf.Page, page: int, lines: list) -> list:
                 end = x
             else:
                 segs[-1][1] = i + 1
-            end += te.text_width(font_of(st), ch, st.size, em * st.size if em else None)
+            end += _adv(font_of(st), ch, st.size, em * st.size if em else None)
         line_runs = []
         for a, b, x in segs:
             off = x - b0
@@ -427,7 +430,7 @@ def _exact_runs(pg: pymupdf.Page, page: int, lines: list) -> list:
                                                 color=tuple(st.color), origin=o, dir=d,
                                                 space=em * st.size if em else None))
                 continue
-            line_runs.extend(te._emit_line(piece, o, d, em, 0.0, font_of, ln.decor))
+            line_runs.extend(te._emit_line(piece, o, d, em, 0.0, font_of, ln.decor, width=_adv))
         runs.extend(te._bridge_line(line_runs) if len(segs) > 1 else line_runs)
     return runs
 
@@ -504,12 +507,45 @@ def _format_widths(widths: dict[int, float]) -> str:
     return "[" + " ".join(parts) + "]"
 
 
+_UNITS: dict[tuple, int] = {}
+
+
+def _units(font: pymupdf.Font, ch: str) -> int:
+    """The advance of one character in whole thousandths of an em, rounded –
+    the /W :func:`_exact_widths` gives the new fonts."""
+    key = (id(font), font.name, ch)
+    u = _UNITS.get(key)
+    if u is None:
+        if len(_UNITS) > 50000:
+            _UNITS.clear()
+        u = _UNITS[key] = int(round(font.text_length(ch, fontsize=1000.0)))
+    return u
+
+
+def _adv(font: pymupdf.Font, text: str, size: float, space: float | None = None) -> float:
+    """Advance width of ``text`` as every viewer renders it once written by
+    :func:`_write`: the sum of its glyphs' /W (whole thousandths); ``space``
+    as in :func:`text_edit.text_width` for a font without a space glyph."""
+    text = te.prepare_text(font, text)
+    spaced = te.has_space(font)
+    total = 0
+    extra = 0.0
+    for c in text:
+        if c == " " and not spaced:
+            extra += space if space else 0.25 * size
+        else:
+            total += _units(font, c)
+    return total * size / 1000.0 + extra
+
+
 def _exact_widths(doc: pymupdf.Document, first_new: int, runs: list) -> None:
     """MuPDF writes the glyph widths (/W) of a font it embeds as whole
-    thousandths of an em (cut off), but places the glyphs with their exact
+    thousandths of an em *cut off*, but places the glyphs with their exact
     advances: every glyph then renders up to 1/1000 em early, which adds up
-    along a line. The new fonts get their exact widths, so the moved text
-    renders exactly where it was laid out (glyph for glyph)."""
+    along a line. The new fonts get their widths *rounded* (:func:`_units`)
+    – not exact decimals: MuPDF itself reads /W as whole numbers, so only
+    whole widths render alike in every viewer; the runs are laid out and
+    placed with these widths (:func:`_adv`, ``write_runs(advance=…)``)."""
     by_name: dict[str, pymupdf.Font] = {}
     for r in runs:
         try:
@@ -542,7 +578,7 @@ def _exact_widths(doc: pymupdf.Document, first_new: int, runs: list) -> None:
             for cid, t in uni.items():
                 if len(t) != 1 or cid not in widths:
                     continue
-                exact = round(font.text_length(t, fontsize=1000.0), 3)
+                exact = float(_units(font, t))
                 if abs(exact - widths[cid]) > 1e-3 and abs(exact - widths[cid]) < 1.0001:
                     widths[cid] = exact
                     changed = True
@@ -561,7 +597,7 @@ def _write(page: pymupdf.Page, runs: list, *, overlay: bool = True) -> None:
     """``text_edit.write_runs`` with exact glyph widths for the new fonts."""
     doc = page.parent
     first_new = doc.xref_length()
-    te.write_runs(page, runs, overlay=overlay)
+    te.write_runs(page, runs, overlay=overlay, advance=_adv)
     _exact_widths(doc, first_new, runs)
 
 
@@ -850,13 +886,30 @@ def mark_free(doc: pymupdf.Document, page: int, objs) -> None:
     origins and text), replacing any entry that held one of its lines.
     Document level, no undo step of its own (call it inside ``pdf.edit``)."""
     targets = _resolve(doc, page, objs)
-    if not targets:
+    if targets:
+        mark_free_lines(doc, page, [o.lines for o in targets])
+
+
+def mark_free_lines(doc: pymupdf.Document, page: int, groups) -> None:
+    """Like :func:`mark_free` for groups of text lines (``TextLine`` of
+    :func:`list_text` objects): each group becomes ONE standalone object –
+    also lines that extraction merged into a block with other text (a copy
+    pasted right under its original): the free entry takes them out of it."""
+    groups = [list(g) for g in groups if g]
+    if not groups:
         return
     pg = doc[page]
     free = flow._free_blocks(doc, page)
-    gone = {flow._free_of(ln, free) for o in targets for ln in o.lines} - {-1}
-    new = [b for k, b in enumerate(free) if k not in gone] + [_new_free(o, pg, 0.0, 0.0) for o in targets]
-    flow._set_free(doc, page, new)
+    gone = {flow._free_of(ln, free) for g in groups for ln in g} - {-1}
+    entries = [_new_free(_LinesOnly(g), pg, 0.0, 0.0) for g in groups]
+    flow._set_free(doc, page, [b for k, b in enumerate(free) if k not in gone] + entries)
+
+
+class _LinesOnly:
+    """Just the ``lines`` of a would-be text object (for :func:`_new_free`)."""
+
+    def __init__(self, lines: list) -> None:
+        self.lines = lines
 
 
 def set_text_width(pdf, page: int, obj: TextObject, width: float) -> TextObject:

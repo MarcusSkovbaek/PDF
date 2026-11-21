@@ -81,6 +81,7 @@ __all__ = [
     "extract_image_file",
     "image_pixmap",
     "render_without_image",
+    "restack_image",
 ]
 
 
@@ -1046,6 +1047,17 @@ def render_without_image(doc, page: int, target: ImageRef, zoom: float, *, clip=
         return render_page(tmp, 0, zoom, clip=clip, annots=annots)
     finally:
         tmp.close()
+
+
+def restack_image(pdf, page: int, target: ImageRef, *, front: bool = True) -> ImageObject:
+    """Bring an image placement to the front (drawn last) or send it to the
+    back (drawn first) of the page content, together with the graphics state
+    and crop it needs (one undo step). Only placements in the page's own
+    content (or in a form that draws nothing else) can be restacked;
+    ``ValueError`` otherwise. Returns the updated :class:`ImageObject`."""
+    from .graphics import _restack_image
+
+    return _restack_image(pdf, page, target, front)
 
 
 def _read_image(image: str | bytes | os.PathLike) -> bytes:

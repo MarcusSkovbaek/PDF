@@ -1000,6 +1000,35 @@ def _clusters(values: list[float], gap: float = 1.0) -> int:
     return n
 
 
+def _cluster_groups(rules: list, gap: float = 1.0) -> list[list]:
+    """Rules of one orientation grouped by coordinate (within ``gap``)."""
+    groups: list[list] = []
+    last = None
+    for r in sorted(rules, key=lambda r: r[1]):
+        if last is None or r[1] - last > gap:
+            groups.append([])
+        groups[-1].append(r)
+        last = r[1]
+    return groups
+
+
+def _lattice(rules: list, tol: float) -> bool:
+    """Do the rules form a grid? Every row coordinate should cross every
+    column coordinate on actual rules (cells sharing edges). Overlapping or
+    offset frames cover only a fraction of those crossings."""
+    rows = _cluster_groups([r for r in rules if r[0] == "h"])
+    cols = _cluster_groups([r for r in rules if r[0] == "v"])
+    hit = 0
+    for row in rows:
+        y = sum(r[1] for r in row) / len(row)
+        for col in cols:
+            x = sum(r[1] for r in col) / len(col)
+            if (any(r[2] - tol <= x <= r[3] + tol for r in row)
+                    and any(r[2] - tol <= y <= r[3] + tol for r in col)):
+                hit += 1
+    return hit >= 0.75 * len(rows) * len(cols)
+
+
 def _tables(units: list[_Unit]) -> set[int]:
     """Ordinals of units that are table rules / cell backgrounds."""
     rules = []          # (orientation, coordinate, lo, hi, unit ordinal)
@@ -1044,7 +1073,7 @@ def _tables(units: list[_Unit]) -> set[int]:
         hy = [r[1] for r in rs if r[0] == "h"]
         vx2 = [r[1] for r in rs if r[0] == "v"]
         nh, nv = _clusters(hy), _clusters(vx2)
-        if nh >= 2 and nv >= 2 and (nh >= 3 or nv >= 3):
+        if nh >= 2 and nv >= 2 and (nh >= 3 or nv >= 3) and _lattice(rs, tol):
             out.update(r[4] for r in rs)
             xs = [r[2] for r in rs if r[0] == "h"] + [r[3] for r in rs if r[0] == "h"] + vx2
             ys = [r[2] for r in rs if r[0] == "v"] + [r[3] for r in rs if r[0] == "v"] + hy
@@ -1140,41 +1169,54 @@ def _segments(ev: _Ev) -> list:
     return segs
 
 
-def _orient(a, b, c) -> float:
-    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+def _ends(ev: _Ev) -> list:
+    """End points of the open subpaths of a path (none when it is closed
+    or filled)."""
+    if ev.close or ev.fill:
+        return []
+    out = []
+    for pts, closed in ev.polys:
+        if not closed or len(pts) <= 2:
+            out.append(pts[0])
+            out.append(pts[-1])
+    return out
 
 
-def _seg_seg_dist2(p0, p1, q0, q1) -> float:
-    d1, d2 = _orient(q0, q1, p0), _orient(q0, q1, p1)
-    d3, d4 = _orient(p0, p1, q0), _orient(p0, p1, q1)
-    if ((d1 > 0 > d2) or (d1 < 0 < d2)) and ((d3 > 0 > d4) or (d3 < 0 < d4)):
-        return 0.0                                   # proper crossing
-    return min(_seg_dist2(p0[0], p0[1], q0[0], q0[1], q1[0], q1[1]),
-               _seg_dist2(p1[0], p1[1], q0[0], q0[1], q1[0], q1[1]),
-               _seg_dist2(q0[0], q0[1], p0[0], p0[1], p1[0], p1[1]),
-               _seg_dist2(q1[0], q1[1], p0[0], p0[1], p1[0], p1[1]))
+def _near_outline(points: list, ev: _Ev, reach: float) -> bool:
+    segs = _segments(ev)
+    if len(points) * len(segs) > _MAX_SEG_PAIRS:
+        return True                                  # too complex: the bbox prefilter decides
+    r2 = reach * reach
+    b = _grow(ev.bbox, reach)
+    for x, y in points:
+        if not (b[0] <= x <= b[2] and b[1] <= y <= b[3]):
+            continue
+        for (x0, y0), (x1, y1) in segs:
+            if _seg_dist2(x, y, x0, y0, x1, y1) <= r2:
+                return True
+    return False
 
 
 def _paths_touch(a: _Ev, b: _Ev) -> bool:
-    """The outlines of two paths come within 1 pt + half their stroke widths
-    (lying inside the other's fill without outline contact is no contact)."""
+    """Two paths belong to one drawn figure when an open end of one lies on
+    the other's outline (within 1 pt + half the stroke widths): an arrow's
+    shaft and head, the strokes of a zig-zag, a connector on a box. Closed
+    shapes that merely overlap or cross (a duplicated frame, a circle on a
+    circle) and paths inside another's fill are separate; two closed shapes
+    join only as a fill and its own border (same extent within 1.5 pt + half
+    the stroke widths, touching outlines)."""
     reach = 1.0 + (a.wdisp + b.wdisp) / 2
     if not _touch(_grow(a.bbox, reach), b.bbox):
         return False
-    sa, sb = _segments(a), _segments(b)
-    if len(sa) * len(sb) > _MAX_SEG_PAIRS:
-        return True                                  # too complex: the bbox test decides
-    r2 = reach * reach
-    for p0, p1 in sa:
-        bx0, bx1 = min(p0[0], p1[0]) - reach, max(p0[0], p1[0]) + reach
-        by0, by1 = min(p0[1], p1[1]) - reach, max(p0[1], p1[1]) + reach
-        for q0, q1 in sb:
-            if (max(q0[0], q1[0]) < bx0 or min(q0[0], q1[0]) > bx1
-                    or max(q0[1], q1[1]) < by0 or min(q0[1], q1[1]) > by1):
-                continue
-            if _seg_seg_dist2(p0, p1, q0, q1) <= r2:
-                return True
-    return False
+    ea, eb = _ends(a), _ends(b)
+    if not ea and not eb:
+        # two closed shapes: only a fill and its own (slightly different)
+        # border – same extent, touching outlines
+        tol = 1.5 + (a.wdisp + b.wdisp) / 2
+        if any(abs(x - y) > tol for x, y in zip(a.geom, b.geom)):
+            return False
+        return _near_outline([p for pts, _c in a.polys for p in pts], b, reach)
+    return (bool(ea) and _near_outline(ea, b, reach)) or (bool(eb) and _near_outline(eb, a, reach))
 
 
 def _contact(u: _Unit, v: _Unit) -> bool:
@@ -1206,19 +1248,17 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
             cur_box = g
             groups.append(cur)
         last = u
-    # fill/stroke pairs of identical geometry belong together even when
-    # something was drawn in between
+    # a fill and its border drawn as two paths of identical geometry belong
+    # together (also after restyling, and when something was drawn in between)
     seen: dict = {}
     merged: dict[int, int] = {}
     for gi, g in enumerate(groups):
         if len(g) != 1 or not g[0].groupable:
             continue
         u = g[0]
-        if u.ev.stroke == u.ev.fill:
-            continue
         sig = (id(u.ev.cont), _geom_sig(u))
         other = seen.get(sig)
-        if other is not None and groups[other][0].ev.stroke != u.ev.stroke:
+        if other is not None:
             merged[gi] = other
             del seen[sig]
         else:

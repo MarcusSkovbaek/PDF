@@ -864,3 +864,36 @@ def test_contact_groups_still_form():
     ring = circle(450, 600, 40, op=b"S", colour=b"0 G 2 w") + b"q 0 G 2 w 490 600 m 540 600 l S Q\n"
     pdf, _ = build(arrow + TEXT + zigzag + TEXT + ring)
     assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1), (2, 3, 4), (5, 6)]
+
+
+# ---------------------------------------------------------------------------
+# tables need a real grid (aligned rules / tiling cells)
+# ---------------------------------------------------------------------------
+def test_overlapping_frames_are_not_a_table():
+    pdf, _ = build(b"q 0 0 1 RG 2 w 100 600 120 80 re S Q\nq 0 0 1 RG 2 w 110 590 120 80 re S Q\n")
+    objs = gr.list_graphics(pdf.doc, 0, all_items=True)
+    assert [o.kind for o in objs] == ["shape", "shape"] and all(o.selectable for o in objs)
+    pdf3, _ = build(b"q 0 G 1 w 100 600 120 80 re S Q\n" + TEXT + b"q 0 G 1 w 110 590 120 80 re S Q\n"
+                    + TEXT + b"q 0 G 1 w 120 580 120 80 re S Q\n")
+    assert [o.kind for o in gr.list_graphics(pdf3.doc, 0, all_items=True)] == ["shape"] * 3
+
+
+def test_duplicated_callout_box_stays_two_shapes():
+    def callout(dx, dy):
+        x0, x1, y0, y1 = 56.65 + dx, 538.55 + dx, 405.7 - dy, 475.7 - dy
+        return (f"0.89 0.93 0.96 rg\n{x0} {y1} m {x1} {y1} l {x1} {y0} l {x0} {y0} l {x0} {y1} l h f*\n".encode()
+                + TEXT + (f"0.24 0.49 0.67 RG\nq 0.75 w {x0} {y1} m {x1} {y1} l S Q\n"
+                          f"q 0.75 w {x1} {y1} m {x1} {y0} l S Q\n"
+                          f"q 0.75 w {x1} {y0} m {x0} {y0} l S Q\nq 0.75 w {x0} {y0} m {x0} {y1} l S Q\n").encode())
+    pdf, _ = build(callout(0, 0) + callout(10, 10))
+    objs = gr.list_graphics(pdf.doc, 0)
+    assert [o.paths for o in objs] == [(0, 1, 2, 3, 4), (5, 6, 7, 8, 9)]
+    assert all(o.kind == "shape" and o.selectable for o in objs)
+
+
+def test_adjoining_stroked_cells_are_a_table():
+    cells = b"".join(f"q 0 G 0.5 w {100 + c * 60} {400 + r * 20} 60 20 re S Q\n".encode()
+                     for r in range(3) for c in range(3))
+    pdf, _ = build(cells + BOX)
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0)] == ["shape"]
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)].count("table") == 9

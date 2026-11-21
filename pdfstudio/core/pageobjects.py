@@ -583,7 +583,7 @@ def _decor_paths(d: pymupdf.Document, page: int, texts: list) -> set[int]:
     for t in texts:
         for ln in t.lines:
             for r in ln.decor_rects:
-                rects.append(pymupdf.Rect(r) * rot)
+                rects.append((pymupdf.Rect(r) * rot, bool(getattr(t, "free", False))))
     if not rects:
         return set()
     out = set()
@@ -591,7 +591,13 @@ def _decor_paths(d: pymupdf.Document, page: int, texts: list) -> set[int]:
         b = ev.bbox
         if min(b[2] - b[0], b[3] - b[1]) > 4.0:
             continue
-        for r in rects:
+        top = ev
+        while top.cont.kind == "form" and top.cont.parent_ev is not None:
+            top = top.cont.parent_ev
+        pasted = top.seg != 0          # a pasted path decorates only pasted (= free) text
+        for r, free in rects:
+            if pasted and not free:
+                continue
             if (abs(b[0] - r.x0) <= 1.0 and abs(b[2] - r.x1) <= 1.0
                     and abs((b[1] + b[3]) / 2 - (r.y0 + r.y1) / 2) <= 1.0):
                 out.add(ev.num)
@@ -1034,6 +1040,42 @@ def _fresh(name: str, taken) -> str:
     return f"{base}_{k}"
 
 
+def _mc_balance(data: bytes) -> tuple[int, int]:
+    """Marked content of a content stream: the number of ``EMC`` without an
+    opening ``BMC``/``BDC`` and of sequences left open."""
+    depth = under = 0
+    n = len(data)
+    toks = _tokens(data)
+    while True:
+        tok = next(toks, None)
+        if tok is None:
+            break
+        kind, s, e = tok
+        if kind != "op":
+            continue
+        op = data[s:e]
+        if op in (b"BMC", b"BDC"):
+            depth += 1
+        elif op == b"EMC":
+            if depth:
+                depth -= 1
+            else:
+                under += 1
+        elif op == b"BI":                               # skip the inline image's data
+            params = []
+            id_end = None
+            for k2, s2, e2 in toks:
+                if k2 == "op" and data[s2:e2] == b"ID":
+                    id_end = e2
+                    break
+                params.append((k2, data[s2:e2]))
+            if id_end is None:
+                break
+            start = id_end + 1 if id_end < n and data[id_end] in _WSB else id_end
+            toks = _tokens(data, ob._find_ei(data, start, ob._inline_params(params)))
+    return under, depth
+
+
 def _flatten(doc: pymupdf.Document, page: int, name: str, inner: int, M: pymupdf.Matrix,
              clip_rect: pymupdf.Rect | None) -> None:
     """Replace the invocation ``/name Do`` of the pasted form by the content
@@ -1070,11 +1112,17 @@ def _flatten(doc: pymupdf.Document, page: int, name: str, inner: int, M: pymupdf
     edits = [(s, e, b"/" + renames[(cat, nm)].encode("latin-1")) for cat, nm, s, e in occ
              if renames[(cat, nm)] != nm]
     body = ob._splice(data, edits)
-    head = b"BT ET\nq\n" + ob._fmt(M) + b" cm\n"          # (BT ET: a grouping boundary for the graphics engine)
+    # /FolioPaste BMC … EMC marks a paste segment for the graphics engine: the
+    # pasted paths never group, merge or form a table with what was there (a
+    # marked-content sequence survives MuPDF's content filter, unlike an
+    # empty BT ET); the body's own marked content is balanced inside it
+    mc_under, mc_open = _mc_balance(body)
+    head = b"/" + gr.PASTE_TAG + b" BMC\n" + b"/Folio BMC\n" * mc_under + b"q\n" + ob._fmt(M) + b" cm\n"
     if clip_rect is not None:
         r = clip_rect
         head += b" ".join(ob._num(v) for v in (r.x0, r.y0, r.width, r.height)) + b" re W n\n"
-    block = head + b"q\n" * under + body + b"\n" + b"Q\n" * depth + b"Q\n"
+    block = (head + b"q\n" * under + body + b"\n" + b"Q\n" * depth + b"Q\n"
+             + b"EMC\n" * mc_open + b"EMC\n")
     # find the invocation (show_pdf_page appends it as a content stream of its own)
     pat = re.compile(rb"/" + re.escape(name.encode("latin-1")) + rb"[\x00\t\n\x0c\r ]+Do")
     for x in reversed(pg.get_contents()):

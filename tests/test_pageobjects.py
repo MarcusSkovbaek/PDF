@@ -768,8 +768,7 @@ def test_flatten_failure_keeps_the_form(monkeypatch):
 def test_duplicate_is_one_step():
     pdf = scene()
     objs = po.page_objects(pdf.doc, 0)
-    # (two framed boxes overlapping each other read as a table grid to the
-    # graphics engine – see the WP-C report – so the box is duplicated apart)
+    # (overlapping copies are covered by test_duplicate_callout_box_is_a_new_object_of_its_own)
     sel = [find(objs, "graphic", SMALL), text_obj(objs, BOX_TEXT)]
     copies = po.duplicate_objects(pdf, 0, sel)
     assert sorted(o.kind for o in copies) == ["graphic", "text"]
@@ -790,6 +789,167 @@ def test_duplicate_is_one_step():
     pdf.undo()
     assert len(po.page_objects(pdf.doc, 0)) == len(objs)
     assert po.duplicate_objects(pdf, 0, []) == []
+
+
+CALLOUT = pymupdf.Rect(60, 240, 540, 310)
+
+
+BODY_LINES = ["Selskabet fastholdt arbejdsmiljøet på fabrikkerne trods et",
+              "udfordrende år, og sygefraværet faldt for tredje år i træk,",
+              "mens antallet af arbejdsulykker blev halveret siden sidste år."]
+
+
+def callout_doc(rotation: int = 0, body: bool = False) -> PdfDocument:
+    """A LibreOffice-style callout box: the fill, the box text, then the
+    border as four separate lines (one graphic object of five paths)."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595, height=842)
+    r = CALLOUT
+    pg.draw_rect(r, color=None, fill=(0.89, 0.93, 0.96))
+    pg.insert_text((r.x0 + 12, r.y0 + 30), BOX_TEXT, fontname="helv", fontsize=12)
+    for a, b in ((r.tl, r.tr), (r.tr, r.br), (r.br, r.bl), (r.bl, r.tl)):
+        pg.draw_line(a, b, color=(0.24, 0.49, 0.67), width=0.75)
+    if body:
+        for i, line in enumerate(BODY_LINES):
+            pg.insert_text((60, 420 + i * 15), line, fontname="helv", fontsize=11)
+        pg.draw_line((60, 520), (540, 520), color=(0, 0, 0), width=0.8)    # a full-width rule
+    if rotation:
+        pg.set_rotation(rotation)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+def graphics_of(pdf, page=0):
+    return by_kind(po.page_objects(pdf.doc, page), "graphic")
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_duplicate_callout_box_is_a_new_object_of_its_own(rotation):
+    pdf = callout_doc(rotation)
+    (box,) = graphics_of(pdf)
+    assert len(box.ref.paths) == 5
+    for offset in ((10, 10), (0, 40), (40, 0)):
+        (copy,) = po.duplicate_objects(pdf, 0, [box], offset=offset)
+        assert copy.kind == "graphic" and len(copy.ref.paths) == 5
+        assert not set(copy.ref.paths) & set(box.ref.paths)
+        assert_rect(copy.rect, box.rect + (offset * 2), tol=1.0)
+        now = graphics_of(pdf)
+        assert len(now) == 2 and po.find_again(pdf.doc, 0, box).key == box.key
+        # no table: the overlapping frames stay two selectable shapes
+        assert "table" not in {g.kind for g in gr.list_graphics(pdf.doc, 0, all_items=True)}
+        # the copy moves on its own
+        (moved,) = po.move_objects(pdf, 0, [copy], 20, 0)
+        assert_rect(moved.rect, copy.rect + (20, 0, 20, 0), tol=1.0)
+        assert po.find_again(pdf.doc, 0, box).key == box.key
+        assert len(graphics_of(pdf)) == 2
+        pdf.undo()
+        pdf.undo()
+        assert graphics_of(pdf)[0].key == box.key and len(graphics_of(pdf)) == 1
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_paste_exactly_on_top_of_the_original(rotation):
+    pdf = scene(rotation)
+    before = graphics_of(pdf)
+    for g in before:
+        new = po.paste_clip(pdf, 0, po.copy_objects(pdf.doc, 0, [g]), offset=(0, 0))
+        assert len(new) == 1 and new[0].kind == "graphic", (g.rect, [(o.kind, o.rect) for o in new])
+        assert_rect(new[0].rect, g.rect) and not set(new[0].ref.paths) & set(g.ref.paths)
+        assert len(graphics_of(pdf)) == len(before) + 1
+        assert po.find_again(pdf.doc, 0, g).key == g.key
+        (moved,) = po.move_objects(pdf, 0, new, 0, 30)
+        assert_rect(moved.rect, g.rect + (0, 30, 0, 30), tol=1.0)
+        assert po.find_again(pdf.doc, 0, g).key == g.key
+        pdf.undo()
+        pdf.undo()
+    pdf = callout_doc(rotation)
+    (box,) = graphics_of(pdf)
+    (copy,) = po.duplicate_objects(pdf, 0, [box], offset=(0, 0))
+    assert len(copy.ref.paths) == 5 and len(graphics_of(pdf)) == 2
+
+
+def test_restacking_next_to_a_pasted_copy_keeps_both_objects():
+    for offset in ((0, 0), (0, 40)):
+        for front in (True, False):
+            pdf = callout_doc()
+            (box,) = graphics_of(pdf)
+            (copy,) = po.duplicate_objects(pdf, 0, [box], offset=offset)
+            # the original to the front (after the pasted block) / the copy to the back
+            target = po.find_again(pdf.doc, 0, box) if front else copy
+            (res,) = po.restack(pdf, 0, [target], front=front)
+            assert_rect(res.rect, target.rect) and len(res.ref.paths) == 5
+            assert len(graphics_of(pdf)) == 2, (offset, front)
+
+
+def assert_two_boxes(pdf, box, step):
+    """The original callout and its copy: two separate selectable shapes
+    (no table), and the copy moves on its own."""
+    boxes = [g for g in graphics_of(pdf) if len(g.ref.paths) == 5]
+    assert len(boxes) == 2 and len(graphics_of(pdf)) == 3, step                # + the rule
+    assert "table" not in {g.kind for g in gr.list_graphics(pdf.doc, 0, all_items=True)}, step
+    orig = min(boxes, key=lambda g: abs(g.rect.y0 - box.rect.y0) + abs(g.rect.x0 - box.rect.x0))
+    copy = next(g for g in boxes if g is not orig)
+    assert_rect(orig.rect, box.rect, tol=1.0)
+    (m,) = po.move_objects(pdf, 0, [copy], 7, 0)
+    assert_rect(m.rect, copy.rect + (7, 0, 7, 0), tol=1.0), step
+    assert len([g for g in graphics_of(pdf) if len(g.ref.paths) == 5]) == 2, step
+    assert_rect(po.find_again(pdf.doc, 0, orig).rect, box.rect, tol=1.0)
+    pdf.undo()
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_pasted_copy_survives_later_edits_of_the_page(rotation):
+    from pdfstudio.core import flow
+    from pdfstudio.core.document import write_bytes
+    pdf = callout_doc(rotation, body=True)
+    box = next(g for g in graphics_of(pdf) if len(g.ref.paths) == 5)
+    (copy,) = po.duplicate_objects(pdf, 0, [box], offset=(0, 40))
+    assert_two_boxes(pdf, box, "duplicate")
+    # (a) move an unrelated paragraph (the text removal rewrites the content)
+    para = text_obj(po.page_objects(pdf.doc, 0), BODY_LINES[0])
+    po.move_objects(pdf, 0, [para], 0, 5)
+    assert_two_boxes(pdf, box, "move paragraph")
+    # (b) move the box's own text
+    t = next(o for o in by_kind(po.page_objects(pdf.doc, 0), "text")
+             if norm(BOX_TEXT) in tx(o) and not o.ref.free)
+    po.move_objects(pdf, 0, [t], 3, 0)
+    assert_two_boxes(pdf, box, "move box text")
+    # (c) the flow editor on a paragraph of the page
+    para = text_obj(po.page_objects(pdf.doc, 0), BODY_LINES[0])
+    hit = flow.story_at(pdf.doc, 0, (para.rect.x0 + 5, para.rect.y0 + 5))
+    assert hit is not None
+    story, piece = hit
+    flow.apply_story(pdf, story, [flow.Edit(piece=piece, text=story.pieces[piece].text + " Endnu en sætning.")])
+    assert_two_boxes(pdf, box, "flow")
+    # (e) undo / redo
+    n = len(pdf.history._undo)
+    for _ in range(n):
+        pdf.undo()
+    assert len(graphics_of(pdf)) == 2                                      # the box and the rule
+    for _ in range(n):
+        pdf.redo()
+    assert_two_boxes(pdf, box, "redo")
+    # (d) save and reopen with a cleaned, garbage-collected file
+    again = PdfDocument.from_bytes(write_bytes(pdf.doc, garbage=3, clean=True, deflate=True))
+    assert_two_boxes(again, box, "reopen")
+
+
+@pytest.mark.parametrize("rotation", [0, 180])
+def test_duplicated_rule_on_a_paragraph_is_no_underline(rotation):
+    pdf = callout_doc(rotation, body=True)
+    rule = next(g for g in graphics_of(pdf) if g.ref.kind == "line")
+    n = len(graphics_of(pdf))
+    # onto the paragraph: the copy lies exactly where an underline of its
+    # second line would be
+    para = text_obj(po.page_objects(pdf.doc, 0), BODY_LINES[0])
+    x, y = para.ref.lines[1].raw_origin                                    # unrotated baseline
+    target = pymupdf.Point(x, y + 2) * pdf.doc[0].rotation_matrix
+    dy = target.y - (rule.rect.y0 + rule.rect.y1) / 2
+    (copy,) = po.duplicate_objects(pdf, 0, [rule], offset=(0, dy))
+    assert copy.kind == "graphic" and copy.ref.selectable
+    assert len(graphics_of(pdf)) == n + 1
+    (m,) = po.move_objects(pdf, 0, [copy], 0, 3)
+    assert_rect(m.rect, copy.rect + (0, 3, 0, 3), tol=1.0)
+    assert len(graphics_of(pdf)) == n + 1
 
 
 # -- performance (O16) ------------------------------------------------------------------
@@ -861,3 +1021,21 @@ def test_corpus_copy_everything_into_a_new_document(name, pages):
             assert moved and moved[0].kind == "text"
         dst.close()
     src.close()
+
+
+def test_paste_balances_the_clips_marked_content():
+    assert po._mc_balance(b"EMC /A BMC (EMC) Tj /B <</MCID 1>> BDC EMC BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI") == (1, 1)
+    src = pymupdf.open()
+    sp = src.new_page(width=595, height=842)
+    cx = src.get_new_xref()
+    src.update_object(cx, "<<>>")
+    src.update_stream(cx, b"EMC\nq 1 0 0 rg 100 600 120 80 re f Q\n/Open BMC\n")
+    src.xref_set_key(sp.xref, "Contents", f"{cx} 0 R")
+    clip = po.Clip(data=src.tobytes(), rect=pymupdf.Rect(100, 162, 220, 242), page_size=(595, 842))
+    pdf = callout_doc()
+    (box,) = graphics_of(pdf)
+    (new,) = po.paste_clip(pdf, 0, clip, offset=(0, 0))
+    scan = gr._page_scan(pdf.doc, 0)
+    assert scan.conts[0].mc_ok                                             # balanced again
+    assert [p.seg for p in scan.paths] == [0] * 5 + [1]
+    assert po.find_again(pdf.doc, 0, box).key == box.key and len(graphics_of(pdf)) == 2

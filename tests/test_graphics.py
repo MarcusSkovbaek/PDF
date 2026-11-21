@@ -943,3 +943,78 @@ def test_adjoining_stroked_cells_are_a_table():
     pdf, _ = build(cells + BOX)
     assert [o.kind for o in gr.list_graphics(pdf.doc, 0)] == ["shape"]
     assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)].count("table") == 9
+
+
+# ---------------------------------------------------------------------------
+# pasted blocks (/FolioPaste BMC … EMC, pageobjects._flatten) are
+# segments of their own: they never merge or form a table with the page
+# ---------------------------------------------------------------------------
+def paste(content: bytes) -> bytes:
+    return b"/FolioPaste BMC\n" + content + b"EMC\n"
+
+
+def test_pasted_segment_never_joins_the_original():
+    fill = b"q 1 0 0 rg 100 600 120 80 re f Q\n"
+    # identical geometry: the fill of the original and of a copy pasted on top
+    pdf, _ = build(fill + paste(fill))
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,)]
+    pdf, _ = build(fill + fill)                       # without the boundary: one fill + "border" pair
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1)]
+    # border lines of a pasted callout never join the original's fill
+    lines = (b"0 0 1 RG q 1 w 100 680 m 220 680 l S Q\nq 1 w 220 680 m 220 600 l S Q\n"
+             b"q 1 w 220 600 m 100 600 l S Q\nq 1 w 100 600 m 100 680 l S Q\n")
+    pdf, _ = build(fill + TEXT + paste(lines))
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1, 2, 3, 4)]
+    pdf, _ = build(fill + TEXT + lines)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1, 2, 3, 4)]
+    # two framed boxes overlapping like a grid: a table on one page, two shapes
+    # when the second one is pasted
+    frame = b"q 0 G 1 w 60 500 480 70 re S Q\n"
+    moved = b"q 0 G 1 w 60 460 480 70 re S Q\n"
+    pdf, _ = build(frame + moved)
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)] == ["table", "table"]
+    pdf, _ = build(frame + paste(moved))
+    objs = gr.list_graphics(pdf.doc, 0, all_items=True)
+    assert [o.kind for o in objs] == ["shape", "shape"] and all(o.selectable for o in objs)
+    # text (also an empty BT ET) and other marked content are no boundary
+    pdf, _ = build(frame + b"BT ET\n" + moved)
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)] == ["table", "table"]
+    pdf, _ = build(b"/Artifact BMC\n" + frame + b"EMC\n/P <</MCID 0>> BDC\n" + moved + b"EMC\n")
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)] == ["table", "table"]
+    pdf, _ = build(frame + TEXT + moved)
+    assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)] == ["table", "table"]
+
+
+def test_paste_segments_follow_the_marked_content_stack():
+    fill = b"q 1 0 0 rg 100 600 120 80 re f Q\n"
+    # other sequences inside and around a paste close the right one; after
+    # the paste's EMC the page's own segment is back
+    content = (b"/P <</MCID 0>> BDC\n" + fill + b"/FolioPaste BMC\n/Span BMC\n" + fill + b"EMC\n"
+               + b"/Artifact BMC\n" + fill + b"EMC\nEMC\n" + fill + b"EMC\n")
+    pdf, _ = build(content)
+    scan = gr._page_scan(pdf.doc, 0)
+    assert [p.seg for p in scan.paths] == [0, 1, 1, 0]
+    # a pasted copy of a pasted object (nested) gets its own segment
+    pdf, _ = build(paste(fill + paste(fill)) + paste(fill))
+    assert [p.seg for p in gr._page_scan(pdf.doc, 0).paths] == [1, 2, 3]
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,), (2,)]
+
+
+def test_edits_keep_pasted_paths_in_their_segment():
+    frame = b"q 0 G 1 w 60 500 480 70 re S Q\n"
+    moved = b"q 0 G 1 w 60 460 480 70 re S Q\n"
+    pdf, _ = build(frame + TEXT + paste(moved))
+    a, b = gr.list_graphics(pdf.doc, 0)
+    (b2,) = gr.move_graphics(pdf, 0, b, 5, 0)
+    (b3,) = gr.scale_graphics(pdf, 0, b2, b2.rect, b2.rect + (0, 0, 10, 0))
+    (b4,) = gr.set_graphic_style(pdf, 0, b3, stroke=(1, 0, 0))
+    objs = gr.list_graphics(pdf.doc, 0, all_items=True)
+    assert [o.kind for o in objs] == ["shape", "shape"] and objs[1].key == b4.key
+    # restack: the moved content keeps its segment, front and back
+    for target, front in ((objs[0], True), (objs[1], False), (objs[1], True)):
+        target = gr.find_graphic(pdf.doc, 0, target)
+        gr.restack_graphics(pdf, 0, [target], front=front)
+        assert [o.kind for o in gr.list_graphics(pdf.doc, 0, all_items=True)] == ["shape", "shape"]
+    assert b"BT ET" not in contents(pdf)
+    gr.delete_graphics(pdf, 0, [gr.list_graphics(pdf.doc, 0)[0]])
+    assert len(gr.list_graphics(pdf.doc, 0)) == 1

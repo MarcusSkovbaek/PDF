@@ -178,6 +178,7 @@ _STATE = {b"w": "w", b"J": "J", b"j": "j", b"M": "M", b"d": "d", b"ri": "ri", b"
 # device colour operators set their own colour space)
 _RESETS = {b"G": "CS", b"RG": "CS", b"K": "CS", b"g": "cs", b"rg": "cs", b"k": "cs", b"CS": "S", b"cs": "F"}
 _TEXT_SHOW = {b"Tj", b"TJ", b"'", b'"'}
+PASTE_TAG = b"FolioPaste"   # marked-content tag around pasted content: /FolioPaste BMC … EMC
 _FLAT_STEPS = 8
 _BAND = 0.2                 # header/footer band (fraction of the page height) for the template test
 _MAX_FORM_DEPTH = 10
@@ -240,14 +241,14 @@ class _Ev:
     """One paint event in a container: a painted path, an image, an inline
     image, a form invocation, a text show operator, a shading."""
 
-    __slots__ = ("cont", "seq", "kind", "start", "end", "ctm", "block", "state", "clean", "brk",
+    __slots__ = ("cont", "seq", "kind", "start", "end", "ctm", "block", "state", "clean", "brk", "seg",
                  # path
                  "num", "op", "op_span", "segs", "items", "polys", "clip", "broken", "pre", "M",
                  "stroke", "fill", "close", "evenodd", "bbox", "geom", "wdisp", "_rgb", "inner",
                  # xobjects
                  "xref", "name_span", "child", "index")
 
-    def __init__(self, cont, seq, kind, start, end, ctm, block, state, clean, brk) -> None:
+    def __init__(self, cont, seq, kind, start, end, ctm, block, state, clean, brk, seg=0) -> None:
         self.cont: _Cont = cont
         self.seq = seq
         self.kind = kind
@@ -258,6 +259,7 @@ class _Ev:
         self.state: dict = state
         self.clean = clean                 # no operator between the previous paint event and this one
         self.brk = brk                     # grouping break counter (text/images/forms/shadings)
+        self.seg = seg                     # paste segment: innermost /FolioPaste sequence (0: none)
         self.num = -1
         self.child: _Cont | None = None
         self.index = None
@@ -390,13 +392,16 @@ class _Scanner:
         last_op_end = -1                     # end of the last operator that is not part of an event
         last_ev_end = -1
         brk = 0
+        seg = 0                              # current paste segment (innermost /FolioPaste BMC)
+        seg_n = 0
+        mc_segs: list[int] = []              # segment in force inside each open marked-content sequence
         gs_n = 0
         in_text = False
 
         def event(kind, start, end):
             nonlocal last_ev_end, last_op_end
             clean = last_ev_end >= 0 and last_op_end <= last_ev_end
-            ev = _Ev(cont, len(events), kind, start, end, ctm, block, st, clean, brk)
+            ev = _Ev(cont, len(events), kind, start, end, ctm, block, st, clean, brk, seg)
             events.append(ev)
             last_ev_end = last_op_end = end
             return ev
@@ -557,6 +562,9 @@ class _Scanner:
                 continue
             elif op == b"EMC":
                 mc -= 1
+                if mc_segs:
+                    mc_segs.pop()
+                seg = mc_segs[-1] if mc_segs else 0
                 b = block
                 while b is not None and b.mc > mc:
                     b.mc_ok = False
@@ -565,6 +573,14 @@ class _Scanner:
                     cont.mc_ok = False
             elif op in (b"BMC", b"BDC"):
                 mc += 1
+                if op == b"BMC":
+                    a = _NAME_AT_END.search(region)
+                    if a is not None and a.group(1) == PASTE_TAG:
+                        # a pasted block (pageobjects._flatten): what is inside never
+                        # groups, merges or forms a table with anything outside it
+                        seg_n += 1
+                        seg = seg_n
+                mc_segs.append(seg)
             last_op_end = e
         if mc != 0:
             cont.mc_ok = False
@@ -746,7 +762,7 @@ class _Unit:
     invocation of a form that draws only paths."""
 
     __slots__ = ("paths", "evs", "ev", "bbox", "editable", "in_form", "form_xref", "lineish", "stroke", "fill",
-                 "groupable", "ordinal")
+                 "groupable", "ordinal", "seg")
 
     def __init__(self, ev: _Ev, evs: list[_Ev], in_form: bool, form_xref: int, editable: bool) -> None:
         self.ev = ev                      # the event an edit acts on (path, or form invocation)
@@ -766,6 +782,10 @@ class _Unit:
                            and not any((c or p.close) and len(pts) > 2 for pts, c in p.polys) for p in evs)
         self.groupable = ev.kind == "path"
         self.ordinal = 0
+        top = ev
+        while top.cont.kind == "form" and top.cont.parent_ev is not None:
+            top = top.cont.parent_ev
+        self.seg = top.seg                # paste segment of the page-level event
 
 
 class _PageScan:
@@ -1130,8 +1150,15 @@ def _classify(doc, index: int, scan: _PageScan, neighbours) -> list[str]:
         for o, me in sigs.items():
             if not kinds[o] and any(_same_sig(me, other) for other in others):
                 kinds[o] = "template"
-    for o in _tables([u for u in units if not kinds[u.ordinal]]):
-        kinds[o] = "table"
+    # a pasted block (its own segment) never forms a table with what was
+    # already there – two overlapping framed boxes are not a lattice
+    by_seg: dict[int, list[_Unit]] = {}
+    for u in units:
+        if not kinds[u.ordinal]:
+            by_seg.setdefault(u.seg, []).append(u)
+    for part in by_seg.values():
+        for o in _tables(part):
+            kinds[o] = "table"
     return kinds
 
 
@@ -1236,7 +1263,8 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
             continue
         g = _grow(u.bbox, 1.0)
         join = (cur is not None and u.groupable and last is not None and last.groupable
-                and u.ev.cont is last.ev.cont and u.ev.brk == last.ev.brk and _touch(g, cur_box)
+                and u.ev.cont is last.ev.cont and u.ev.brk == last.ev.brk and u.seg == last.seg
+                and _touch(g, cur_box)
                 and any(_touch(g, b) and _contact(u, m) for b, m in zip(cur_boxes, cur)))
         if join:
             cur.append(u)
@@ -1256,7 +1284,7 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
         if len(g) != 1 or not g[0].groupable:
             continue
         u = g[0]
-        sig = (id(u.ev.cont), _geom_sig(u))
+        sig = (id(u.ev.cont), u.seg, _geom_sig(u))
         other = seen.get(sig)
         if other is not None:
             merged[gi] = other
@@ -1275,7 +1303,7 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
         if len(g) == 1 and g[0].groupable and g[0].ev.fill and not g[0].ev.stroke:
             r = _as_rect(g[0].ev)
             if r is not None:
-                fills.setdefault(id(g[0].ev.cont), []).append((gi, r))
+                fills.setdefault((id(g[0].ev.cont), g[0].seg), []).append((gi, r))
     if fills:
         merged = {}
         for gi, g in enumerate(groups):
@@ -1283,7 +1311,9 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
                 continue
             box = (min(u.bbox[0] for u in g), min(u.bbox[1] for u in g),
                    max(u.bbox[2] for u in g), max(u.bbox[3] for u in g))
-            for fi, r in fills.get(id(g[0].ev.cont), ()):
+            if any(u.seg != g[0].seg for u in g):
+                continue
+            for fi, r in fills.get((id(g[0].ev.cont), g[0].seg), ()):
                 if fi not in merged.values() and all(abs(a - b) <= 2.0 for a, b in zip(box, r)):
                     merged[gi] = fi
                     break
@@ -1972,22 +2002,35 @@ def _restack_edits(cont: _Cont, evs: list[_Ev], front: bool) -> list:
     state and CTM they need, at the end (front) or start (back) of the page."""
     data = cont.data
     edits = []
-    chunks = []
+    chunks = []                                   # (paste segment, bytes)
     for kind, what, s, e in _cover(evs, nested_mc=True):
         if kind == "block":
             st, ctm = what.state, what.ctm
         else:
             st, ctm = what[0].state, what[0].ctm
+        seg = next((ev.seg for ev in evs if s <= ev.start and ev.end <= e), 0)
         sb = _state_bytes(st)
         plain = _close_m(ctm, _IDENTITY)
         if kind == "block" and not sb and plain:
-            chunks.append(data[s:e] + b"\n")       # already a self-contained q … Q
+            chunks.append((seg, data[s:e] + b"\n"))       # already a self-contained q … Q
         else:
             head = b"q\n" + (sb + b"\n" if sb else b"") + (b"" if plain else _fmt(ctm) + b" cm\n")
-            chunks.append(head + data[s:e] + b"\nQ\n")
+            chunks.append((seg, head + data[s:e] + b"\nQ\n"))
         tail = _tail(what) if kind == "run" else b""
         edits.append((s, e, tail) if tail else _removal(data, s, e))
-    blob = b"".join(chunks)
+    # pasted content keeps its own segment: each run of chunks from one
+    # paste segment is wrapped in a fresh /FolioPaste sequence
+    parts = []
+    i = 0
+    while i < len(chunks):
+        seg = chunks[i][0]
+        j = i
+        while j < len(chunks) and chunks[j][0] == seg:
+            j += 1
+        body = b"".join(c for _s, c in chunks[i:j])
+        parts.append(b"/" + PASTE_TAG + b" BMC\n" + body + b"EMC\n" if seg else body)
+        i = j
+    blob = b"".join(parts)
     n = len(data)
     sep = b"" if not data or data[-1] in _WSB else b"\n"
     if front:

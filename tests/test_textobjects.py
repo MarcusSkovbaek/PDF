@@ -643,3 +643,41 @@ def test_a_rule_under_a_heading_is_not_its_underline():
     assert len(rules) == 1
     assert rules[0].x0 == pytest.approx(60, abs=0.6) and rules[0].x1 == pytest.approx(400, abs=0.6)
     assert rules[0].y0 == pytest.approx(203, abs=0.6)
+
+
+def test_mark_free_records_pasted_text_and_a_move_keeps_what_it_lay_on():
+    """Text put onto other text (a paste) and marked free: the text below
+    stays what it was, and moving the pasted text leaves it intact."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    for k, word in enumerate(("Analyse", "Design", "Pilot")):
+        pg.insert_text((80 + 150 * k, 130), word, fontname="helv", fontsize=12)
+    pg.insert_text((72, 300), "Brødtekst på siden, som står stille.", fontname="helv", fontsize=11)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    before = {o.text: o.role for o in to.list_text(pdf.doc, 0)}
+    with pdf.edit("Indsæt"):
+        tw = pymupdf.TextWriter(pdf.doc[0].rect)
+        tw.append((78, 128), "Indsat tekstboks oven på", font=pymupdf.Font("helv"), fontsize=12)
+        tw.append((78, 142), "de eksisterende etiketter", font=pymupdf.Font("helv"), fontsize=12)
+        tw.write_text(pdf.doc[0])
+        pasted = [o for o in to.list_text(pdf.doc, 0) if "Indsat" in o.text]
+        to.mark_free(pdf.doc, 0, pasted)
+    objs = to.list_text(pdf.doc, 0)
+    box = next(o for o in objs if "Indsat" in o.text)
+    assert box.free and "eksisterende" in box.text
+    for text in before:
+        assert not next(o for o in objs if o.text == text).free              # not taken for free
+    moved = to.move_text(pdf, 0, [box], 0, 80)
+    assert moved and moved[0].free and norm(moved[0].text) == norm(box.text)
+    after = {o.text: o.role for o in to.list_text(pdf.doc, 0) if "Indsat" not in o.text}
+    assert after == before                                                # "Analyse" is still "Analyse"
+    # the clipboard strip keeps only the entries of what it keeps
+    tmp = pymupdf.open("pdf", pdf.doc.tobytes())        # (a copy that keeps the page's markers)
+    assert len(flow._free_blocks(tmp, 0)) == 1
+    to.strip_text_except(tmp, 0, [o for o in to.list_text(pdf.doc, 0) if o.text == "Pilot"])
+    assert flow._free_blocks(tmp, 0) == []
+    tmp2 = pymupdf.open("pdf", pdf.doc.tobytes())
+    to.strip_text_except(tmp2, 0, moved)
+    assert len(flow._free_blocks(tmp2, 0)) == 1
+    to.delete_text_doc(tmp2, 0, [o for o in to.list_text(tmp2, 0) if o.free])
+    assert flow._free_blocks(tmp2, 0) == []

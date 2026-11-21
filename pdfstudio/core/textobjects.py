@@ -55,6 +55,7 @@ __all__ = [
     "strip_text_except",
     "set_text_width",
     "restack_text",
+    "mark_free",
 ]
 
 #: padding (pt) around a moved block's raw rect stored as ``/Free``
@@ -258,9 +259,24 @@ def _new_free(obj: TextObject, pg: pymupdf.Page, rx: float, ry: float) -> flow.F
     """The free-block entry of ``obj`` moved by (rx, ry) raw: its rect and
     the origin and text hash of each of its lines there."""
     rect = _raw_rect(obj, pg) + (rx - FREE_PAD, ry - FREE_PAD, rx + FREE_PAD, ry + FREE_PAD)
-    lines = tuple((round(ln.raw_origin[0] + rx, 2), round(ln.raw_origin[1] + ry, 2), flow._line_hash(ln.text))
-                  for ln in obj.lines)
-    return flow.FreeBlock(rect, lines)
+
+    def entry(ln, text):
+        return (round(ln.raw_origin[0] + rx, 2), round(ln.raw_origin[1] + ry, 2), flow._line_hash(text))
+
+    lines = [entry(ln, ln.text) for ln in obj.lines]
+    # a row the source split into pieces (the words of a loose justified
+    # line) may read as one line once rewritten: the whole row counts too
+    rows: dict[tuple, list] = {}
+    for ln in obj.lines:
+        n = te._perp(ln.dir)
+        rows.setdefault((round(ln.dir[0], 3), round(ln.dir[1], 3), round(te._dot(ln.raw_origin, n) * 2)), []).append(ln)
+    for row in rows.values():
+        if len(row) > 1:
+            row.sort(key=lambda ln: te._dot(ln.raw_origin, ln.dir))
+            e = entry(row[0], "".join(ln.text for ln in row))
+            if e not in lines:
+                lines.append(e)
+    return flow.FreeBlock(rect, tuple(lines))
 
 
 def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new: list):
@@ -816,10 +832,31 @@ def strip_text_except(doc: pymupdf.Document, page: int, keep) -> None:
     for o in keep or ():
         for ln in o.lines:
             sig.add((round(ln.raw_origin[0], 1), round(ln.raw_origin[1], 1), ln.text))
-    gone = [ln for b in te.text_blocks(doc, page, merge=False) for ln in b.lines
-            if (round(ln.raw_origin[0], 1), round(ln.raw_origin[1], 1), ln.text) not in sig]
+    lines = [ln for b in te.text_blocks(doc, page, merge=False) for ln in b.lines]
+    gone = [ln for ln in lines if (round(ln.raw_origin[0], 1), round(ln.raw_origin[1], 1), ln.text) not in sig]
     if gone:
         te._remove_lines(doc[page], gone)
+        # free entries keep only blocks that are still there
+        free = flow._free_blocks(doc, page)
+        if free:
+            removed = {id(ln) for ln in gone}
+            kept = {flow._free_of(ln, free) for ln in lines if id(ln) not in removed}
+            flow._set_free(doc, page, [b for k, b in enumerate(free) if k in kept])
+
+
+def mark_free(doc: pymupdf.Document, page: int, objs) -> None:
+    """Record text objects as standalone (O17) where they are – e.g. text
+    just pasted onto the page: each gets its free entry (rect + its lines'
+    origins and text), replacing any entry that held one of its lines.
+    Document level, no undo step of its own (call it inside ``pdf.edit``)."""
+    targets = _resolve(doc, page, objs)
+    if not targets:
+        return
+    pg = doc[page]
+    free = flow._free_blocks(doc, page)
+    gone = {flow._free_of(ln, free) for o in targets for ln in o.lines} - {-1}
+    new = [b for k, b in enumerate(free) if k not in gone] + [_new_free(o, pg, 0.0, 0.0) for o in targets]
+    flow._set_free(doc, page, new)
 
 
 def set_text_width(pdf, page: int, obj: TextObject, width: float) -> TextObject:

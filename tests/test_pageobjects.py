@@ -79,10 +79,33 @@ def find(objs, kind, rect, tol=3.0):
     return hits[0]
 
 
+def norm(text: str) -> str:
+    """Text with no-break spaces as spaces and whitespace collapsed (on
+    Windows the fixtures' Arial has one glyph for both, so extracted text
+    reads U+00A0 where a space was written)."""
+    return " ".join(text.replace("\xa0", " ").split())
+
+
+def tx(obj) -> str:
+    """The normalised text of a text PageObject / TextObject."""
+    return norm(getattr(obj, "ref", obj).text)
+
+
+def page_text(page) -> str:
+    return norm(page.get_text())
+
+
 def text_obj(objs, text):
-    hits = [o for o in objs if o.kind == "text" and text in o.ref.text]
-    assert len(hits) == 1, [o.ref.text for o in objs if o.kind == "text"]
+    hits = [o for o in objs if o.kind == "text" and norm(text) in tx(o)]
+    assert len(hits) == 1, [tx(o) for o in objs if o.kind == "text"]
     return hits[0]
+
+
+def test_text_helpers_ignore_no_break_spaces():
+    assert norm("Faktaboks:\xa0omsætningen\xa0 steg\n") == BOX_TEXT
+    fake = type("T", (), {"text": "Brødtekst\xa0nederst\xa0på\xa0siden"})()
+    obj = po.PageObject(kind="text", page=0, rect=pymupdf.Rect(0, 0, 1, 1), ref=fake, key=("text",))
+    assert tx(obj) == BODY_TEXT and text_obj([obj], BODY_TEXT) is obj
 
 
 def assert_rect(a, b, tol=0.6):
@@ -140,7 +163,7 @@ def test_hit_priority_text_first_then_smallest():
     pdf = scene()
     # on the text inside the box: the text, not the box
     t = po.object_at(pdf.doc, 0, (120, 131))
-    assert t.kind == "text" and BOX_TEXT in t.ref.text
+    assert t.kind == "text" and BOX_TEXT in tx(t)
     # inside the box, away from the text: the box
     b = po.object_at(pdf.doc, 0, (200, 190))
     assert b.kind == "graphic" and b.ref.fill is not None
@@ -213,7 +236,7 @@ def test_contents_of_a_callout_box():
     objs = po.page_objects(pdf.doc, 0)
     box = find(objs, "graphic", BOX + (-1, -1, 1, 1))
     inner = po.contents_of(pdf.doc, 0, box)
-    assert [o.kind for o in inner] == ["text"] and BOX_TEXT in inner[0].ref.text
+    assert [o.kind for o in inner] == ["text"] and BOX_TEXT in tx(inner[0])
     big = find(objs, "graphic", BIG)
     assert [o.rect for o in po.contents_of(pdf.doc, 0, big)] == [find(objs, "graphic", SMALL).rect]
     assert po.contents_of(pdf.doc, 0, inner[0]) == []                  # only boxes have contents
@@ -244,7 +267,7 @@ def test_mixed_move_is_one_undo_step_and_undo_is_exact():
     after = pix(pdf.doc)
     assert near(at(after, 440, 560), (40, 160, 60))                        # the image is at its new place
     assert near(at(after, 440, 160), (255, 255, 255))                      # and gone from the old one
-    assert BOX_TEXT in pdf.doc[0].get_text() and BODY_TEXT in pdf.doc[0].get_text()
+    assert BOX_TEXT in page_text(pdf.doc[0]) and BODY_TEXT in page_text(pdf.doc[0])
     pdf.undo()
     assert pdf.doc[0].read_contents() == before_bytes
     assert mismatch(pix(pdf.doc), before, tol=0) == 0
@@ -286,7 +309,7 @@ def test_delete_mixed_objects():
     po.delete_objects(pdf, 0, sel)
     left = po.page_objects(pdf.doc, 0)
     assert len(left) == len(objs) - 3
-    assert BOX_TEXT not in pdf.doc[0].get_text() and BODY_TEXT in pdf.doc[0].get_text()
+    assert BOX_TEXT not in page_text(pdf.doc[0]) and BODY_TEXT in page_text(pdf.doc[0])
     assert ob.list_images(pdf.doc, 0) == []
     assert len(pdf.history._undo) == 1 and pdf.history.undo_label == "Slet"
     pdf.undo()
@@ -445,7 +468,7 @@ def test_copy_builds_a_one_page_pdf_of_the_selection():
     assert clip.page_size == (595, 842)
     d = pymupdf.open("pdf", clip.data)
     assert d.page_count == 1
-    text = d[0].get_text()
+    text = page_text(d[0])
     assert BOX_TEXT in text and BODY_TEXT not in text
     assert len(gr.list_graphics(d, 0)) == 1 and ob.list_images(d, 0) == []
     assert d[0].first_annot is None
@@ -498,10 +521,10 @@ def test_paste_on_the_same_page_with_offset():
     assert all(not o.ref.in_form for o in new if o.kind in ("graphic", "image"))
     # pasted text is standalone and editable/movable
     t = next(n for n in new if n.kind == "text")
-    assert t.ref.free and t.ref.text == text_obj(objs, BOX_TEXT).ref.text
+    assert t.ref.free and tx(t) == tx(text_obj(objs, BOX_TEXT))
     (mt,) = po.move_objects(pdf, 0, [t], 10, 0)
     assert_rect(mt.rect, t.rect + (10, 0, 10, 0), tol=1.0)
-    assert pdf.doc[0].get_text().count(BOX_TEXT) == 2
+    assert page_text(pdf.doc[0]).count(BOX_TEXT) == 2
     pdf.undo()
     pdf.undo()
     assert len(po.page_objects(pdf.doc, 0)) == len(objs)
@@ -515,8 +538,8 @@ def test_paste_on_top_of_text_never_frees_the_page_text():
     # half a line below the body text: the text engine reads both lines as one
     # paragraph, so nothing is marked standalone - the page's own text never is
     po.paste_clip(pdf, 0, clip, offset=(body.rect.x0 - src.rect.x0 + 20, body.rect.y0 - src.rect.y0 + 6))
-    assert pdf.doc[0].get_text().count(BOX_TEXT) == 2
-    assert not any(o.ref.free for o in po.page_objects(pdf.doc, 0) if o.kind == "text" and BODY_TEXT in o.ref.text)
+    assert page_text(pdf.doc[0]).count(BOX_TEXT) == 2
+    assert not any(o.ref.free for o in po.page_objects(pdf.doc, 0) if o.kind == "text" and BODY_TEXT in tx(o))
 
 
 def test_paste_reuses_identical_resources_on_the_same_page():
@@ -531,7 +554,7 @@ def test_paste_reuses_identical_resources_on_the_same_page():
     # the copied font is recognised as the page's own: same name, no second font
     assert {f[4] for f in pdf.doc[0].get_fonts()} == fonts_before
     assert b"_1 " not in pdf.doc[0].read_contents()
-    assert pdf.doc[0].get_text().count(BOX_TEXT) == 3
+    assert page_text(pdf.doc[0]).count(BOX_TEXT) == 3
 
 
 def test_paste_to_another_page():
@@ -545,7 +568,7 @@ def test_paste_to_another_page():
         twin = next(n for n in new if n.kind == o.kind)
         assert_rect(twin.rect, o.rect, tol=1.0)                           # the same place on page 2
     assert mismatch(pix(pdf.doc, 0, clip=clip.rect), pix(pdf.doc, 1, clip=clip.rect)) < 0.002
-    assert BOX_TEXT in pdf.doc[1].get_text()
+    assert BOX_TEXT in page_text(pdf.doc[1])
     assert len(po.page_objects(pdf.doc, 0)) == len(objs)                   # the source page is unchanged
 
 
@@ -565,13 +588,13 @@ def test_paste_into_another_document_fonts_travel(tmp_path):
     path = str(tmp_path / "dst.pdf")
     dst.save(path)
     again = PdfDocument.open(path)
-    assert BOX_TEXT in again.doc[0].get_text()
+    assert BOX_TEXT in page_text(again.doc[0])
     tt = po.find_again(again.doc, 0, t)
     assert tt is not None and tt.kind == "text"
     moved = tob.move_text(again, 0, [tt.ref], 0, 100)
-    assert moved and moved[0].text == tt.ref.text
+    assert moved and tx(moved[0]) == tx(tt)
     assert_rect(moved[0].rect, tt.rect + (0, 100, 0, 100), tol=1.0)
-    assert BOX_TEXT in again.doc[0].get_text()
+    assert BOX_TEXT in page_text(again.doc[0])
     # the pasted graphic and image are first-class objects
     g = next(n for n in new if n.kind == "graphic")
     assert gr.find_graphic(again.doc, 0, g.ref) is not None
@@ -585,7 +608,7 @@ def test_paste_between_pages_with_different_rotation(src_rot, dst_rot):
     src = scene(rotation=src_rot)
     objs = po.page_objects(src.doc, 0)
     box = next(o for o in objs if o.kind == "graphic" and o.ref.fill == (1.0, 0.9, 0.8))
-    txt = next(o for o in objs if o.kind == "text" and BOX_TEXT in o.ref.text)
+    txt = next(o for o in objs if o.kind == "text" and BOX_TEXT in tx(o))
     img = by_kind(objs, "image")[0]
     sel = [box, txt, img]
     clip = po.copy_objects(src.doc, 0, sel)
@@ -603,7 +626,7 @@ def test_paste_between_pages_with_different_rotation(src_rot, dst_rot):
     b = pix(dst.doc, clip=clip.rect + (5, 7, 5, 7))
     assert mismatch(a, b) < 0.01
     tt = next(n for n in new if n.kind == "text")
-    assert " ".join(tt.ref.text.split()) == " ".join(txt.ref.text.split())
+    assert tx(tt) == tx(txt)
 
 
 def test_paste_onto_a_smaller_page_and_off_the_page_clip():
@@ -787,7 +810,7 @@ def test_corpus_paste_a_text_box_onto_chevron_labels():
     texts = by_kind(po.page_objects(pdf.doc, 3), "text")
     labels = [o for o in texts if o.ref.role == "cell" and len(o.ref.lines) == 1 and len(o.ref.text) < 20]
     assert len(labels) >= 4
-    before = {o.ref.text: pymupdf.Rect(o.rect) for o in labels}
+    before = {tx(o): pymupdf.Rect(o.rect) for o in labels}
     box = max(texts, key=lambda o: len(o.ref.text))
     clip = po.copy_objects(pdf.doc, 3, [box])
     lab = labels[0]
@@ -796,7 +819,7 @@ def test_corpus_paste_a_text_box_onto_chevron_labels():
     assert t.ref.free
     (m,) = po.move_objects(pdf, 3, [t], 0, 60)
     assert_rect(m.rect, t.rect + (0, 60, 0, 60), tol=1.0)
-    after = {o.ref.text: o for o in by_kind(po.page_objects(pdf.doc, 3), "text")}
+    after = {tx(o): o for o in by_kind(po.page_objects(pdf.doc, 3), "text")}
     for text, r in before.items():
         assert text in after and not after[text].ref.free, text
         assert_rect(after[text].rect, r)
@@ -804,7 +827,7 @@ def test_corpus_paste_a_text_box_onto_chevron_labels():
 
 
 def words(page) -> list[str]:
-    return sorted(w[4] for w in page.get_text("words"))
+    return sorted(norm(" ".join(w[4] for w in page.get_text("words"))).split())
 
 
 @pytest.mark.skipif(not os.path.exists(os.path.join(CORPUS, "aarsrapport.pdf")), reason="corpus not generated")

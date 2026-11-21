@@ -539,8 +539,8 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     pg = doc[page]
     if _BLOCK_CACHE is None:
         _BLOCK_CACHE = OrderedDict()
-    free = _free_rects(doc, page)
-    page_key = (_page_key(pg), tuple(pg.rect), tuple(tuple(round(v, 2) for v in r) for r in free))
+    free = _free_blocks(doc, page)
+    page_key = (_page_key(pg), tuple(pg.rect), tuple((tuple(b.rect), b.lines) for b in free))
     key = page_key + (merge,)
     hit = _BLOCK_CACHE.get(key)
     if hit is not None:
@@ -595,29 +595,42 @@ def _extract_groups(pg: pymupdf.Page) -> tuple[list[list[TextLine]], dict[int, f
     return groups, items
 
 
-def _free_rects(doc: pymupdf.Document, page: int) -> list[pymupdf.Rect]:
-    """Raw rects of text the user moved out of the text flow (Folio's page
-    markers, see :func:`pdfstudio.core.flow._free_rects`)."""
+def _free_blocks(doc: pymupdf.Document, page: int) -> list:
+    """Text the user moved out of the text flow (Folio's page markers, see
+    :class:`pdfstudio.core.flow.FreeBlock`)."""
     from . import flow
 
-    return flow._free_rects(doc, page)
+    return flow._free_blocks(doc, page)
 
 
 def _free_zones(groups: list[list[TextLine]], free) -> tuple[list[list[TextLine]], dict[int, int]]:
-    """Split groups so that lines starting inside a free rect (a moved
-    block) never share a group with other lines; ``id(line) -> zone``
-    (index of the free rect, -1 = none) keeps them apart when merging."""
-    from .flow import _free_index
+    """The lines of each free block (a moved block, identified line by line)
+    form one group of their own (its list bullet another); no other line
+    shares it. ``id(line) -> zone`` (index of the free block, -1 = none)
+    keeps them apart when merging."""
+    from .flow import _free_of
 
     zones: dict[int, int] = {}
     out: list[list[TextLine]] = []
+    gathered: dict[tuple, list[TextLine]] = {}
     for g in groups:
-        parts: dict[int, list[TextLine]] = {}
+        rest = []
         for ln in g:
-            z = _free_index(ln.raw_origin, free)
+            z = _free_of(ln, free)
             zones[id(ln)] = z
-            parts.setdefault(z, []).append(ln)
-        out.extend(parts.values())
+            if z < 0:
+                rest.append(ln)
+            else:
+                key = (z, id(ln)) if _is_bullet(ln) else (z, -1)
+                if key not in gathered:
+                    gathered[key] = []
+                    out.append(gathered[key])
+                gathered[key].append(ln)
+        if rest:
+            out.append(rest)
+    for g in gathered.values():
+        n = _perp(g[0].dir)
+        g.sort(key=lambda ln: (round(_dot(ln.raw_origin, n), 1), _dot(ln.raw_origin, ln.dir)))
     return out, zones
 
 

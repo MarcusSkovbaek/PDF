@@ -516,3 +516,130 @@ def test_listing_is_fast_after_the_first_time(rep):
         to.list_text(pdf.doc, 0)
         to.text_at(pdf.doc, 0, (300, 300))
     assert (time.perf_counter() - t) / 10 < 0.05
+
+
+# -- overlapping text is never damaged (nudges in a dense column) ------------------
+CORPUS = "/tmp/claude-0/-home-user-PDF/740062b8-3b33-5ee1-bf87-7d6301ab4318/scratchpad/corpus/aarsrapport.pdf"
+
+
+def _same(a: str, b: str) -> bool:
+    return norm(a) == norm(b)
+
+
+def _intact(doc, page, obj, role="body"):
+    """``obj`` is on the page as one object with all its lines and text."""
+    hits = [o for o in to.list_text(doc, page) if _same(o.text, obj.text)]
+    assert len(hits) == 1, f"{obj.text[:40]!r} is not one object any more"
+    o = hits[0]
+    assert len(o.block.lines) == len(obj.block.lines) and o.role == role
+    return o
+
+
+def _nudges(pdf, page, a, b, step=10.0, times=3):
+    words = len(pdf.doc[page].get_text("words"))
+    old = state(pdf.doc, page)
+    cur = [a]
+    for k in range(times):
+        cur = to.move_text(pdf, page, cur, 0, step, merge=k > 0)
+        assert len(cur) == 1 and _same(cur[0].text, a.text) and cur[0].free
+        _intact(pdf.doc, page, a, role="free")
+        o = _intact(pdf.doc, page, b)
+        assert not o.free                                            # the neighbour stays where it was
+        assert max(abs(u - v) for u, v in zip(o.rect, b.rect)) < 0.05
+        assert len(pdf.doc[page].get_text("words")) == words         # no glyph lost
+    assert len(pdf.history._undo) == 1
+    assert pdf.undo() and state(pdf.doc, page) == old
+
+
+def test_nudging_into_the_next_paragraph_keeps_it_intact(short):
+    pdf = _pdf(short)
+    objs = body_objs(pdf.doc, 1)
+    _nudges(pdf, 1, objs[1], objs[2])
+
+
+def test_nudging_in_the_annual_report_keeps_the_next_paragraph_intact():
+    import os
+
+    if not os.path.exists(CORPUS):
+        pytest.skip("real-world corpus not generated")
+    pdf = PdfDocument(pymupdf.open(CORPUS))
+    objs = [o for o in to.list_text(pdf.doc, 5) if o.role == "body"]
+    _nudges(pdf, 5, objs[0], objs[1])
+
+
+def test_a_block_dropped_on_top_of_another_and_back(short):
+    pdf = _pdf(short)
+    objs = body_objs(pdf.doc, 1)
+    a, b = objs[1], objs[2]
+    words = len(pdf.doc[1].get_text("words"))
+    dx, dy = b.rect.x0 - a.rect.x0, b.lines[0].origin[1] - a.lines[0].origin[1]
+    moved = to.move_text(pdf, 1, [a], dx, dy)
+    assert len(moved) == 1 and _same(moved[0].text, a.text)
+    _intact(pdf.doc, 1, b)
+    back = to.move_text(pdf, 1, moved, -dx, -dy)
+    assert len(back) == 1 and _same(back[0].text, a.text)
+    _intact(pdf.doc, 1, b)
+    _intact(pdf.doc, 1, a, role="free")
+    assert len(pdf.doc[1].get_text("words")) == words
+    old = state(short, 1)
+    assert pdf.undo() and pdf.undo() and state(pdf.doc, 1) == old
+
+
+def test_deleting_text_lying_on_other_text_keeps_that_text(short):
+    pdf = _pdf(short)
+    objs = body_objs(pdf.doc, 1)
+    a, b = objs[1], objs[2]
+    moved = to.move_text(pdf, 1, [a], 0, b.lines[1].origin[1] - a.lines[0].origin[1] + 4)
+    to.delete_text(pdf, 1, moved)
+    _intact(pdf.doc, 1, b)
+    assert not pdf.doc[1].search_for(a.lines[2].text[:25])
+
+
+def test_a_space_after_a_symbol_in_another_font_survives_a_move():
+    """A glyph from another font, then a space placed a hair off, then
+    text: the space must still extract as a space after the text moved."""
+    from tests.conftest import SANS_TTF
+
+    if not SANS_TTF:
+        pytest.skip("no TrueType font")
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    helv, sans = pymupdf.Font("helv"), pymupdf.Font(fontfile=SANS_TTF)
+    tw = pymupdf.TextWriter(pg.rect)
+    x = 72.0
+    tw.append((x, 100), "Tid: 2027", font=helv, fontsize=12)
+    x += helv.text_length("Tid: 2027", 12)
+    tw.append((x, 100), " ", font=helv, fontsize=12)
+    x += helv.text_length(" ", 12) + 0.04
+    tw.append((x, 100), "→", font=sans, fontsize=12)
+    x += sans.text_length("→", 12) - 0.03
+    tw.append((x, 100), " ", font=sans, fontsize=12)
+    x += sans.text_length(" ", 12) + 0.05
+    tw.append((x, 100), "2030", font=helv, fontsize=12)
+    tw.write_text(pg)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    obj = next(o for o in to.list_text(pdf.doc, 0) if "2030" in o.text)
+    assert norm(obj.text) == "Tid: 2027 → 2030"
+    new = to.move_text(pdf, 0, [obj], 20, 40)[0]
+    assert norm(new.text) == "Tid: 2027 → 2030"
+    assert "2027 → 2030" in norm(pdf.doc[0].get_text())
+
+
+def test_a_rule_under_a_heading_is_not_its_underline():
+    """A heading dropped exactly onto a longer horizontal rule (an accent
+    line) and moved back: the rule stays where it was."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.insert_text((72, 100), "Overskrift", fontname="helv", fontsize=16)
+    pg.insert_text((72, 300), "Brødtekst længere nede på siden.", fontname="helv", fontsize=11)
+    pg.draw_line((60, 203), (400, 203), color=(0.2, 0.5, 0.3), width=1.0)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    head = next(o for o in to.list_text(pdf.doc, 0) if o.text == "Overskrift")
+    moved = to.move_text(pdf, 0, [head], 0, 100)          # the rule now sits right under it
+    assert moved[0].lines[0].decor_rects                  # (the engine takes it for an underline)
+    back = to.move_text(pdf, 0, moved, 0, -100)
+    assert back[0].text == "Overskrift"
+    rules = [d["rect"] for d in pdf.doc[0].get_drawings()]
+    assert len(rules) == 1
+    assert rules[0].x0 == pytest.approx(60, abs=0.6) and rules[0].x1 == pytest.approx(400, abs=0.6)
+    assert rules[0].y0 == pytest.approx(203, abs=0.6)

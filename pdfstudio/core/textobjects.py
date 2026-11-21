@@ -254,21 +254,36 @@ def _inside(point, r: pymupdf.Rect) -> bool:
     return r.x0 <= point[0] <= r.x1 and r.y0 <= point[1] <= r.y1
 
 
-def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new_rects: list[pymupdf.Rect]):
-    """``(free rects, continuation markers of this page, next page's markers
-    or None)`` after ``objs`` left their place (moved to ``new_rects``, raw;
-    deleted: none). Rects that no longer hold the start of any block are
-    dropped (stale)."""
+def _new_free(obj: TextObject, pg: pymupdf.Page, rx: float, ry: float) -> flow.FreeBlock:
+    """The free-block entry of ``obj`` moved by (rx, ry) raw: its rect and
+    the origin and text hash of each of its lines there."""
+    rect = _raw_rect(obj, pg) + (rx - FREE_PAD, ry - FREE_PAD, rx + FREE_PAD, ry + FREE_PAD)
+    lines = tuple((round(ln.raw_origin[0] + rx, 2), round(ln.raw_origin[1] + ry, 2), flow._line_hash(ln.text))
+                  for ln in obj.lines)
+    return flow.FreeBlock(rect, lines)
+
+
+def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new: list):
+    """``(free blocks, continuation markers of this page, next page's markers
+    or None)`` after ``objs`` left their place (moved: ``new`` holds their
+    new free-block entries; deleted: none). Entries none of whose lines is on
+    the page any more are dropped (stale)."""
     origins = [o.origin for o in objs]
-    starts = [b.lines[0].raw_origin for b in te.text_blocks(doc, page) if b.lines]
-    free = []
-    for r in flow._free_rects(doc, page):
-        if any(_inside(p, r) for p in origins):
-            continue                                   # replaced by the new place
-        if not any(_inside(p, r) for p in starts):
-            continue                                   # stale: nothing starts there any more
-        free.append(r)
-    free.extend(new_rects)
+    old = flow._free_blocks(doc, page)
+    gone: set[int] = set()
+    for o in objs:
+        for ln in o.lines:
+            k = flow._free_of(ln, old)
+            if k >= 0:
+                gone.add(k)                                # replaced by the new place / deleted
+    present: set[int] = set()
+    if old:
+        for b in te.text_blocks(doc, page, merge=False):
+            for ln in b.lines:
+                k = flow._free_of(ln, old)
+                if k >= 0:
+                    present.add(k)
+    free = [b for k, b in enumerate(old) if k not in gone and k in present] + list(new)
     # continuation markers: the moved piece's own, and the one of the piece
     # its paragraph ran on into (later on this page, or on the next page)
     drop_here = list(origins)
@@ -308,7 +323,7 @@ def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new_r
 
 def _write_markers(doc: pymupdf.Document, page: int, plan) -> None:
     free, conts, nxt = plan
-    if free != flow._free_rects(doc, page) or conts != flow._markers(doc, page):
+    if free != flow._free_blocks(doc, page) or conts != flow._markers(doc, page):
         flow._set_free(doc, page, free, conts)
     if nxt is not None:
         flow._set_markers(doc, page + 1, nxt)
@@ -385,7 +400,18 @@ def _exact_runs(pg: pymupdf.Page, page: int, lines: list) -> list:
         for a, b, x in segs:
             off = x - b0
             o = (ln.raw_origin[0] + d[0] * off, ln.raw_origin[1] + d[1] * off)
-            line_runs.extend(te._emit_line(rich[a:b], o, d, em, 0.0, font_of, ln.decor))
+            piece = rich[a:b]
+            if not "".join(c[0] for c in piece).strip():
+                # a run of spaces only (where words were spread): drawn as
+                # space glyphs where they were, or the words would read as one
+                st = piece[0][1]
+                font = font_of(st)
+                if te.has_space(font):
+                    line_runs.append(te.TextRun(text=" " * len(piece), font=font, size=st.size,
+                                                color=tuple(st.color), origin=o, dir=d,
+                                                space=em * st.size if em else None))
+                continue
+            line_runs.extend(te._emit_line(piece, o, d, em, 0.0, font_of, ln.decor))
         runs.extend(te._bridge_line(line_runs) if len(segs) > 1 else line_runs)
     return runs
 
@@ -526,11 +552,133 @@ def _write(page: pymupdf.Page, runs: list, *, overlay: bool = True) -> None:
 # ---------------------------------------------------------------------------
 # edits
 # ---------------------------------------------------------------------------
+def _sig(ln) -> tuple:
+    return (round(ln.raw_origin[0], 2), round(ln.raw_origin[1], 2), ln.text)
+
+
+def _strips(lines: list) -> list[pymupdf.Rect]:
+    """What removing ``lines`` redacts (raw): the band through each span
+    and the middle of each glyph box (the leftover pass)."""
+    out = [pymupdf.Rect(r) for ln in lines for r in te._band_rects(ln)]
+    out += [te._center_box(pymupdf.Rect(c), 0.4, 0.35) for ln in lines for c in ln.char_rects]
+    return [r for r in out if not r.is_empty]
+
+
+def _collateral(doc: pymupdf.Document, page: int, lines: list) -> list:
+    """Other text lines whose glyphs removing ``lines`` would also hit
+    (text overlapping them – a block dropped onto another): they are
+    removed too and written again exactly where they are, so overlapping
+    text is never damaged."""
+    if not lines:
+        return []
+    own = {_sig(ln) for ln in lines}
+    others = [ln for b in te.text_blocks(doc, page, merge=False) for ln in b.lines
+              if _sig(ln) not in own and ln.raw_bbox is not None]
+    strips = _strips(lines)
+    hit: list = []
+    while strips and others:
+        area = pymupdf.Rect(strips[0])
+        for r in strips[1:]:
+            area |= r
+        found = []
+        for ln in others:
+            box = pymupdf.Rect(ln.raw_bbox)
+            if not box.intersects(area):
+                continue
+            near = [r for r in strips if r.intersects(box)]
+            if near and any(pymupdf.Rect(c).intersects(r) for c in ln.char_rects for r in near):
+                found.append(ln)
+        if not found:
+            break
+        hit.extend(found)
+        ids = {id(ln) for ln in found}
+        others = [ln for ln in others if id(ln) not in ids]
+        strips = _strips(found)          # what removing those hits in turn
+    # written back in reading order, so text extraction reads them as before
+    hit.sort(key=lambda ln: (round(ln.dir[0], 3), round(ln.dir[1], 3),
+                             round(te._dot(ln.raw_origin, te._perp(ln.dir)), 1), te._dot(ln.raw_origin, ln.dir)))
+    return hit
+
+
+def _own_decor(lines: list) -> list:
+    """The lines with only the strokes that really are their underline /
+    strike-through: a stroke reaching more than 2 pt past the line's glyphs
+    on either side (an accent rule under a heading) is not the line's and
+    neither moves nor goes with it."""
+    out = []
+    for ln in lines:
+        if not ln.decor_rects:
+            out.append(ln)
+            continue
+        lo, hi = ln.extent
+        own = [r for r in ln.decor_rects
+               if te._proj_range(pymupdf.Rect(r), ln.dir)[0] >= lo - 2.0
+               and te._proj_range(pymupdf.Rect(r), ln.dir)[1] <= hi + 2.0]
+        if len(own) == len(ln.decor_rects):
+            out.append(ln)
+        elif own:
+            out.append(replace(ln, decor_rects=own))
+        else:
+            out.append(replace(ln, decor_rects=[], decor={},
+                               char_styles=[replace(st, underline=False, strike=False) if (st.underline or st.strike)
+                                            else st for st in ln.char_styles]))
+    return out
+
+
+class _Rewrite:
+    """Remove some lines and write them again (moved, or in place), with
+    the text they overlap kept intact (:func:`_collateral`)."""
+
+    def __init__(self, doc: pymupdf.Document, page: int, lines: list, *, write: bool = True,
+                 rx: float = 0.0, ry: float = 0.0):
+        pg = doc[page]
+        self.lines = _own_decor(lines)
+        self.extra = _own_decor(_collateral(doc, page, self.lines))
+        self.runs: list = []
+        self.paths: list = []
+        self.extra_runs: list = []
+        self.extra_paths: list = []
+        self.rx, self.ry = rx, ry
+        if write:
+            self.runs, self.paths = self._runs(pg, page, self.lines, rx, ry)
+        if self.extra:
+            self.extra_runs, self.extra_paths = self._runs(pg, page, self.extra, 0.0, 0.0)
+
+    @staticmethod
+    def _runs(pg, page, lines, rx, ry):
+        runs = _exact_runs(pg, page, lines)
+        if rx or ry:
+            runs = [replace(r, origin=(r.origin[0] + rx, r.origin[1] + ry)) for r in runs]
+        paths = _decor_paths(pg, lines)
+        if paths is not None:
+            # the underline / strike strokes move as they are drawn (colour,
+            # length, thickness) instead of being drawn anew under each run
+            runs = [replace(r, underline=None, strike=None) for r in runs if r.text]
+        return runs, paths or []
+
+    def remove(self, p: pymupdf.Page) -> None:
+        te._remove_lines(p, self.lines + self.extra)
+
+    def write(self, p: pymupdf.Page, *, overlay: bool = True) -> None:
+        if self.runs:
+            _write(p, self.runs, overlay=overlay)
+        if self.paths:
+            _draw_paths(p, self.paths, self.rx, self.ry, overlay=overlay)
+        self.write_extra(p)
+
+    def write_extra(self, p: pymupdf.Page) -> None:
+        if self.extra_runs:
+            _write(p, self.extra_runs)
+        if self.extra_paths:
+            _draw_paths(p, self.extra_paths, 0.0, 0.0)
+
+
 def move_text(pdf, page: int, objs, dx: float, dy: float, *, merge: bool = False) -> list[TextObject]:
     """Move text objects by ``(dx, dy)`` display points – one undo step
     (``merge=True`` folds it into the previous step when that is a move of
     text too: a burst of keyboard nudges). The moved blocks become
-    standalone (O17). Returns the moved objects as they are now."""
+    standalone (O17); text they overlap stays intact. Returns the moved
+    objects as they are now."""
     if not (math.isfinite(dx) and math.isfinite(dy)):
         raise ValueError("bad offset")
     doc = pdf.doc
@@ -542,24 +690,15 @@ def move_text(pdf, page: int, objs, dx: float, dy: float, *, merge: bool = False
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return targets
     rx, ry = _raw_delta(pg, dx, dy)
-    lines = [ln for o in targets for ln in o.lines]
-    runs = [replace(r, origin=(r.origin[0] + rx, r.origin[1] + ry)) for r in _exact_runs(pg, page, lines)]
-    paths = _decor_paths(pg, lines)
-    if paths is not None:
-        # the underline / strike strokes move as they are drawn (colour,
-        # length, thickness) instead of being drawn anew under each run
-        runs = [replace(r, underline=None, strike=None) for r in runs if r.text]
-    new_rects = [_raw_rect(o, pg) + (rx - FREE_PAD, ry - FREE_PAD, rx + FREE_PAD, ry + FREE_PAD) for o in targets]
-    plan = _marker_plan(doc, page, targets, new_rects)
+    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], rx=rx, ry=ry)
+    plan = _marker_plan(doc, page, targets, [_new_free(o, pg, rx, ry) for o in targets])
     label = _label("textobj.undo.move", "Flyt tekst")
     fold = merge and pdf.history.undo_label == label
     with pdf.edit(label, CONTENT, _pages(page, plan)):
         d = pdf.doc
         p = d[page]
-        te._remove_lines(p, lines)
-        _write(p, runs)
-        if paths:
-            _draw_paths(p, paths, rx, ry)
+        job.remove(p)
+        job.write(p)
         _write_markers(d, page, plan)
     if fold:
         pdf.history.discard_last()      # the state before the burst stays the undo target
@@ -614,7 +753,7 @@ def _decor_paths(pg: pymupdf.Page, lines: list) -> list | None:
     return out
 
 
-def _draw_paths(page: pymupdf.Page, paths: list, rx: float, ry: float) -> None:
+def _draw_paths(page: pymupdf.Page, paths: list, rx: float, ry: float, *, overlay: bool = True) -> None:
     """Draw stroke / bar drawings again, translated by (rx, ry) raw."""
     shape = page.new_shape()
     v = pymupdf.Point(rx, ry)
@@ -633,7 +772,12 @@ def _draw_paths(page: pymupdf.Page, paths: list, rx: float, ry: float) -> None:
                      lineCap=max(cap) if isinstance(cap, (tuple, list)) and cap else int(cap or 0),
                      stroke_opacity=p.get("stroke_opacity") if p.get("stroke_opacity") is not None else 1,
                      fill_opacity=p.get("fill_opacity") if p.get("fill_opacity") is not None else 1)
-    shape.commit()
+    shape.commit(overlay=overlay)
+
+
+def _delete(doc: pymupdf.Document, page: int, targets: list[TextObject]):
+    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], write=False)
+    return job, _marker_plan(doc, page, targets, [])
 
 
 def delete_text_doc(doc: pymupdf.Document, page: int, objs) -> None:
@@ -642,22 +786,25 @@ def delete_text_doc(doc: pymupdf.Document, page: int, objs) -> None:
     targets = _resolve(doc, page, objs)
     if not targets:
         return
-    plan = _marker_plan(doc, page, targets, [])
-    te._remove_lines(doc[page], [ln for o in targets for ln in o.lines])
+    job, plan = _delete(doc, page, targets)
+    job.remove(doc[page])
+    job.write(doc[page])
     _write_markers(doc, page, plan)
 
 
 def delete_text(pdf, page: int, objs) -> None:
     """Delete text objects (one undo step). Only their glyphs go: images,
-    vector art and other text stay; the text below does not move up."""
+    vector art and other text (also text they overlap) stay; the text below
+    does not move up."""
     doc = pdf.doc
     targets = _resolve(doc, page, objs)
     if not targets:
         return
-    plan = _marker_plan(doc, page, targets, [])
+    job, plan = _delete(doc, page, targets)
     with pdf.edit(_label("textobj.undo.delete", "Slet tekst"), CONTENT, _pages(page, plan)):
         d = pdf.doc
-        te._remove_lines(d[page], [ln for o in targets for ln in o.lines])
+        job.remove(d[page])
+        job.write(d[page])
         _write_markers(d, page, plan)
 
 
@@ -699,21 +846,30 @@ def set_text_width(pdf, page: int, obj: TextObject, width: float) -> TextObject:
         return obj
     text = _wrap_text(obj)
     label = _label("textobj.undo.width", "Skift tekstbredde")
-    if not obj.free:
-        te.replace_block_text(pdf, block, text, width=wrap, reflow=obj.story_kind == "flow", label=label)
-    else:
-        # a moved block grows in place; its free rect follows its new shape
+    # text overlapping the block is taken off first and written back after
+    job = _Rewrite(doc, page, list(block.lines), write=False)
+    refresh = None
+    if obj.free:
+        # a moved block grows in place; its free entry follows its new lines
         pg = doc[page]
         plan = te._plan(pg, block, text, None, width=wrap)
         rect = flow._runs_rect(plan.runs)
         for ln in (obj.bullet.lines if obj.bullet is not None else ()):
-            rect |= pymupdf.Rect(ln.raw_bbox)
-        free = [r for r in flow._free_rects(doc, page) if not _inside(obj.origin, r)]
+            rect = pymupdf.Rect(ln.raw_bbox) if rect.is_empty else rect | ln.raw_bbox
+        blocks = flow._free_blocks(doc, page)
+        k = flow._free_of(first, blocks)
+        old = blocks[k] if k >= 0 else None
         if not rect.is_empty:
-            free.append(rect + (-FREE_PAD, -FREE_PAD, FREE_PAD, FREE_PAD))
-        with pdf.edit(label, CONTENT, (page,)):
-            te.replace_block_text(pdf, block, text, width=wrap, reflow=False, label=label)
-            flow._set_free(pdf.doc, page, free)
+            refresh = (old, plan.runs + _exact_runs(pg, page, obj.bullet.lines if obj.bullet is not None else []),
+                       rect + (-FREE_PAD, -FREE_PAD, FREE_PAD, FREE_PAD))
+    with pdf.edit(label, CONTENT, (page,)):
+        if job.extra:
+            te._remove_lines(pdf.doc[page], job.extra)
+        te.replace_block_text(pdf, block, text, width=wrap, reflow=obj.story_kind == "flow" and not obj.free,
+                              label=label)
+        job.write_extra(pdf.doc[page])
+        if refresh is not None:
+            flow._refresh_free(pdf.doc, page, *refresh)
     return _find(pdf.doc, page, obj.origin, None) or obj
 
 
@@ -762,13 +918,11 @@ def restack_text(pdf, page: int, objs, *, front: bool = True) -> list[TextObject
     targets = _resolve(doc, page, objs)
     if not targets:
         return targets
-    pg = doc[page]
-    lines = [ln for o in targets for ln in o.lines]
-    runs = _exact_runs(pg, page, lines)
+    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines])
     label = _label("textobj.undo.front", "Læg tekst forrest") if front else \
         _label("textobj.undo.back", "Læg tekst bagerst")
     with pdf.edit(label, CONTENT, (page,)):
         p = pdf.doc[page]
-        te._remove_lines(p, lines)
-        _write(p, runs, overlay=front)
+        job.remove(p)
+        job.write(p, overlay=front)
     return _after(pdf.doc, page, targets)

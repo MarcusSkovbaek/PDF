@@ -219,31 +219,113 @@ def _running_rects(doc, page: int) -> list[pymupdf.Rect]:
     return [pymupdf.Rect(nums[i:i + 4]) for i in range(0, len(nums) - 3, 4)]
 
 
-def _free_rects(doc, page: int) -> list[pymupdf.Rect]:
-    """Raw rects of text blocks the user moved out of the flow (O17): a
-    block whose first baseline starts inside one is a standalone ``free``
-    story – the column neither moves it nor pulls it back in."""
+@dataclass(frozen=True)
+class FreeBlock:
+    """Text the user moved out of the flow (O17), as stored in the page's
+    Folio markers: its raw rect and, per line, the raw origin and a hash
+    of the text. A line belongs to the block iff its origin (within
+    ``FREE_TOL`` pt) and text hash match one of these – a neighbour that
+    merely starts inside the rect stays what it was."""
+
+    rect: pymupdf.Rect
+    lines: tuple = ()               # ((x, y, hash), ...)
+
+
+FREE_TOL = 0.5
+
+
+def _line_hash(text: str) -> int:
+    """Hash of a line's text, insensitive to whitespace (text extraction may
+    add or drop a space where a line was written in several runs)."""
+    import zlib
+
+    return zlib.crc32("".join(text.split()).encode("utf-8")) % 1000000
+
+
+def _free_line(ln: TextLine) -> tuple:
+    return (round(ln.raw_origin[0], 2), round(ln.raw_origin[1], 2), _line_hash(ln.text))
+
+
+def _free_blocks(doc, page: int) -> list[FreeBlock]:
+    """The page's free blocks (``/Free [[x0 y0 x1 y1 x y h …] …]``)."""
     try:
         kind, val = doc.xref_get_key(doc[page].xref, f"PieceInfo/{_MARKER_KEY}/Private/Free")
     except Exception:
         return []
     if kind != "array":
         return []
-    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", val)]
-    return [pymupdf.Rect(nums[i:i + 4]) for i in range(0, len(nums) - 3, 4)]
+    out = []
+    for inner in re.findall(r"\[([^\[\]]*)\]", val[1:-1] if val.startswith("[") else val):
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", inner)]
+        if len(nums) < 4:
+            continue
+        rest = nums[4:]
+        lines = tuple((rest[i], rest[i + 1], int(rest[i + 2])) for i in range(0, len(rest) - 2, 3))
+        out.append(FreeBlock(pymupdf.Rect(nums[:4]), lines))
+    return out
 
 
-def _free_index(point, free: list[pymupdf.Rect]) -> int:
-    """Index of the first free rect containing the raw ``point`` (-1: none)."""
-    x, y = float(point[0]), float(point[1])
-    for k, r in enumerate(free):
-        if r.x0 <= x <= r.x1 and r.y0 <= y <= r.y1:
-            return k
+def _free_rects(doc, page: int) -> list[pymupdf.Rect]:
+    """Raw rects of the page's free blocks."""
+    return [b.rect for b in _free_blocks(doc, page)]
+
+
+def _free_of(ln: TextLine, free: list[FreeBlock]) -> int:
+    """Index of the free block ``ln`` belongs to (-1: none)."""
+    x, y = float(ln.raw_origin[0]), float(ln.raw_origin[1])
+    h = None
+    for k, b in enumerate(free):
+        r = b.rect
+        if not (r.x0 - FREE_TOL <= x <= r.x1 + FREE_TOL and r.y0 - FREE_TOL <= y <= r.y1 + FREE_TOL):
+            continue
+        for fx, fy, fh in b.lines:
+            if abs(fx - x) <= FREE_TOL and abs(fy - y) <= FREE_TOL:
+                if h is None:
+                    h = _line_hash(ln.text)
+                if h == fh:
+                    return k
     return -1
 
 
+def _refresh_free(doc, page: int, old: FreeBlock | None, runs: list[TextRun], rect: pymupdf.Rect) -> None:
+    """After a free block was rewritten (Redigér tekst, a new width): its
+    entry gets the lines actually written – those starting inside ``rect``
+    that kept an old line's place and text, or sit on the baseline of one
+    of the written ``runs`` within its extent – and ``rect``."""
+    free = _free_blocks(doc, page)
+    others = [b for b in free if b != old]
+    spans = []
+    for r in runs:
+        if not r.text.strip():
+            continue
+        n = _perp(r.dir)
+        a = _dot(r.origin, r.dir)
+        try:
+            w = r.font.text_length(r.text, fontsize=r.size) * (r.stretch or 1.0)
+        except Exception:
+            w = 0.0
+        spans.append((r.dir, _dot(r.origin, n), a, a + w))
+    keep = []
+    for b in te.text_blocks(doc, page, merge=False):
+        for ln in b.lines:
+            x, y = ln.raw_origin
+            if not (rect.x0 - 1 <= x <= rect.x1 + 1 and rect.y0 - 1 <= y <= rect.y1 + 1):
+                continue
+            if others and _free_of(ln, others) >= 0:
+                continue
+            mine = old is not None and _free_of(ln, [old]) == 0
+            if not mine:
+                n = _perp(ln.dir)
+                base, s0 = _dot(ln.raw_origin, n), ln.extent[0]
+                mine = any(te._same_dir(d, ln.dir) and abs(bn - base) <= FREE_TOL and a - 1.0 <= s0 <= e + 1.0
+                           for d, bn, a, e in spans)
+            if mine:
+                keep.append(_free_line(ln))
+    _set_free(doc, page, others + ([FreeBlock(pymupdf.Rect(rect), tuple(keep))] if keep else []))
+
+
 def _set_free(doc, page: int, free: list, conts: list[tuple[float, float]] | None = None) -> None:
-    """Replace the page's free rects (and, with ``conts``, its continuation
+    """Replace the page's free blocks (and, with ``conts``, its continuation
     markers); everything else in the markers stays."""
     _set_markers(doc, page, _markers(doc, page) if conts is None else conts, free=list(free))
 
@@ -284,7 +366,7 @@ def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: boo
     if running is None:
         running = _running_rects(doc, page) if inserted else []
     if free is None:
-        free = _free_rects(doc, page)
+        free = _free_blocks(doc, page)
     if not conts and not inserted and not free:
         if doc.xref_get_key(pg.xref, f"PieceInfo/{_MARKER_KEY}")[0] != "null":
             doc.xref_set_key(pg.xref, f"PieceInfo/{_MARKER_KEY}", "null")
@@ -292,7 +374,8 @@ def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: boo
     arr = " ".join(f"{x:.2f} {y:.2f}" for x, y in conts)
     from .identity import pdf_date
     run = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in running)
-    fre = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in (pymupdf.Rect(x) for x in free))
+    fre = " ".join(f"[{b.rect.x0:.2f} {b.rect.y0:.2f} {b.rect.x1:.2f} {b.rect.y1:.2f}"
+                   + "".join(f" {x:.2f} {y:.2f} {int(h)}" for x, y, h in b.lines) + "]" for b in free)
     priv = (f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + (f"/Running[{run}]" if run else "")
             + (f"/Free[{fre}]" if fre else "") + ">>")
     doc.xref_set_key(pg.xref, "PieceInfo", f"<</{_MARKER_KEY}<</LastModified({pdf_date()})/Private{priv}>>>>")
@@ -423,12 +506,12 @@ def _analyze_page(doc, page: int) -> _PageInfo:
     roles: dict[int, str] = {}
     sizes = sorted(ln.style.size for b in blocks for ln in b.lines if ln.style.size)
     body_size = statistics.median(sizes) if sizes else 10.0
-    free = _free_rects(doc, page)
-    free_of: dict[int, int] = {}            # id(block) -> free rect index (O17: moved by the user)
+    free = _free_blocks(doc, page)
+    free_of: dict[int, int] = {}            # id(block) -> free block index (O17: moved by the user)
     for b in blocks:
         first = b.lines[0]
         role = None
-        k_free = _free_index(first.raw_origin, free) if free else -1
+        k_free = _free_of(first, free) if free else -1
         if k_free >= 0:
             free_of[id(b)] = k_free
             role = "free"
@@ -1516,23 +1599,24 @@ def _apply_single(pdf, story: Story, edits: list[Edit], merge, result: FlowResul
         # text the user moved (O17) grows in its own place, and its free rect
         # with it – lines outside it would join the column
         doc = pdf.doc
-        origin = piece.block.lines[0].raw_origin
-        old = [r for r in _free_rects(doc, story.page) if _free_index(origin, [r]) == 0]
+        blocks = _free_blocks(doc, story.page)
+        k = _free_of(piece.block.lines[0], blocks)
+        old = blocks[k] if k >= 0 else None
         plan = te._plan(doc[story.page], piece.block, full, e0.style, formats=e0.formats, align=e0.align,
                         line_spacing=e0.line_spacing)
         grown = _runs_rect(plan.runs)
         if not grown.is_empty:
             grown = grown + (-1.0, -1.0, 1.0, 1.0)
-        for r in old:
-            grown = pymupdf.Rect(r) if grown.is_empty else grown | r
+        if old is not None:
+            grown = pymupdf.Rect(old.rect) if grown.is_empty else grown | old.rect
         if not grown.is_empty:
-            free = [r for r in _free_rects(doc, story.page) if _free_index(origin, [r]) != 0] + [grown]
+            free = (old, plan.runs, grown)
     with pdf.edit(te._label("core.undo.edit_text", "Redigér tekst"), CONTENT, (story.page,), merge=merge):
         # (text below it in the same place moves along; what cannot move is reported as overflow)
         res = te.replace_block_text(pdf, piece.block, full, e0.style, formats=e0.formats, align=e0.align,
                                     line_spacing=e0.line_spacing, reflow=free is None)
         if free is not None:
-            _set_free(pdf.doc, story.page, free)
+            _refresh_free(pdf.doc, story.page, *free)
     result.substitutions = list(res.substitutions)
     result.overflow = res.overflow
     result.pages = (story.page,)

@@ -349,7 +349,11 @@ def test_alt_deep_select_picks_one_path_of_a_group():
     fill_now = gr.find_graphic(pdf.doc, 0, fill)
     assert fill_now is not None
     assert_rect(fill_now.rect, fill.rect)                                 # the fill stayed
-    assert gr.list_graphics(pdf.doc, 0)[0].paths == (0, 1)                # listing semantics unchanged
+    # moved away from its fill the border is a shape of its own; the listing
+    # of the untouched page still groups them (deep select changes no listing)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)][:2] == [(0,), (1,)]
+    pdf.undo()
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1), (2, 3), (4,)]
 
 
 def test_alt_deep_select_background_and_path_only_form():

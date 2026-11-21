@@ -507,6 +507,18 @@ def test_paste_on_the_same_page_with_offset():
     assert len(po.page_objects(pdf.doc, 0)) == len(objs)
 
 
+def test_paste_on_top_of_text_never_frees_the_page_text():
+    pdf = scene()
+    objs = po.page_objects(pdf.doc, 0)
+    src, body = text_obj(objs, BOX_TEXT), text_obj(objs, BODY_TEXT)
+    clip = po.copy_objects(pdf.doc, 0, [src])
+    # half a line below the body text: the text engine reads both lines as one
+    # paragraph, so nothing is marked standalone - the page's own text never is
+    po.paste_clip(pdf, 0, clip, offset=(body.rect.x0 - src.rect.x0 + 20, body.rect.y0 - src.rect.y0 + 6))
+    assert pdf.doc[0].get_text().count(BOX_TEXT) == 2
+    assert not any(o.ref.free for o in po.page_objects(pdf.doc, 0) if o.kind == "text" and BODY_TEXT in o.ref.text)
+
+
 def test_paste_reuses_identical_resources_on_the_same_page():
     pdf = scene()
     fonts_before = {f[4] for f in pdf.doc[0].get_fonts()}
@@ -769,6 +781,28 @@ def test_listing_and_hit_testing_are_fast_after_the_first_time():
 
 
 # -- real-world corpus ------------------------------------------------------------------
+@pytest.mark.skipif(not os.path.exists(os.path.join(CORPUS, "strategi.pdf")), reason="corpus not generated")
+def test_corpus_paste_a_text_box_onto_chevron_labels():
+    pdf = PdfDocument.open(os.path.join(CORPUS, "strategi.pdf"))
+    texts = by_kind(po.page_objects(pdf.doc, 3), "text")
+    labels = [o for o in texts if o.ref.role == "cell" and len(o.ref.lines) == 1 and len(o.ref.text) < 20]
+    assert len(labels) >= 4
+    before = {o.ref.text: pymupdf.Rect(o.rect) for o in labels}
+    box = max(texts, key=lambda o: len(o.ref.text))
+    clip = po.copy_objects(pdf.doc, 3, [box])
+    lab = labels[0]
+    new = po.paste_clip(pdf, 3, clip, offset=(lab.rect.x0 - clip.rect.x0, lab.rect.y0 - clip.rect.y0))
+    (t,) = by_kind(new, "text")
+    assert t.ref.free
+    (m,) = po.move_objects(pdf, 3, [t], 0, 60)
+    assert_rect(m.rect, t.rect + (0, 60, 0, 60), tol=1.0)
+    after = {o.ref.text: o for o in by_kind(po.page_objects(pdf.doc, 3), "text")}
+    for text, r in before.items():
+        assert text in after and not after[text].ref.free, text
+        assert_rect(after[text].rect, r)
+    pdf.close()
+
+
 def words(page) -> list[str]:
     return sorted(w[4] for w in page.get_text("words"))
 

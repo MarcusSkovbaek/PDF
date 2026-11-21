@@ -40,7 +40,6 @@ from dataclasses import dataclass
 
 import pymupdf
 
-from . import flow
 from . import graphics as gr
 from . import objects as ob
 from . import textobjects as tob
@@ -664,15 +663,14 @@ def paste_clip(pdf, page: int, clip: Clip, *, offset=(0.0, 0.0)) -> list[PageObj
         if src.page_count < 1:
             raise ValueError("empty clip")
         before = Counter(o.key for o in page_objects(pdf.doc, page, alt=True))
-        free = [pymupdf.Rect(t.rect) + (dx, dy, dx, dy) for t in tob.list_text(src, 0)]
+        # where the pasted lines start (target display space)
+        starts = [(ln.origin[0] + dx, ln.origin[1] + dy) for t in tob.list_text(src, 0) for ln in t.lines]
         with _step(pdf, _label("pageobj.undo.paste", "Indsæt"), page):
             d = pdf.doc
+            had = Counter(o.key for o in tob.list_text(d, page))
             _place(d, page, src, clip, dx, dy)
-            if free:
-                pg = d[page]
-                rects = [(r * pg.derotation_matrix).normalize() for r in free]
-                pad = tob.FREE_PAD
-                flow._set_free(d, page, flow._free_rects(d, page) + [r + (-pad, -pad, pad, pad) for r in rects])
+            if starts:
+                tob.mark_free(d, page, _pasted_text(d, page, had, starts))
     finally:
         src.close()
     out = []
@@ -680,6 +678,22 @@ def paste_clip(pdf, page: int, clip: Clip, *, offset=(0.0, 0.0)) -> list[PageObj
         if before[o.key] > 0:
             before[o.key] -= 1
         else:
+            out.append(o)
+    return out
+
+
+def _pasted_text(d: pymupdf.Document, page: int, had: Counter, starts: list) -> list:
+    """The text objects a paste added: new ones made only of pasted lines (a
+    block the page's own text was merged into is left alone, so existing
+    text never becomes standalone by a paste)."""
+    had = Counter(had)
+    out = []
+    for o in tob.list_text(d, page):
+        if had[o.key] > 0:
+            had[o.key] -= 1
+            continue
+        if o.lines and all(any(math.hypot(ln.origin[0] - x, ln.origin[1] - y) <= 0.6 for x, y in starts)
+                           for ln in o.lines):
             out.append(o)
     return out
 

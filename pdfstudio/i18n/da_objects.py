@@ -1,11 +1,11 @@
-"""Danish strings for "Markér objekt" (images in the page content):
-``pdfstudio.core.objects`` undo labels and ``ui/viewer/tools/edit_object.py``."""
+"""Danish strings for "Markér objekt" (text, graphics and images in the page
+content): ``pdfstudio.core.objects`` undo labels and ``ui/viewer/tools/edit_object.py``."""
 
 STRINGS: dict[str, str] = {
     # -- tool -------------------------------------------------------------------
     "objects.tool.label": "Markér objekt",
-    "objects.tool.hint": "Klik på et billede for at markere det · træk for at flytte · "
-                         "træk i et hjørne for at skalere · Delete sletter",
+    "objects.tool.hint": "Klik på tekst, grafik eller et billede for at markere det · Shift-klik for flere · "
+                         "træk for at flytte · dobbeltklik på tekst for at redigere · Delete sletter",
     # -- undo labels (core) -----------------------------------------------------
     "objects.undo.move": "Flyt billede",
     "objects.undo.resize": "Skalér billede",
@@ -14,12 +14,32 @@ STRINGS: dict[str, str] = {
     "objects.undo.delete": "Slet billede",
     "objects.undo.replace": "Erstat billede",
     # -- inspector: nothing selected -------------------------------------------
-    "objects.none.title": "Intet billede markeret",
-    "objects.none.hint": "Klik på et billede på siden for at flytte, skalere, erstatte eller slette det – "
-                         "både billeder, du selv har tilføjet, og billeder, der allerede er i PDF'en.",
-    "objects.count.zero": "Der er ingen billeder på side {page}.",
-    "objects.count.one": "Der er 1 billede på side {page}.",
-    "objects.count.many": "Der er {n} billeder på side {page}.",
+    "objects.none.title": "Intet markeret",
+    "objects.none.hint": "Klik på en tekstblok, en figur, en streg eller et billede på siden for at flytte, "
+                         "kopiere eller slette det. Træk en ramme på tom plads for at markere flere.",
+    "objects.count.zero": "Der er ingen objekter på side {page}.",
+    "objects.count.page": "På side {page}: {what}.",
+    "objects.count.text.one": "1 tekstblok",
+    "objects.count.text.many": "{n} tekstblokke",
+    "objects.count.graphic.one": "1 grafisk element",
+    "objects.count.graphic.many": "{n} grafiske elementer",
+    "objects.count.image.one": "1 billede",
+    "objects.count.image.many": "{n} billeder",
+    "objects.count.join": "{first} og {last}",
+    # -- inspector: selected text / graphics / several objects -------------------
+    "objects.kind.text": "Tekst",
+    "objects.kind.graphic": "Grafik",
+    "objects.kind.image": "Billede",
+    "objects.kind.many": "{n} objekter",
+    "objects.graphic.shape": "Figur",
+    "objects.graphic.line": "Streg",
+    "objects.graphic.background": "Baggrundsflade",
+    "objects.graphic.template": "Grafik fra sideskabelonen",
+    "objects.graphic.table": "Tabellinje",
+    "objects.graphic.stroke": "Streg {w} pt",
+    "objects.text.style": "{font} · {size} pt",
+    "objects.quote": "“{text}”",
+    "objects.size": "Størrelse {w} × {h} mm",
     # -- inspector: selected image -----------------------------------------------
     "objects.title": "Billede",
     "objects.title.n": "Billede {i} af {n}",
@@ -56,9 +76,13 @@ STRINGS: dict[str, str] = {
     "objects.action.rotate": "Rotér 90°",
     "objects.action.flip": "Spejlvend",
     "objects.action.delete": "Slet billede",
+    "objects.action.delete_sel": "Slet",
     "objects.tips": "Træk for at flytte (Shift: lige linje). Hjørnerne skalerer med bevarede proportioner "
                     "(Shift: frit, Alt: fra midten). Piletaster flytter 1 pt (Shift: 10 pt), "
-                    "Tab vælger næste billede, Esc fjerner markeringen.",
+                    "Tab vælger næste objekt, Esc fjerner markeringen.",
+    "objects.tips.general": "Træk for at flytte (Shift: lige linje, Alt: uden hjælpelinjer). Shift-klik "
+                            "markerer flere. Piletaster flytter 1 pt (Shift: 10 pt). Ctrl+C/Ctrl+V kopierer "
+                            "– også til en anden side eller et andet dokument – og Ctrl+D dublerer.",
     # -- dialogs / feedback --------------------------------------------------------
     "objects.dialog.replace": "Vælg nyt billede",
     "objects.dialog.save": "Gem billede som",
@@ -68,12 +92,18 @@ STRINGS: dict[str, str] = {
     "objects.saved": "Billedet er gemt som {name}",
     "objects.replaced": "Billedet er erstattet",
     "objects.deleted": "Billedet er slettet",
+    "objects.deleted.one": "Objektet er slettet",
+    "objects.deleted.many": "{n} objekter er slettet",
     "objects.undo_action": "Fortryd",
     "objects.error.save": "Billedet kunne ikke gemmes: {err}",
     "objects.error.replace": "Billedet kunne ikke erstattes: {err}",
-    "objects.error.edit": "Billedet kunne ikke ændres: {err}",
+    "objects.error.edit": "Det markerede kunne ikke ændres: {err}",
+    "objects.error.copy": "Det markerede kunne ikke kopieres: {err}",
     "objects.error.unreadable": "{name} kunne ikke læses som billede",
     # -- size badge while dragging ---------------------------------------------------
     "objects.badge.size": "{w} × {h} mm",
     "objects.badge.pos": "X {x}   Y {y} mm",
+    "objects.badge.width": "B {w} mm",
+    # -- undo labels (UI) --------------------------------------------------------------
+    "objects.undo.width": "Skift tekstbredde",
 }

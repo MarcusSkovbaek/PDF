@@ -360,3 +360,33 @@ def test_a_growing_list_item_stays_one_item_over_repeated_edits():
         assert item.bullet is not None and item.text.endswith(f"MÆRKE{i}")
         assert "\n" not in item.text                                   # one paragraph, soft breaks only
         assert st.pieces[k + 1].text.split()[:4] == after.split()[:4]  # the next paragraph is its own
+
+
+def test_free_markers_are_kept_with_the_other_markers(rep):
+    """O17: /Free rects live beside /Cont (and /Running) in the page's
+    Folio markers; writing one kind keeps the others."""
+    doc = pymupdf.open("pdf", rep.tobytes())
+    free = [pymupdf.Rect(10, 10, 20, 20), pymupdf.Rect(30.5, 40.25, 50, 60)]
+    flow._set_free(doc, 0, free)
+    assert flow._free_rects(doc, 0) == free
+    flow._update_markers(doc, 0, column(doc, 0), [(83.0, 100.0)])
+    assert flow._free_rects(doc, 0) == free and flow._markers(doc, 0) == [(83.0, 100.0)]
+    flow._set_markers(doc, 0, [])
+    assert flow._free_rects(doc, 0) == free and flow._markers(doc, 0) == []
+    flow._set_free(doc, 0, [])
+    assert doc.xref_get_key(doc[0].xref, "PieceInfo/FolioPDF")[0] == "null"
+
+
+def test_a_block_in_a_free_rect_is_a_standalone_obstacle(rep):
+    doc = pymupdf.open("pdf", rep.tobytes())
+    s = column(doc, 0)
+    piece = s.pieces[2]
+    raw = pymupdf.Rect(piece.block.bbox) * doc[0].derotation_matrix + (-1, -1, 1, 1)
+    flow._set_free(doc, 0, [raw])                   # only the markers change, not the content
+    stories = flow.page_stories(doc, 0)
+    free = [x for x in stories if x.role == "free"]
+    assert len(free) == 1 and free[0].kind == "single" and free[0].pieces[0].text == piece.text
+    assert piece.text not in [p.text for p in column(doc, 0).pieces]
+    assert any(o.contains(raw + (1, 1, -1, -1)) for o in flow._analyze(doc, 0).obstacles)
+    flow._set_free(doc, 0, [])
+    assert [p.text for p in column(doc, 0).pieces] == [p.text for p in s.pieces]

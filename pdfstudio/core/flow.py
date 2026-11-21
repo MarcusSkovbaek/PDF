@@ -67,6 +67,7 @@ class Story:
     dir: tuple = (1.0, 0.0)
     rect: pymupdf.Rect = field(default_factory=pymupdf.Rect)  # display rect (column on this page)
     role: str = "body"              # body | header | footer | cell | caption | box | figure | rotated | wide
+    #                                 | free (moved out of the flow by the user, O17)
 
     @property
     def text(self) -> str:
@@ -218,21 +219,82 @@ def _running_rects(doc, page: int) -> list[pymupdf.Rect]:
     return [pymupdf.Rect(nums[i:i + 4]) for i in range(0, len(nums) - 3, 4)]
 
 
+def _free_rects(doc, page: int) -> list[pymupdf.Rect]:
+    """Raw rects of text blocks the user moved out of the flow (O17): a
+    block whose first baseline starts inside one is a standalone ``free``
+    story – the column neither moves it nor pulls it back in."""
+    try:
+        kind, val = doc.xref_get_key(doc[page].xref, f"PieceInfo/{_MARKER_KEY}/Private/Free")
+    except Exception:
+        return []
+    if kind != "array":
+        return []
+    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", val)]
+    return [pymupdf.Rect(nums[i:i + 4]) for i in range(0, len(nums) - 3, 4)]
+
+
+def _free_index(point, free: list[pymupdf.Rect]) -> int:
+    """Index of the first free rect containing the raw ``point`` (-1: none)."""
+    x, y = float(point[0]), float(point[1])
+    for k, r in enumerate(free):
+        if r.x0 <= x <= r.x1 and r.y0 <= y <= r.y1:
+            return k
+    return -1
+
+
+def _set_free(doc, page: int, free: list, conts: list[tuple[float, float]] | None = None) -> None:
+    """Replace the page's free rects (and, with ``conts``, its continuation
+    markers); everything else in the markers stays."""
+    _set_markers(doc, page, _markers(doc, page) if conts is None else conts, free=list(free))
+
+
+def _runs_rect(runs: list[TextRun]) -> pymupdf.Rect:
+    """Raw bounding box of text runs (their glyph boxes, roughly)."""
+    xs, ys = [], []
+    for run in runs:
+        if not run.text:
+            continue
+        d = run.dir
+        n = _perp(d)
+        length = run.font.text_length(run.text, run.size) * (run.stretch or 1.0)
+        asc = max(run.font.ascender, 0.8) * run.size
+        desc = min(run.font.descender, -0.2) * run.size
+        for t in (0.0, length):
+            for c in (-asc, -desc):
+                xs.append(run.origin[0] + d[0] * t + n[0] * c)
+                ys.append(run.origin[1] + d[1] * t + n[1] * c)
+    return pymupdf.Rect(min(xs), min(ys), max(xs), max(ys)) if xs else pymupdf.Rect()
+
+
+def _marker_sig(doc, page: int) -> str:
+    """The page's Folio markers as text (part of the analysis cache key:
+    a marker change alone must not reuse an older analysis)."""
+    try:
+        kind, val = doc.xref_get_key(doc[page].xref, f"PieceInfo/{_MARKER_KEY}/Private")
+    except Exception:
+        return ""
+    return val if kind == "dict" else ""
+
+
 def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: bool | None = None,
-                 running: list | None = None) -> None:
+                 running: list | None = None, free: list | None = None) -> None:
     pg = doc[page]
     if inserted is None:
         inserted = _is_inserted(doc, page)
     if running is None:
         running = _running_rects(doc, page) if inserted else []
-    if not conts and not inserted:
+    if free is None:
+        free = _free_rects(doc, page)
+    if not conts and not inserted and not free:
         if doc.xref_get_key(pg.xref, f"PieceInfo/{_MARKER_KEY}")[0] != "null":
             doc.xref_set_key(pg.xref, f"PieceInfo/{_MARKER_KEY}", "null")
         return
     arr = " ".join(f"{x:.2f} {y:.2f}" for x, y in conts)
     from .identity import pdf_date
     run = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in running)
-    priv = f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + (f"/Running[{run}]" if run else "") + ">>"
+    fre = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in (pymupdf.Rect(x) for x in free))
+    priv = (f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + (f"/Running[{run}]" if run else "")
+            + (f"/Free[{fre}]" if fre else "") + ">>")
     doc.xref_set_key(pg.xref, "PieceInfo", f"<</{_MARKER_KEY}<</LastModified({pdf_date()})/Private{priv}>>>>")
 
 
@@ -317,7 +379,7 @@ def _analyze(doc, page: int) -> _PageInfo:
             pass
     try:
         from .fonts import _page_key
-        key = _page_key(doc[page])
+        key = (_page_key(doc[page]), _marker_sig(doc, page))
     except Exception:
         key = None
     if key is not None and key in cache:
@@ -361,10 +423,16 @@ def _analyze_page(doc, page: int) -> _PageInfo:
     roles: dict[int, str] = {}
     sizes = sorted(ln.style.size for b in blocks for ln in b.lines if ln.style.size)
     body_size = statistics.median(sizes) if sizes else 10.0
+    free = _free_rects(doc, page)
+    free_of: dict[int, int] = {}            # id(block) -> free rect index (O17: moved by the user)
     for b in blocks:
         first = b.lines[0]
         role = None
-        if not (_is_axis(first.dir) and all(ln.dir == d for ln in b.lines)):
+        k_free = _free_index(first.raw_origin, free) if free else -1
+        if k_free >= 0:
+            free_of[id(b)] = k_free
+            role = "free"
+        elif not (_is_axis(first.dir) and all(ln.dir == d for ln in b.lines)):
             role = "rotated"
         elif any(ln.cell for ln in b.lines):
             role = "cell"
@@ -479,18 +547,41 @@ def _analyze_page(doc, page: int) -> _PageInfo:
                 rect |= p.bullet.bbox
         stories.append(Story(page=page, kind="flow", pieces=pieces, lo=ranges[k][0], hi=ranges[k][1], dir=d,
                              rect=rect, role="body"))
+    # a moved list item: its bullet (in the same free rect) stays with it
+    free_bullet: dict[int, TextBlock] = {}
+    taken: set[int] = set()
+    for bl in blocks:
+        if id(bl) not in free_of or not te.is_list_bullet(bl):
+            continue
+        bb, size = bl.lines[0], bl.style.size or body_size
+        for b in blocks:
+            if b is bl or free_of.get(id(b)) != free_of[id(bl)] or id(b) in free_bullet or te.is_list_bullet(b):
+                continue
+            f = b.lines[0]
+            if f.dir == bb.dir and abs(_base(f, _perp(f.dir)) - _base(bb, _perp(f.dir))) <= 0.45 * size \
+                    and 0 <= f.extent[0] - bb.extent[1] <= 4 * size:
+                free_bullet[id(b)] = bl
+                taken.add(id(bl))
+                break
     for b in blocks:
         role = roles.get(id(b))
-        if role is None:
+        if role is None or id(b) in taken:
             continue
         lines_d = b.lines[0].dir
-        stories.append(Story(page=page, kind="single", pieces=[_piece(doc, b)],
+        pc = _piece(doc, b)
+        rect = pymupdf.Rect(b.bbox)
+        if id(b) in free_bullet:
+            pc.bullet = free_bullet[id(b)]
+            rect |= pc.bullet.bbox
+        stories.append(Story(page=page, kind="single", pieces=[pc],
                              lo=min(ln.extent[0] for ln in b.lines), hi=max(ln.extent[1] for ln in b.lines),
-                             dir=lines_d, rect=pymupdf.Rect(b.bbox), role=role))
+                             dir=lines_d, rect=rect, role=role))
     # obstacles for the flow: images, drawings and text that does not flow
     for s in stories:
-        if s.kind == "single" and s.role in ("cell", "caption", "figure", "box", "wide", "rotated"):
+        if s.kind == "single" and s.role in ("cell", "caption", "figure", "box", "wide", "rotated", "free"):
             obstacles.append(raw_rect(s.pieces[0].block))
+            if s.pieces[0].bullet is not None:
+                obstacles.append(raw_rect(s.pieces[0].bullet))
     head = [s for s in stories if s.role == "header"]
     foot = [s for s in stories if s.role == "footer"]
     header_bottom = max((_proj_range(raw_rect(s.pieces[0].block), n)[1] for s in head), default=None)
@@ -1420,10 +1511,28 @@ def _apply_single(pdf, story: Story, edits: list[Edit], merge, result: FlowResul
     if text == piece.text and not e0.formats and e0.align is None and e0.line_spacing is None and e0.style is None:
         return result
     full = te.restore_soft_breaks(piece.text, piece.soft, text)
+    free = None
+    if story.role == "free":
+        # text the user moved (O17) grows in its own place, and its free rect
+        # with it – lines outside it would join the column
+        doc = pdf.doc
+        origin = piece.block.lines[0].raw_origin
+        old = [r for r in _free_rects(doc, story.page) if _free_index(origin, [r]) == 0]
+        plan = te._plan(doc[story.page], piece.block, full, e0.style, formats=e0.formats, align=e0.align,
+                        line_spacing=e0.line_spacing)
+        grown = _runs_rect(plan.runs)
+        if not grown.is_empty:
+            grown = grown + (-1.0, -1.0, 1.0, 1.0)
+        for r in old:
+            grown = pymupdf.Rect(r) if grown.is_empty else grown | r
+        if not grown.is_empty:
+            free = [r for r in _free_rects(doc, story.page) if _free_index(origin, [r]) != 0] + [grown]
     with pdf.edit(te._label("core.undo.edit_text", "Redigér tekst"), CONTENT, (story.page,), merge=merge):
         # (text below it in the same place moves along; what cannot move is reported as overflow)
         res = te.replace_block_text(pdf, piece.block, full, e0.style, formats=e0.formats, align=e0.align,
-                                    line_spacing=e0.line_spacing)
+                                    line_spacing=e0.line_spacing, reflow=free is None)
+        if free is not None:
+            _set_free(pdf.doc, story.page, free)
     result.substitutions = list(res.substitutions)
     result.overflow = res.overflow
     result.pages = (story.page,)

@@ -860,3 +860,52 @@ def test_a_space_between_two_styles_is_written_as_a_space():
     assert words == ["Efterspørgsel", "leverandører"]
     sizes = {round(s["size"], 1) for b in page.get_text("dict")["blocks"] for ln in b["lines"] for s in ln["spans"]}
     assert sizes == {11.0}
+
+
+def test_explicit_wrap_width_rewraps_from_the_start_edge():
+    """``width`` (a text object's side handles): narrower -> more lines in
+    the same style, start edge and first baseline kept; wider -> fewer."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    words = ("Omsætningen steg i året markant, og resultatet blev bedre end ventet takket være nye kunder "
+             "og en stram styring af omkostningerne i alle afdelinger.").split()
+    tw = pymupdf.TextWriter(pg.rect)
+    font = pymupdf.Font("helv")
+    y, line = 100.0, []
+    for w in words + [None]:
+        cand = " ".join(line + [w]) if w else None
+        if w is None or font.text_length(cand, 11) > 300:
+            tw.append((72, y), " ".join(line), font=font, fontsize=11)
+            y += 14
+            line = [w] if w else []
+        else:
+            line.append(w)
+    tw.write_text(pg)
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    blk = text_blocks(pdf.doc, 0)[0]
+    n = len(blk.lines)
+    text = " ".join(ln.text for ln in blk.lines)
+    replace_block_text(pdf, blk, text, width=180, reflow=False)
+    new = text_blocks(pdf.doc, 0)[0]
+    assert len(new.lines) > n and " ".join(new.text.split()) == " ".join(text.split())
+    assert new.bbox.x0 == pytest.approx(blk.bbox.x0, abs=0.5) and new.bbox.x1 <= 72 + 180 + 0.5
+    assert new.lines[0].origin[1] == pytest.approx(blk.lines[0].origin[1], abs=0.05)
+    assert {(ln.style.font, ln.style.size) for ln in new.lines} == {(ln.style.font, ln.style.size) for ln in blk.lines}
+    replace_block_text(pdf, new, text, width=450, reflow=False)
+    assert len(text_blocks(pdf.doc, 0)[0].lines) < n
+
+
+def test_text_written_behind_the_page_content():
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.draw_rect(pymupdf.Rect(50, 80, 300, 120), color=None, fill=(0.1, 0.3, 0.7))
+    pdf = PdfDocument.from_bytes(doc.tobytes())
+    from pdfstudio.core.text_edit import TextRun, write_runs
+
+    run = TextRun("Bag kassen", pymupdf.Font("helv"), 20, (0, 0, 0), (60, 108))
+    with pdf.edit("t"):
+        write_runs(pdf.doc[0], [run], overlay=False)
+    page = pdf.doc[0]
+    assert "Bag kassen" in page.get_text()
+    pm = page.get_pixmap(clip=pymupdf.Rect(55, 85, 200, 115), colorspace=pymupdf.csGRAY)
+    assert not any(v < 30 for v in pm.samples)          # hidden by the box drawn after it

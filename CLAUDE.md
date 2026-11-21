@@ -60,6 +60,9 @@ pdfstudio/
     running.py                running headers/footers on new pages, page-number update ("Side 13 af 58")
     recovery.py               autosave / crash-recovery store (local folder)
     optimize.py               "Reducér filstørrelse"
+    graphics.py               vector paths in the page content: list/group/classify, move, scale, style, restack, delete
+    textobjects.py            text blocks as movable objects (glyph for glyph), /Free = standalone after a move
+    pageobjects.py            facade: images + text + graphics as one selection ("Markér objekt"), object clipboard
   ui/
     app.py                    QApplication setup, theme, run()
     actions.py                ActionRegistry (id -> QAction, palette)
@@ -229,6 +232,63 @@ def renumber(doc, origin, old_count, *, template=None) -> list[int]   # inside p
 def document_text_style(doc) -> SpanStyle                # dominant body style – default for new text
 def add_text_box(pdf, page, rect, text, style: SpanStyle, align="left", *, formats=None) -> None
 def add_image(pdf, page, rect, image: str | bytes, keep_aspect=True) -> None
+
+# graphics.py  (painted paths edited in the content stream: a move inserts/rewrites ONE cm; scale rewrites
+#  coordinates so stroke widths stay; everything else byte-identical)
+KEEP                                                     # "leave unchanged" sentinel
+@dataclass class GraphicObject: page; index; paths: tuple; rect; kind "shape"|"line"|"background"|"template"|"table";
+                                stroke; fill; width; selectable; editable; in_form; items; key
+def list_graphics(doc, page, *, all_items=False) -> list[GraphicObject]   # selectable groups; all_items: + background/
+                                                         # template/table paths, each its own object (Alt). Cached
+def graphic_at(doc, page, point, *, alt=False, tolerance=2.0) -> GraphicObject | None   # topmost; alt = deep select:
+                                                         # the topmost single path (also out of a group), backgrounds too
+def graphics_in(doc, page, rect, *, alt=False) -> list[GraphicObject] ; find_graphic(doc, page, obj) -> GraphicObject | None
+def move_graphics(pdf, page, objs, dx, dy, *, merge=False) -> list[GraphicObject]
+def transform_graphics(pdf, page, objs, matrix, *, keep_stroke=True, label=None, merge=False) -> list[GraphicObject]
+def scale_graphics(pdf, page, objs, old_rect, new_rect) -> list[GraphicObject]   # stroke width kept (O8)
+def set_graphic_style(pdf, page, objs, *, stroke=KEEP, fill=KEEP, width=None) -> list[GraphicObject]  # None removes
+def restack_graphics(pdf, page, objs, *, front=True) -> list[GraphicObject]
+def delete_graphics(pdf, page, objs) ; delete_graphics_doc(doc, page, objs)   # _doc: no undo (throw-away copies)
+def render_without_graphics(doc, page, objs, zoom, *, clip=None) -> Pixmap
+def strip_page_except(doc, page, *, keep_paths=(), keep_images=())   # clipboard: remove every other path/image/form
+# objects.py (images) also has restack_image(pdf, page, target, *, front=True) -> ImageObject
+
+# textobjects.py  (one object per paragraph of a column / standalone text; moved = removed + rewritten glyph for
+#  glyph with the document's fonts; a moved block becomes a "free" single story (O17))
+@dataclass class TextObject: page; rect; lines; text; story_kind "flow"|"single"; role; free: bool; key  # .origin (raw)
+def list_text(doc, page) -> list[TextObject]             # cached per page content + markers
+def text_at(doc, page, point, *, tolerance=1.0) -> TextObject | None   # point on a line box
+def text_in(doc, page, rect) -> list[TextObject] ; find_text(doc, page, obj) -> TextObject | None
+def move_text(pdf, page, objs, dx, dy, *, merge=False) -> list[TextObject]   # kept on the page
+def delete_text(pdf, page, objs) ; delete_text_doc(doc, page, objs) ; strip_text_except(doc, page, keep)
+def set_text_width(pdf, page, obj, width) -> TextObject  # O9: re-wrapped, start edge kept
+def restack_text(pdf, page, objs, *, front=True) -> list[TextObject]
+
+# pageobjects.py  (facade for "Markér objekt": every mutation = ONE pdf.edit wrapping the engines' calls;
+#  returns the objects re-found, in input order)
+KEEP                                                     # re-exported from graphics
+@dataclass class PageObject: kind "image"|"text"|"graphic"; page; rect; ref; key   # key = (kind,) + ref.key
+def page_objects(doc, page, *, alt=False) -> list[PageObject]   # reading order; editable only; text underline
+                                                         # strokes belong to their text
+def object_at(doc, page, point, *, alt=False) -> PageObject | None   # text line boxes first, then the smallest
+                                                         # graphic/image under the point; alt: + background, deep select
+def objects_in(doc, page, rect, *, alt=False) -> list[PageObject]    # completely inside (rubber band)
+def contents_of(doc, page, box) -> list[PageObject]      # O4: objects inside a box graphic
+def find_again(doc, page, obj) -> PageObject | None
+def move_objects(pdf, page, objs, dx, dy, *, merge=False) -> list[PageObject]   # graphics+images, then text
+def delete_objects(pdf, page, objs) -> None
+def scale_objects(pdf, page, objs, old_rect, new_rect) -> list[PageObject]      # graphics + images; text: ValueError
+def set_text_width(pdf, page, obj, width) -> PageObject
+def set_style(pdf, page, objs, *, stroke=KEEP, fill=KEEP, width=None) -> list[PageObject]   # graphics only
+def restack(pdf, page, objs, *, front=True) -> list[PageObject]   # within the selection: graphics < images < text
+def render_without(doc, page, objs, zoom, *, clip=None) -> Pixmap  # the page behind a dragged selection
+def render_only(doc, page, objs, zoom, *, clip=None) -> Pixmap     # the selection alone, transparent elsewhere
+@dataclass class Clip: data: bytes; rect: Rect; page_size: (w, h)  # a one-page PDF holding only the objects
+def copy_objects(doc, page, objs) -> Clip
+def paste_clip(pdf, page, clip, *, offset=(0, 0)) -> list[PageObject]   # at clip.rect + offset (target display space,
+                          # any page size / /Rotate / document); the form is flattened into the page content
+                          # (resources merged, names renamed); pasted text is "free"
+def duplicate_objects(pdf, page, objs, offset=(10, 10)) -> list[PageObject]
 ```
 
 ## UI contract

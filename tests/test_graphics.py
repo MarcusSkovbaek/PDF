@@ -321,6 +321,48 @@ def test_hit_testing_even_odd_hole():
     assert gr.graphic_at(pdf.doc, 0, (200, 842 - 200), tolerance=0) is None          # the hole
 
 
+def test_alt_deep_select_picks_one_path_of_a_group():
+    # BOX = red fill (path 0) + blue 2 pt border (path 1) – one group; an arrow
+    # (shaft 2 + head 3); then a lone square (4)
+    content = (BOX + b"q 0 0 0 RG 1 w 300 500 m 400 500 l S Q\n"
+               b"q 0 g 400 495 m 412 500 l 400 505 l h f Q\n"
+               b"q 0 1 0 rg 50 50 30 30 re f Q\n")
+    pdf, _ = build(content)
+    box, arrow, square = gr.list_graphics(pdf.doc, 0)
+    assert box.paths == (0, 1) and arrow.paths == (2, 3)
+    # a plain click picks the group, Alt the topmost path under the point
+    assert gr.graphic_at(pdf.doc, 0, (160, 842 - 640)).paths == (0, 1)
+    fill = gr.graphic_at(pdf.doc, 0, (160, 842 - 640), alt=True)
+    assert fill.paths == (0,) and fill.fill == (1, 0, 0) and fill.stroke is None and fill.selectable
+    border = gr.graphic_at(pdf.doc, 0, (100, 842 - 640), alt=True)       # on the border: drawn on top
+    assert border.paths == (1,) and border.stroke == (0, 0, 1) and border.fill is None
+    assert_rect(border.rect, box.rect)
+    head = gr.graphic_at(pdf.doc, 0, (404, 842 - 500), alt=True)
+    assert head.paths == (3,)
+    assert gr.graphic_at(pdf.doc, 0, (65, 842 - 65), alt=True).paths == square.paths
+    assert gr.graphic_at(pdf.doc, 0, (500, 842 - 700), alt=True) is None
+    # the single path is a full object: it can be found again and edited alone
+    assert gr.find_graphic(pdf.doc, 0, border).paths == (1,)
+    (moved,) = gr.move_graphics(pdf, 0, border, 0, 50)
+    assert moved.paths == (1,)
+    assert_rect(moved.rect, box.rect + (0, 50, 0, 50))
+    fill_now = gr.find_graphic(pdf.doc, 0, fill)
+    assert fill_now is not None
+    assert_rect(fill_now.rect, fill.rect)                                 # the fill stayed
+    assert gr.list_graphics(pdf.doc, 0)[0].paths == (0, 1)                # listing semantics unchanged
+
+
+def test_alt_deep_select_background_and_path_only_form():
+    form = b"q 1 0 0 rg 0 0 100 60 re f Q q 0 0 1 RG 2 w 0 0 100 60 re S Q"
+    content = b"q 0.9 0.9 0.9 rg 0 0 595 842 re f Q\nq 1 0 0 1 200 300 cm /Fm1 Do Q\n"
+    pdf, _ = build(content, forms={"Fm1": (form, {})})
+    bg = gr.graphic_at(pdf.doc, 0, (50, 50), alt=True)
+    assert bg.kind == "background" and bg.paths == (0,) and not bg.selectable
+    # inside a path-only form the form invocation is the unit
+    f = gr.graphic_at(pdf.doc, 0, (250, 842 - 330), alt=True)
+    assert f.paths == (1, 2) and f.in_form and f.editable
+
+
 # ---------------------------------------------------------------------------
 # move
 # ---------------------------------------------------------------------------

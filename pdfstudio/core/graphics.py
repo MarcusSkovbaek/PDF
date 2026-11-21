@@ -1461,15 +1461,28 @@ def _path_hit(ev: _Ev, x: float, y: float, tol: float) -> bool:
 def graphic_at(doc, page: int, point, *, alt: bool = False, tolerance: float = 2.0) -> GraphicObject | None:
     """The topmost graphic at ``point`` (display space): inside a filled
     path, or within half the stroke width + ``tolerance`` of a stroke.
-    ``alt`` also considers backgrounds, template graphics and table rules."""
+
+    ``alt`` ("deep select", Alt+click) also considers backgrounds, template
+    graphics and table rules, and returns the topmost single *path* under
+    the point as an object of its own – also when it belongs to a group
+    (one stroke of a figure, the border of a box). A path inside a form
+    that draws only paths is returned with the rest of that form (the form
+    invocation is the smallest unit an edit can address)."""
     from .render import as_document
 
     d = as_document(doc)
     lst = _listing(d, page)
-    objs = _objects(d, page, lst, alt)
     pt = pymupdf.Point(point)
     x, y = pt.x, pt.y
     paths = lst.scan.paths
+    if alt:
+        unit_of = lst.scan.unit_of
+        for ev in reversed(paths):
+            u = unit_of[ev.num] if 0 <= ev.num < len(unit_of) else None
+            if u is not None and _path_hit(ev, x, y, tolerance):
+                return _make(d, page, lst, [u])
+        return None
+    objs = _objects(d, page, lst, False)
     best, best_z = None, -1
     for o in objs:
         r = o.rect

@@ -317,6 +317,17 @@ def duplicate_objects(pdf, page, objs, offset=(10, 10)) -> list[PageObject]
   past the end / Tab go to the next surface (`leave`), Esc/click-out commits (`apply_story`, one undo step per
   session via a merge token). Typing pauses (`FLOW_PAUSE_MS`) let overflowing text flow on (`flow_now`), the
   caret follows. Idle time prepares the visible pages (`_warm_step`). `AddTextTool` reuses the editor.
+* `ui/viewer/tools/edit_object.py` – `EditObjectTool` ("Markér objekt", `O`) works on `pageobjects.PageObject`s
+  only (never PyMuPDF): `selection()`, `primary`, `selection_kind()` ("none"|"image"|"text"|"graphic"|"multi"),
+  signal `selectionChanged`; hover outline, click / Shift/Ctrl+click / rubber band, Alt = deep select; drag =
+  `render_without` backdrop + `render_only` ghost + snapping (`snap_delta`, Alt off), one `move_objects` on
+  release; arrows nudge with `merge=True`; corner handles `scale_objects`, text side handles `set_text_width`;
+  Delete / Ctrl+X/C/V/D / Ctrl+Shift+]/[ are claimed from the window by an event filter on the view
+  (`_object_clipboard.py` holds the in-app `Clip`, across tabs); double-click on text → `edit_text_at`.
+  Inspector panels per selection kind in `EditObjectTool.PANELS`, built once as `cls(tool)` with `refresh()`
+  (`tools/_object_panels.py`: text, graphic, multi, image + Arrangér); "Medtag indhold" (O4) =
+  `set_include_contents`, remembered in QSettings `objects/include_contents`. Idle time warms the page's
+  objects (`_warm`) so hover/click stay < 100 ms.
 * `ui/saving.py` – `SaveController` on the window: `save/save_as/save_copy`, background writing (QThread),
   autosave every `save/autosave_minutes` (default 2) to the recovery store, recovery prompt at start.
 * `DocumentWorkspace` (one per tab) owns the `PdfDocument`, `PageView`, side

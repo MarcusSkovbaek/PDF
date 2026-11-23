@@ -324,10 +324,28 @@ def _refresh_free(doc, page: int, old: FreeBlock | None, runs: list[TextRun], re
     _set_free(doc, page, others + ([FreeBlock(pymupdf.Rect(rect), tuple(keep))] if keep else []))
 
 
-def _set_free(doc, page: int, free: list, conts: list[tuple[float, float]] | None = None) -> None:
+def _set_free(doc, page: int, free: list, conts: list[tuple[float, float]] | None = None,
+              gone: list | None = None) -> None:
     """Replace the page's free blocks (and, with ``conts``, its continuation
-    markers); everything else in the markers stays."""
-    _set_markers(doc, page, _markers(doc, page) if conts is None else conts, free=list(free))
+    markers; with ``gone``, its gone lines); everything else in the markers
+    stays."""
+    _set_markers(doc, page, _markers(doc, page) if conts is None else conts, free=list(free), gone=gone)
+
+
+def _gone_lines(doc, page: int) -> list[tuple]:
+    """Lines of the page's own text the user moved away or deleted
+    (``/Gone [x y ex ey size …]``: raw start and end of the baseline and the
+    size). Text extraction still counts them when it decides which rows of
+    the page are rows of table cells – so taking one cell out of a row
+    never turns the others into ordinary paragraphs."""
+    try:
+        kind, val = doc.xref_get_key(doc[page].xref, f"PieceInfo/{_MARKER_KEY}/Private/Gone")
+    except Exception:
+        return []
+    if kind != "array":
+        return []
+    nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", val)]
+    return [tuple(nums[i:i + 5]) for i in range(0, len(nums) - 4, 5)]
 
 
 def _runs_rect(runs: list[TextRun]) -> pymupdf.Rect:
@@ -359,7 +377,7 @@ def _marker_sig(doc, page: int) -> str:
 
 
 def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: bool | None = None,
-                 running: list | None = None, free: list | None = None) -> None:
+                 running: list | None = None, free: list | None = None, gone: list | None = None) -> None:
     pg = doc[page]
     if inserted is None:
         inserted = _is_inserted(doc, page)
@@ -367,7 +385,9 @@ def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: boo
         running = _running_rects(doc, page) if inserted else []
     if free is None:
         free = _free_blocks(doc, page)
-    if not conts and not inserted and not free:
+    if gone is None:
+        gone = _gone_lines(doc, page)
+    if not conts and not inserted and not free and not gone:
         if doc.xref_get_key(pg.xref, f"PieceInfo/{_MARKER_KEY}")[0] != "null":
             doc.xref_set_key(pg.xref, f"PieceInfo/{_MARKER_KEY}", "null")
         return
@@ -376,8 +396,9 @@ def _set_markers(doc, page: int, conts: list[tuple[float, float]], inserted: boo
     run = " ".join(f"{r.x0:.2f} {r.y0:.2f} {r.x1:.2f} {r.y1:.2f}" for r in running)
     fre = " ".join(f"[{b.rect.x0:.2f} {b.rect.y0:.2f} {b.rect.x1:.2f} {b.rect.y1:.2f}"
                    + "".join(f" {x:.2f} {y:.2f} {int(h)}" for x, y, h in b.lines) + "]" for b in free)
+    gon = " ".join(" ".join(f"{v:.2f}" for v in g) for g in gone)
     priv = (f"<</Cont[{arr}]" + ("/Inserted true" if inserted else "") + (f"/Running[{run}]" if run else "")
-            + (f"/Free[{fre}]" if fre else "") + ">>")
+            + (f"/Free[{fre}]" if fre else "") + (f"/Gone[{gon}]" if gon else "") + ">>")
     doc.xref_set_key(pg.xref, "PieceInfo", f"<</{_MARKER_KEY}<</LastModified({pdf_date()})/Private{priv}>>>>")
 
 

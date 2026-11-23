@@ -368,7 +368,9 @@ def test_moving_again_replaces_the_free_rect_and_delete_removes_it(short):
     assert rects[0].contains(raw)
     to.delete_text(pdf, 1, [new2])
     assert flow._free_rects(pdf.doc, 1) == []
-    assert pdf.doc.xref_get_key(pdf.doc[1].xref, "PieceInfo/FolioPDF")[0] == "null"
+    # what stays is only where the page's own paragraph was (for the rows of cells)
+    assert pdf.doc.xref_get_key(pdf.doc[1].xref, "PieceInfo/FolioPDF/Private/Free")[0] == "null"
+    assert len(flow._gone_lines(pdf.doc, 1)) == len(para.lines)
 
 
 def test_a_free_block_is_not_merged_into_the_paragraph_above(short):
@@ -777,3 +779,113 @@ def test_a_moved_justified_paragraph_keeps_its_rows_read_word_by_word(page, star
     assert abs(moved.rect.y1 - obj.rect.y1 - 20) < 0.6 and norm(moved.text) == norm(obj.text)
     (back,) = to.move_text(pdf, page, [moved], -30, -20)
     assert abs(back.rect.y1 - obj.rect.y1) < 0.6 and norm(back.text) == norm(obj.text)
+
+
+# -- neighbours keep their segmentation (WP-E3) ----------------------------------------
+P1 = ["Første afsnit fylder hele spalten med ord", "som er spredt ud til begge kanter af",
+      "spalten sådan som en lige margen gør det", "og slutter her med en kortere linje."]
+P2 = ["Andet", "afsnit", "starter", "her", "med", "ord",          # one row, wide justified gaps
+      "og fortsætter med almindelige linjer der", "fylder hele bredden af spalten ud til",
+      "begge sider og slutter med en kort linje."]
+
+
+def _justified_line(pg, words, y, x0=72.0, x1=300.0, size=10.0, last=False):
+    font = pymupdf.Font("helv")
+    widths = [font.text_length(w, fontsize=size) for w in words]
+    gap = font.text_length(" ", fontsize=size) if last or len(words) < 2 else \
+        (x1 - x0 - sum(widths)) / (len(words) - 1)
+    x = x0
+    for w, wd in zip(words, widths):
+        pg.insert_text((x, y), w, fontname="helv", fontsize=size)
+        x += wd + gap
+
+
+def justified_column() -> pymupdf.Document:
+    """Two justified paragraphs in one column, every word placed on its own
+    (as a stretched line is written); the 2nd paragraph's first row has
+    very wide gaps."""
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    y = 100.0
+    for i, line in enumerate(P1):
+        _justified_line(pg, line.split(), y, last=i == len(P1) - 1)
+        y += 13
+    y += 6
+    _justified_line(pg, P2[:6], y)
+    y += 13
+    for i, line in enumerate(P2[6:]):
+        _justified_line(pg, line.split(), y, last=i == len(P2) - 7)
+        y += 13
+    return doc
+
+
+def _seg(doc, page=0):
+    return sorted((tuple(round(v, 1) for v in o.rect), norm(o.text)) for o in to.list_text(doc, page))
+
+
+@pytest.mark.parametrize("back", [False, True])
+def test_moving_a_paragraph_never_resegments_its_neighbour(back):
+    pdf = _pdf(justified_column())
+    objs = to.list_text(pdf.doc, 0)
+    assert len(objs) == 2                                    # one object per paragraph
+    p1, p2 = sorted(objs, key=lambda o: o.rect.y0)
+    assert norm(p2.text).startswith("Andet afsnit starter her med ord og")
+    before = [s for s in _seg(pdf.doc) if s[1] != norm(p1.text)]
+    (moved,) = to.move_text(pdf, 0, [p1], 30, 20)            # lands on top of paragraph 2
+    if back:
+        (moved,) = to.move_text(pdf, 0, [moved], -30, -20)
+    after = [s for s in _seg(pdf.doc) if s[1] != norm(p1.text)]
+    assert after == before
+    assert len(to.list_text(pdf.doc, 0)) == 2
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+@pytest.mark.parametrize("start", ["Serviceforretningen prioriterede", "Ledelsen udviklede",
+                                   "Serviceforretningen moderniserede"])
+@pytest.mark.parametrize("back", [False, True])
+def test_annual_report_page_17_neighbours_keep_their_objects(start, back):
+    pdf = PdfDocument.open(CORPUS)
+    objs = to.list_text(pdf.doc, 16)
+    obj = next(o for o in objs if o.text.startswith(start))
+    before = [s for s in _seg(pdf.doc, 16) if s[1] != norm(obj.text)]
+    (moved,) = to.move_text(pdf, 16, [obj], 30, 20)
+    if back:
+        to.move_text(pdf, 16, [moved], -30, -20)
+    assert [s for s in _seg(pdf.doc, 16) if s[1] != norm(obj.text)] == before
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS.replace("aarsrapport", "strategi")), reason="corpus not generated")
+@pytest.mark.parametrize("start", ["Ledelsen investerede i", "Selskabet fastholdt"])
+def test_taking_a_cell_out_of_a_row_keeps_the_other_cells(start):
+    # a row of three cells: with one moved away (or deleted) the other two were
+    # no longer read as cells and merged into the paragraphs under them
+    path = CORPUS.replace("aarsrapport", "strategi")
+    for action in ("move", "delete"):
+        pdf = PdfDocument.open(path)
+        objs = to.list_text(pdf.doc, 2)
+        obj = next(o for o in objs if o.text.startswith(start))
+        before = [s for s in _seg(pdf.doc, 2) if s[1] != norm(obj.text)]
+        if action == "move":
+            to.move_text(pdf, 2, [obj], 30, 20)
+        else:
+            to.delete_text(pdf, 2, [obj])
+        assert [s for s in _seg(pdf.doc, 2) if s[1] != norm(obj.text)] == before, action
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+@pytest.mark.parametrize("page,start,action", [
+    (3, "kompetenceudviklingen i løbet", "move"),      # it shared a block with the rows above: gone, they
+    (3, "kompetenceudviklingen i løbet", "delete"),    # read as a narrower paragraph (ghost lines keep it)
+    (48, "Selskabet", "back"),                         # moved back, its own rows joined: the loose row under
+])                                                     # it must not take them as its context
+def test_annual_report_neighbours_keep_their_objects(page, start, action):
+    pdf = PdfDocument.open(CORPUS)
+    obj = next(o for o in to.list_text(pdf.doc, page) if o.text.startswith(start))
+    before = [s for s in _seg(pdf.doc, page) if s[1] != norm(obj.text)]
+    if action == "delete":
+        to.delete_text(pdf, page, [obj])
+    else:
+        (moved,) = to.move_text(pdf, page, [obj], 30, 20)
+        if action == "back":
+            to.move_text(pdf, page, [moved], -30, -20)
+    assert [s for s in _seg(pdf.doc, page) if s[1] != norm(obj.text)] == before

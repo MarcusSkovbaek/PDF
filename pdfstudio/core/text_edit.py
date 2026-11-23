@@ -393,12 +393,15 @@ def _join_fragments(lines: list[TextLine], side=None) -> set[int]:
     return gone
 
 
-def _join_spanning_rows(lines: list[TextLine], side=None) -> set[int]:
+def _join_spanning_rows(lines: list[TextLine], side=None, first_rows: bool = False) -> set[int]:
     """Across MuPDF blocks: the words of a very loose justified line that
     MuPDF split into separate blocks. Pieces on one baseline whose union
     spans exactly the width of the whole lines right above and below them
     (the paragraph they sit in), with gaps of at most a few ems, are one
-    line. Returns the ids of the lines merged into others."""
+    line. ``first_rows``: also the FIRST row of a paragraph – the line
+    below spans it, above it is the previous paragraph's shorter last line
+    (or nothing), and its gaps are evenly spread as justification spreads
+    them. Returns the ids of the lines merged into others."""
     gone: set[int] = set()
     cand = [ln for ln in lines if _is_axis(ln.dir) and len(ln.char_pos) == len(ln.text)]
     rows: dict[tuple, list[TextLine]] = {}
@@ -421,8 +424,12 @@ def _join_spanning_rows(lines: list[TextLine], side=None) -> set[int]:
         if any(abs(_dot(x.raw_origin, n) - b) > 0.35 for x in row):
             continue
 
+        mine = (side(row[0]) == 1) if side else None
+
         def spanning(sign: int) -> bool:
             for ln in singles:
+                if side and (side(ln) == 1) != mine:
+                    continue            # free rows and the page's own rows are each other's context
                 db = (_dot(ln.raw_origin, n) - b) * sign
                 if ln.dir == row[0].dir and 0.6 * size <= db <= 1.7 * size \
                         and abs(ln.extent[0] - lo) <= 1.0 and abs(ln.extent[1] - hi) <= 1.0 \
@@ -430,7 +437,17 @@ def _join_spanning_rows(lines: list[TextLine], side=None) -> set[int]:
                     return True
             return False
 
-        if not (spanning(-1) and spanning(1)):
+        def opens_paragraph() -> bool:
+            # nothing right above but a paragraph's last line: same start, shorter
+            for ln in singles:
+                db = b - _dot(ln.raw_origin, n)
+                if ln.dir == row[0].dir and 0.6 * size <= db <= 1.7 * size \
+                        and ln.extent[0] < hi and ln.extent[1] > lo:
+                    if not (abs(ln.extent[0] - lo) <= 1.0 and ln.extent[1] < hi - 1.0):
+                        return False
+            return max(gaps) - min(gaps) <= 1.0
+
+        if not spanning(1) or not (spanning(-1) or (first_rows and opens_paragraph())):
             continue
         for ln in row[1:]:
             _absorb(row[0], ln, ln.extent[0] - row[0].extent[1])
@@ -439,6 +456,17 @@ def _join_spanning_rows(lines: list[TextLine], side=None) -> set[int]:
 
 
 def _join_justified_rows(lines: list[TextLine], side=None) -> set[int]:
+    """:func:`_join_justified_rows_in` – with ``side``, for the free lines and
+    for the page's own lines (with its ghosts) separately: the block's width
+    and its full rows are those of the side's own lines."""
+    if side is None:
+        return _join_justified_rows_in(lines, None)
+    free = [ln for ln in lines if side(ln) == 1]
+    own = [ln for ln in lines if side(ln) != 1]
+    return _join_justified_rows_in(own, side) | (_join_justified_rows_in(free, side) if free else set())
+
+
+def _join_justified_rows_in(lines: list[TextLine], side=None) -> set[int]:
     """Words of one justified line that MuPDF reports as separate lines (a
     writer that places each word of a stretched line on its own, gaps of an
     em or more): within one MuPDF block, pieces on one baseline that
@@ -547,7 +575,10 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     if _BLOCK_CACHE is None:
         _BLOCK_CACHE = OrderedDict()
     free = _free_blocks(doc, page)
-    page_key = (_page_key(pg), tuple(pg.rect), tuple((tuple(b.rect), b.lines) for b in free))
+    from .flow import _gone_lines
+
+    gone = tuple(_gone_lines(doc, page))
+    page_key = (_page_key(pg), tuple(pg.rect), tuple((tuple(b.rect), b.lines) for b in free), gone)
     key = page_key + (merge,)
     hit = _BLOCK_CACHE.get(key)
     if hit is not None:
@@ -556,7 +587,7 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     # the merged and the unmerged view share one extraction
     base = _BLOCK_CACHE.get(page_key + ("groups",))
     if base is None:
-        base = _extract_groups(pg, free)
+        base = _extract_groups(pg, free, gone)
         _BLOCK_CACHE[page_key + ("groups",)] = base
     blocks = _extract_blocks(pg, page, merge, base, free)
     _BLOCK_CACHE[key] = blocks
@@ -565,7 +596,7 @@ def text_blocks(doc: pymupdf.Document, page: int, *, merge: bool = True) -> list
     return list(blocks)
 
 
-def _extract_groups(pg: pymupdf.Page, free=()) -> tuple[list[list[TextLine]], dict[int, float]]:
+def _extract_groups(pg: pymupdf.Page, free=(), ghosts=()) -> tuple[list[list[TextLine]], dict[int, float]]:
     """Lines of the page grouped into PyMuPDF's blocks (split at columns,
     size changes and list items), before paragraphs are merged. Pieces of
     one row are joined among the lines of free blocks (``free``, text the
@@ -585,16 +616,33 @@ def _extract_groups(pg: pymupdf.Page, free=()) -> tuple[list[list[TextLine]], di
     free_ids: set[int] = set()
     if free:
         free_ids = {id(ln) for ln in raw_lines if _on_free_line(ln, free)}
-    # pieces of one row are only joined with pieces of the same side (free or not)
-    side = (lambda ln: id(ln) in free_ids) if free_ids else None
+    # pieces of one row are only joined with pieces of the same side (free or not);
+    # the page's lines that were moved away or deleted (``ghosts``) still count
+    # as the rows around a row – never as pieces of it
+    ghost_lines = _ghost_lines(ghosts) if ghosts else []
+    ghost_ids = {id(g) for g in ghost_lines}
+    side = None
+    if free_ids or ghost_ids:
+        def side(ln):
+            return 2 if id(ln) in ghost_ids else int(id(ln) in free_ids)
     gone = _join_fragments(raw_lines, side)
     for lines in per_block:
-        gone |= _join_justified_rows([ln for ln in lines if id(ln) not in gone], side)
-    gone |= _join_spanning_rows([ln for ln in raw_lines if id(ln) not in gone], side)
+        lines = [ln for ln in lines if id(ln) not in gone]
+        gone |= _join_justified_rows(lines + _ghosts_near(lines, ghost_lines), side)
+    gone |= _join_spanning_rows([ln for ln in raw_lines if id(ln) not in gone] + ghost_lines, side)
+    gone -= ghost_ids
     if gone:
         raw_lines = [ln for ln in raw_lines if id(ln) not in gone]
         per_block = [[ln for ln in lines if id(ln) not in gone] for lines in per_block]
-    _mark_table_rows(raw_lines, pg.rect * pg.derotation_matrix)
+    if free or ghosts:
+        # rows of table cells are rows of the page's own text: text Folio wrote
+        # (moved, pasted) does not count, and the page's lines that were moved
+        # away or deleted still do – a cell taken out of its row (or a copy
+        # dropped onto one) never changes how the other cells are read
+        _mark_table_rows([ln for ln in raw_lines if id(ln) not in free_ids] + _ghost_lines(ghosts),
+                         pg.rect * pg.derotation_matrix)
+    else:
+        _mark_table_rows(raw_lines, pg.rect * pg.derotation_matrix)
     for lines in per_block:
         if lines:
             for col in _split_columns(lines):
@@ -608,6 +656,47 @@ def _extract_groups(pg: pymupdf.Page, free=()) -> tuple[list[list[TextLine]], di
     if items:
         groups = [g for grp in groups for g in _split_list_items(grp, items)]
     return groups, items
+
+
+def _ghost_lines(gone) -> list[TextLine]:
+    """Stand-ins for the page's lines that were moved away or deleted
+    (``flow._gone_lines``): only their baseline, extent and size."""
+    out = []
+    for x, y, ex, ey, size in gone:
+        w = math.hypot(ex - x, ey - y)
+        d = ((ex - x) / w, (ey - y) / w) if w > 1e-6 else (1.0, 0.0)
+        d = (round(d[0], 6), round(d[1], 6))
+        st = SpanStyle(font="", size=size, color=(0.0, 0.0, 0.0), bold=False, italic=False, serif=False, mono=False)
+        a = _dot((x, y), d)
+        out.append(TextLine(text="\u2022", bbox=pymupdf.Rect(), origin=(x, y), style=st, dir=d, raw_origin=(x, y),
+                            extent=(a, a + w), char_pos=[(a, a + w)], char_styles=[st], char_rises=[0.0]))
+    return out
+
+
+def _ghosts_near(lines: list[TextLine], ghosts: list[TextLine]) -> list[TextLine]:
+    """The ghost lines that continue the block ``lines`` (same direction,
+    overlapping it across, each within 1.7 sizes of a baseline of the block
+    or of a ghost already taken) – the lines it held before they left."""
+    if not ghosts or not lines:
+        return []
+    d = lines[0].dir
+    n = _perp(d)
+    lo = min(ln.extent[0] for ln in lines)
+    hi = max(ln.extent[1] for ln in lines)
+    bases = [_dot(ln.raw_origin, n) for ln in lines if ln.dir == d]
+    cand = [g for g in ghosts if g.dir == d and g.extent[0] < hi and g.extent[1] > lo]
+    out: list[TextLine] = []
+    changed = True
+    while changed and cand:
+        changed = False
+        for g in list(cand):
+            b = _dot(g.raw_origin, n)
+            if any(abs(b - x) <= 1.7 * max(g.style.size, 1.0) for x in bases):
+                out.append(g)
+                bases.append(b)
+                cand.remove(g)
+                changed = True
+    return out
 
 
 def _on_free_line(ln: TextLine, free) -> bool:

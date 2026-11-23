@@ -337,13 +337,29 @@ def _marker_plan(doc: pymupdf.Document, page: int, objs: list[TextObject], new: 
         new = keep(old, drop_next)
         if len(new) != len(old):
             nxt = new
-    return free, conts, nxt
+    # the page's own lines that leave their place stay counted for the rows
+    # of table cells (flow._gone_lines); text Folio wrote (free) never was
+    gone = list(flow._gone_lines(doc, page))
+    for o in objs:
+        if o.free:
+            continue
+        for ln in o.lines:
+            if not ln.text.strip():
+                continue
+            d = ln.dir
+            w = ln.extent[1] - ln.extent[0]
+            g = (round(ln.raw_origin[0], 2), round(ln.raw_origin[1], 2), round(ln.raw_origin[0] + d[0] * w, 2),
+                 round(ln.raw_origin[1] + d[1] * w, 2), round(ln.style.size or 10.0, 2))
+            if g not in gone:
+                gone.append(g)
+    return free, conts, nxt, gone
 
 
 def _write_markers(doc: pymupdf.Document, page: int, plan) -> None:
-    free, conts, nxt = plan
-    if free != flow._free_blocks(doc, page) or conts != flow._markers(doc, page):
-        flow._set_free(doc, page, free, conts)
+    free, conts, nxt, gone = plan
+    if (free != flow._free_blocks(doc, page) or conts != flow._markers(doc, page)
+            or gone != flow._gone_lines(doc, page)):
+        flow._set_free(doc, page, free, conts, gone)
     if nxt is not None:
         flow._set_markers(doc, page + 1, nxt)
 
@@ -677,22 +693,124 @@ def _own_decor(lines: list) -> list:
     return out
 
 
+_SEG_NAME = b"/FolioFree"
+
+
+def _seg_tag(raw_rect, text: str) -> bytes:
+    """The opening of the marked-content sequence holding one standalone
+    text object Folio wrote: its free entry's raw rect and a hash of its
+    text identify it again."""
+    r = pymupdf.Rect(raw_rect)
+    return (b"%s <</R [%.2f %.2f %.2f %.2f] /H %d>> BDC"
+            % (_SEG_NAME, r.x0, r.y0, r.x1, r.y1, _text_hash(text)))
+
+
+def _cut_tag(doc: pymupdf.Document, page: int, obj) -> bytes | None:
+    """The sequence tag of a standalone object, when the page has it."""
+    if not getattr(obj, "free", False) or not obj.lines:
+        return None
+    free = flow._free_blocks(doc, page)
+    k = flow._free_of(obj.lines[0], free)
+    if k < 0:
+        return None
+    tag = _seg_tag(free[k].rect, obj.text)
+    try:
+        for x in doc[page].get_contents():
+            if tag in (doc.xref_stream(x) or b""):
+                return tag
+    except Exception:
+        return None
+    return None
+
+
+def _segment_end(data: bytes, start: int) -> int | None:
+    """End of the marked-content sequence whose BDC ends at ``start``."""
+    from .pageobjects import _tokens
+
+    depth = 1
+    for kind, s, e in _tokens(data, start):
+        if kind != "op":
+            continue
+        op = data[s:e]
+        if op in (b"BDC", b"BMC"):
+            depth += 1
+        elif op == b"EMC":
+            depth -= 1
+            if depth == 0:
+                return e
+    return None
+
+
+def _cut_segment(page: pymupdf.Page, tag: bytes) -> bool:
+    """Cut the first sequence opened by ``tag`` out of the page's content."""
+    doc = page.parent
+    for x in page.get_contents():
+        data = doc.xref_stream(x) or b""
+        i = data.find(tag)
+        if i < 0:
+            continue
+        end = _segment_end(data, i + len(tag))
+        if end is None:
+            return False
+        doc.update_stream(x, data[:i] + data[end:])
+        return True
+    return False
+
+
+def _in_segment(page: pymupdf.Page, tag: bytes, draw) -> None:
+    """Run ``draw`` (it appends content) and put what it appended into one
+    marked-content sequence opened by ``tag``."""
+    doc = page.parent
+    before = list(page.get_contents())
+    draw()
+    after = list(page.get_contents())
+    if after[:len(before)] != before or len(after) <= len(before):
+        return                       # content was not just appended: left as it is
+    new = after[len(before):]
+    body = b"\n".join(doc.xref_stream(x) or b"" for x in new)
+    doc.update_stream(new[0], tag + b"\n" + body + b"\nEMC\n")
+    for x in new[1:]:
+        doc.update_stream(x, b"")
+    if len(new) > 1:
+        doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in before + new[:1]) + "]")
+
+
 class _Rewrite:
     """Remove some lines and write them again (moved, or in place), with
-    the text they overlap kept intact (:func:`_collateral`)."""
+    the text they overlap kept intact (:func:`_collateral`).
+
+    ``objs`` (the text objects the lines belong to): a standalone object
+    Folio wrote itself sits in a marked-content sequence of its own
+    (:func:`_seg_tag`) and is removed by cutting that sequence out of the
+    content stream – no redaction, so text it lies on is never touched or
+    rewritten (rewriting it would change how that text is read: its lines
+    would come after everything else in the content). ``tag``: write each
+    object moved into such a sequence."""
 
     def __init__(self, doc: pymupdf.Document, page: int, lines: list, *, write: bool = True,
-                 rx: float = 0.0, ry: float = 0.0):
+                 rx: float = 0.0, ry: float = 0.0, objs=None, tag: bool = False):
         pg = doc[page]
+        objs = list(objs or ())
+        self.cut = [t for t in (_cut_tag(doc, page, o) for o in objs) if t is not None]
+        cut_ids = {id(ln) for o, t in zip(objs, (_cut_tag(doc, page, o) for o in objs)) if t is not None
+                   for ln in o.lines}
         self.lines = _own_decor(lines)
-        self.extra = _own_decor(_collateral(doc, page, self.lines))
+        redact = _own_decor([ln for ln in lines if id(ln) not in cut_ids])
+        self.redact = redact
+        self.extra = _own_decor(_collateral(doc, page, redact))
         self.runs: list = []
         self.paths: list = []
+        self.parts: list = []          # (tag, runs, paths) per object, when tagged
         self.extra_runs: list = []
         self.extra_paths: list = []
         self.rx, self.ry = rx, ry
         if write:
-            self.runs, self.paths = self._runs(pg, page, self.lines, rx, ry)
+            if tag and objs:
+                for o in objs:
+                    runs, paths = self._runs(pg, page, _own_decor(o.lines), rx, ry)
+                    self.parts.append((_seg_tag(_new_free(o, pg, rx, ry).rect, o.text), runs, paths))
+            else:
+                self.runs, self.paths = self._runs(pg, page, self.lines, rx, ry)
         if self.extra:
             self.extra_runs, self.extra_paths = self._runs(pg, page, self.extra, 0.0, 0.0)
 
@@ -709,9 +827,19 @@ class _Rewrite:
         return runs, paths or []
 
     def remove(self, p: pymupdf.Page) -> None:
-        te._remove_lines(p, self.lines + self.extra)
+        for t in self.cut:
+            _cut_segment(p, t)
+        if self.redact or self.extra:
+            te._remove_lines(p, self.redact + self.extra)
 
     def write(self, p: pymupdf.Page, *, overlay: bool = True) -> None:
+        for tag, runs, paths in self.parts:
+            def draw(runs=runs, paths=paths):
+                if runs:
+                    _write(p, runs, overlay=True)
+                if paths:
+                    _draw_paths(p, paths, self.rx, self.ry, overlay=True)
+            _in_segment(p, tag, draw)
         if self.runs:
             _write(p, self.runs, overlay=overlay)
         if self.paths:
@@ -742,7 +870,7 @@ def move_text(pdf, page: int, objs, dx: float, dy: float, *, merge: bool = False
     if abs(dx) < 1e-6 and abs(dy) < 1e-6:
         return targets
     rx, ry = _raw_delta(pg, dx, dy)
-    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], rx=rx, ry=ry)
+    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], rx=rx, ry=ry, objs=targets, tag=True)
     plan = _marker_plan(doc, page, targets, [_new_free(o, pg, rx, ry) for o in targets])
     label = _label("textobj.undo.move", "Flyt tekst")
     fold = merge and pdf.history.undo_label == label
@@ -828,7 +956,7 @@ def _draw_paths(page: pymupdf.Page, paths: list, rx: float, ry: float, *, overla
 
 
 def _delete(doc: pymupdf.Document, page: int, targets: list[TextObject]):
-    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], write=False)
+    job = _Rewrite(doc, page, [ln for o in targets for ln in o.lines], write=False, objs=targets)
     return job, _marker_plan(doc, page, targets, [])
 
 

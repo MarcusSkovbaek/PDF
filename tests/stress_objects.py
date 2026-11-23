@@ -179,6 +179,16 @@ def rect_close(a, b, tol: float = POS_TOL) -> float:
     return max(abs(a.x0 - b.x0), abs(a.y0 - b.y0), abs(a.x1 - b.x1), abs(a.y1 - b.y1))
 
 
+def seg_sig(o) -> tuple:
+    """An object's segmentation: kind, rect (0.1 pt) and text."""
+    text = " ".join((getattr(o.ref, "text", "") or "").split()) if o.kind == "text" else ""
+    return (o.kind, tuple(round(v, 1) for v in o.rect), text)
+
+
+def segmentation(doc, page: int) -> Counter:
+    return Counter(seg_sig(o) for o in po.page_objects(doc, page))
+
+
 def fmt_rect(r) -> list:
     return [round(r.x0, 1), round(r.y0, 1), round(r.x1, 1), round(r.y1, 1)]
 
@@ -239,6 +249,7 @@ class Run:
         base_words = words(pdf.doc, page)
         base_content = content_bytes(pdf.doc, page)
         self.base_glyphs = glyphs(pdf.doc, page)
+        self.base_seg = segmentation(pdf.doc, page)
         t_page = time.perf_counter()
         for k, obj in enumerate(objs):
             self.objects[obj.kind] += 1
@@ -262,6 +273,15 @@ class Run:
         print(f"{name} p{page:3d} rot{self.args.rotate}: {len(objs):3d} objects "
               f"({dict(Counter(o.kind for o in objs))}) {time.perf_counter() - t_page:6.1f} s, "
               f"problems so far {len(self.problems)}", flush=True)
+
+    def neighbours(self, pdf, page, ctx, what: str, involved_before, involved_now) -> None:
+        """Every object not involved keeps its kind, rect and text."""
+        want = self.base_seg - Counter(seg_sig(o) for o in involved_before)
+        got = segmentation(pdf.doc, page) - Counter(seg_sig(o) for o in involved_now)
+        if got != want:
+            kinds = sorted({x[0] for x in (want - got) + (got - want)})
+            self.problem(ctx, f"neighbour segmentation changed ({what}, {'+'.join(kinds)})",
+                         lost=[list(x) for x in (want - got)][:8], new=[list(x) for x in (got - want)][:8])
 
     def run_object(self, pdf, page, obj, ctx, base_png, base_words, base_content, k) -> None:
         pg = pdf.doc[page]
@@ -288,6 +308,7 @@ class Run:
                 self.problem(ctx_m, "found at wrong rect", want=fmt_rect(want), got=fmt_rect(moved.rect),
                              off=round(off, 2))
         new_rect = obj.rect + (ex_dx, ex_dy, ex_dx, ex_dy)
+        self.neighbours(pdf, page, ctx, "move", [obj], [moved] if moved is not None else [])
         png = render(pdf.doc, page)
         mx, nbad, box = diff_outside(base_png, png, [obj.rect, new_rect])
         if mx > OUT_TOL:
@@ -307,6 +328,7 @@ class Run:
                 off = rect_close(res2[0].rect, obj.rect)
                 if off > POS_TOL:
                     self.problem(ctx, "back at wrong rect", got=fmt_rect(res2[0].rect), off=round(off, 2))
+            self.neighbours(pdf, page, ctx, "move back", [obj], res2[:1])
             png2 = render(pdf.doc, page)
             mx, nbad, box = diff_outside(base_png, png2, [])
             if mx > BACK_TOL:
@@ -345,6 +367,7 @@ class Run:
         if not dup and fits:
             self.problem(ctx, "duplicate: no new objects returned")
         n1 = len(po.page_objects(pdf.doc, page))
+        self.neighbours(pdf, page, ctx, "duplicate", [obj], list(dup) + [o for o in [po.find_again(pdf.doc, page, obj)] if o])
         if fits and n1 <= n0:
             self.problem(ctx, "duplicate: object count did not grow", before=n0, after=n1)
         again = po.find_again(pdf.doc, page, obj)
@@ -366,6 +389,12 @@ class Run:
         pdf.undo()
         if content_bytes(pdf.doc, page) != base_content:
             self.problem(ctx, "duplicate: undo not exact")
+        # delete: the others stay as they were
+        po.delete_objects(pdf, page, [obj])
+        self.neighbours(pdf, page, ctx, "delete", [obj], [])
+        pdf.undo()
+        if content_bytes(pdf.doc, page) != base_content:
+            self.problem(ctx, "delete: undo not exact")
         # copy + paste into a new document (undo replaced the document: no stale page)
         clip = po.copy_objects(pdf.doc, page, [obj])
         w, h = pdf.doc[page].rect.width, pdf.doc[page].rect.height

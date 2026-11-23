@@ -674,7 +674,7 @@ def paste_clip(pdf, page: int, clip: Clip, *, offset=(0.0, 0.0)) -> list[PageObj
                   for t in tob.list_text(src, 0)]
         with _step(pdf, _label("pageobj.undo.paste", "Indsæt"), page):
             d = pdf.doc
-            had = Counter(o.key for o in tob.list_text(d, page))
+            had = Counter(_line_sig(ln) for o in tob.list_text(d, page) for ln in o.lines)
             _place(d, page, src, clip, dx, dy)
             if starts:
                 tob.mark_free_lines(d, page, _pasted_lines(d, page, had, starts))
@@ -693,19 +693,26 @@ def _line_key(text: str) -> str:
     return "".join(text.split())
 
 
+def _line_sig(ln) -> tuple:
+    return (round(ln.origin[0], 1), round(ln.origin[1], 1), _line_key(ln.text))
+
+
 def _pasted_lines(d: pymupdf.Document, page: int, had: Counter, starts: list) -> list[list]:
     """The lines a paste added, one group per pasted text object: lines that
-    start where a pasted line starts and read like it. Objects the page had
-    before are skipped; a pasted copy that extraction merged with the page's
-    own text (right under its original) is taken out of it – only its own
-    lines become standalone, the page's text never does."""
+    start where a pasted line starts and read like it, and that the page did
+    not have before (``had``: line signatures). Whatever object extraction put
+    them in – merged into the page's own block (right under the original), or
+    a pasted list bullet next to the page's own item – only these lines become
+    standalone; the page's own text never does."""
     had = Counter(had)
     cands = []
     for o in tob.list_text(d, page):
-        if had[o.key] > 0:
-            had[o.key] -= 1
-            continue
-        cands.extend(o.lines)
+        for ln in o.lines:
+            sig = _line_sig(ln)
+            if had[sig] > 0:
+                had[sig] -= 1
+                continue
+            cands.append(ln)
     out = []
     used: set[int] = set()
     for group in starts:

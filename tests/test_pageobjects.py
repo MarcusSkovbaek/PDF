@@ -1088,3 +1088,24 @@ def test_paste_balances_the_clips_marked_content():
     assert scan.conts[0].mc_ok                                             # balanced again
     assert [p.seg for p in scan.paths] == [0] * 5 + [1]
     assert po.find_again(pdf.doc, 0, box).key == box.key and len(graphics_of(pdf)) == 2
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(CORPUS, "aarsrapport.pdf")), reason="corpus not generated")
+def test_a_duplicated_list_item_dropped_on_another_leaves_that_item_alone():
+    # the copy's bullet landed beside the item two rows down and was taken as its
+    # bullet: the page's own item grew by the pasted bullet
+    pdf = PdfDocument.open(os.path.join(CORPUS, "aarsrapport.pdf"))
+
+    def seg():
+        return sorted((o.kind, tuple(round(v, 1) for v in o.rect), " ".join((getattr(o.ref, "text", "") or "").split()))
+                      for o in po.page_objects(pdf.doc, 16))
+
+    objs = po.page_objects(pdf.doc, 16)
+    item = next(o for o in objs if o.kind == "text" and o.ref.text.startswith("• Vækst"))
+    before = seg()
+    copies = po.duplicate_objects(pdf, 16, [item], offset=(0, 40))
+    assert len(copies) == 1 and copies[0].ref.free and copies[0].ref.text.startswith("•")
+    after = seg()
+    for s in [(c.kind, tuple(round(v, 1) for v in c.rect), " ".join(c.ref.text.split())) for c in copies]:
+        after.remove(s)
+    assert after == before

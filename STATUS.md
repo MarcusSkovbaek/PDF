@@ -1,5 +1,35 @@
 # Status / handover – Folio PDF
 
+## 2026-11-26: move text blocks and graphics – "Markér objekt" (spec `docs/kravspec-flyt-objekter.md`, O1–O17)
+Spec approved 2026-11-20; plan and API contracts in `docs/plan-flyt-objekter.md`. Built by sub-agents in work
+packages (WP-Z corpus, A graphics, B text objects, C facade, D1/D2 UI, E/E2–E6 stress test and fixes).
+**Core** `core/graphics.py`: painted paths found with a content-stream scanner (q/Q, cm, forms, marked
+content), grouped (open paths joined by contact, fill + own border, border lines around a fill), classified
+background / template (repeated in the header/footer band) / table (lattice) – those need Alt; move = one `cm`,
+scale rewrites coordinates (stroke width kept), style, restack, delete; the first edit of an object wraps its
+paths in `/FolioGroup <</G n>> BDC … EMC` (a fixed group – neighbours are never regrouped), pasted content sits
+in `/FolioPaste BMC … EMC` (its own segment). `core/textobjects.py`: one object per paragraph / standalone text,
+moved glyph for glyph with the document's fonts (exact sizes, TJ compensation, whole /W widths), a moved block
+becomes a free single story (`/Free` markers, O17) written in its own `/FolioFree` sequence and cut out again on
+the next move (no redaction, the text under it is never touched); the page's own text that is moved or deleted
+leaves ghost lines (`/Gone`) so neighbouring rows and table cells read as before. `core/pageobjects.py`: one
+facade (hit testing, rubber band, box contents O4, move/scale/width/style/restack/delete in ONE undo step,
+render_without/render_only for the drag preview, copy/paste via a one-page clip PDF flattened into the target
+page – across pages, rotations and documents).
+**UI** `tools/edit_object.py` + `_object_panels.py`: hover, click, Shift/Ctrl, rubber band, Alt; drag with a
+lifted ghost and snapping guides; arrows; corner handles (scale), side handles (text width); Delete,
+Ctrl+X/C/V/D, Ctrl+Shift+]/[; double-click → Redigér tekst; inspector panels for text, graphic, several objects
+and images (X/Y/B/H, stroke/fill/width, Arrangér, Medtag indhold).
+**Stress test** `tests/stress_objects.py` (every object moved out and back, duplicated, copied/pasted, deleted;
+pixels, words, glyph drift and the segmentation of all other objects compared): aarsrapport (58 pages, 1171
+objects) 298 → 0 problems, aarsrapport /Rotate 90 (16 pages) 196 → 0, strategi (14 pages) 16 → 1 (a copy dropped
+onto its own table cell merges one line with the original). Glyph drift after a move and back < 0.0063 pt
+(tolerated, listed separately). Timings (container, slower than a desktop): page listing cold 121 ms avg / 221 ms
+max (then cached; idle warming keeps hover/click < 100 ms), move release 171 ms avg / 420 ms max (O16: < 0.5 s),
+duplicate 210 / 418 ms, paste 29 / 67 ms.
+**Limitations** (spec): graphics are not rotated; no text in form fields / scanned pages / text drawn as curves;
+tables move cell by cell; a pasted copy placed exactly on its original's line can merge one line with it.
+
 ## 2026-11-04: flowing text editing like Word (spec `docs/kravspec-flydende-tekstredigering.md`, F1–F19)
 Spec approved 2026-11-03 (section G: text flows to the next page – yes; each column is its own surface).
 **Core** `core/flow.py`: a page = stories (body columns "flow", standalone "single" texts with roles

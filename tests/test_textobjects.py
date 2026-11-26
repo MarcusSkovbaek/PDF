@@ -889,3 +889,61 @@ def test_annual_report_neighbours_keep_their_objects(page, start, action):
         if action == "back":
             to.move_text(pdf, page, [moved], -30, -20)
     assert [s for s in _seg(pdf.doc, page) if s[1] != norm(obj.text)] == before
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+@pytest.mark.parametrize("saved", [False, True])
+def test_moved_text_is_cut_out_again_after_the_page_was_rewritten(saved, monkeypatch):
+    # a redaction elsewhere on the page (moving an original paragraph) or a cleaned
+    # save rewrites the content: the sequence's tag comes back reformatted
+    # ("/FolioFree<</R[90 …]/H n>>BDC") and must still be found – else the moved
+    # text is redacted, and the text it lies on is rewritten
+    from pdfstudio.core.document import write_bytes
+
+    pdf = PdfDocument.open(CORPUS)
+    page = 16
+    objs = to.list_text(pdf.doc, page)
+    a = next(o for o in objs if o.text.startswith("• Digitalisering"))
+    b = next(o for o in objs if o.text.startswith("prioriterede arbejdsmiljøet"))
+    (a2,) = to.move_text(pdf, page, [a], 6, 15)              # onto the next list item
+    to.move_text(pdf, page, [b], 0, 4)                       # an original paragraph: redaction
+    data = b"".join(pdf.doc.xref_stream(x) or b"" for x in pdf.doc[page].get_contents())
+    if saved:
+        pdf = PdfDocument(pymupdf.open("pdf", write_bytes(pdf.doc, garbage=3, clean=True, deflate=True)))
+        data = b"".join(pdf.doc.xref_stream(x) or b"" for x in pdf.doc[page].get_contents())
+    assert b"/FolioFree<<" in data or b"/FolioFree <<" in data
+    a2 = to.find_text(pdf.doc, page, a2)
+    assert a2 is not None and a2.free
+    under = next(o for o in to.list_text(pdf.doc, page) if o.text.startswith("• Cirkulære"))
+    bases = {round(ln.raw_origin[1], 1) for ln in under.lines}
+    under_glyphs = [g for g in _glyph_origins(pdf.doc[page]) if round(g[2], 1) in bases]
+    others = [s for s in _seg(pdf.doc, page) if s[1] != norm(a.text)]
+    cuts, redacted = [], []
+    real_cut, real_remove = to._cut_segment, te._remove_lines
+    monkeypatch.setattr(to, "_cut_segment", lambda p, key: cuts.append(real_cut(p, key)) or cuts[-1])
+    monkeypatch.setattr(te, "_remove_lines", lambda p, lines: redacted.extend(lines) or real_remove(p, lines))
+    (a3,) = to.move_text(pdf, page, [a2], -6, -15)
+    assert cuts == [True] and not redacted                  # cut out, nothing redacted
+    assert abs(a3.rect.y0 - a.rect.y0) < 0.6
+    assert [s for s in _seg(pdf.doc, page) if s[1] != norm(a.text)] == others
+    now = _glyph_origins(pdf.doc[page])
+    assert under_glyphs and all(any(c == g[0] and abs(x - g[1]) < 0.005 and abs(y - g[2]) < 0.005
+                                    for c, x, y in now) for g in under_glyphs), \
+        [g for g in under_glyphs if g not in now][:5]          # the item below was not touched
+
+
+@pytest.mark.parametrize("tag", [
+    b"/FolioFree <</R [90.00 175.95 206.92 189.57] /H 42>> BDC",
+    b"/FolioFree<</R[90 175.95 206.92 189.57]/H 42>>BDC",
+    b"/FolioFree\n<<\n/H 42\n/R [ 90.004 175.95 206.92 189.57 ]\n>>\nBDC",
+])
+def test_free_sequences_are_found_in_any_format(tag):
+    body = b"q BT /F1 9 Tf (EMC BDC) Tj ET /Span <</ActualText (x)>> BDC EMC Q\n"
+    other = b"/FolioFreeX <</R [90 175.95 206.92 189.57] /H 42>> BDC q Q EMC\n"
+    data = b"0 g " + other + tag + b"\n" + body + b"EMC\n1 g"
+    key = ((90.0, 175.95, 206.92, 189.57), 42)
+    start, end = to._find_segment(data, key)
+    assert data[start:end].startswith(b"/FolioFree") and data[start:end].endswith(b"EMC")
+    assert data[:start] + data[end:] == b"0 g " + other + b"\n1 g"
+    assert to._find_segment(data, ((90.0, 175.95, 206.92, 189.57), 43)) is None       # another text
+    assert to._find_segment(data, ((90.5, 175.95, 206.92, 189.57), 42)) is None       # another place

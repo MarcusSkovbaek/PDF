@@ -705,21 +705,84 @@ def _seg_tag(raw_rect, text: str) -> bytes:
             % (_SEG_NAME, r.x0, r.y0, r.x1, r.y1, _text_hash(text)))
 
 
-def _cut_tag(doc: pymupdf.Document, page: int, obj) -> bytes | None:
-    """The sequence tag of a standalone object, when the page has it."""
+def _cut_tag(doc: pymupdf.Document, page: int, obj) -> tuple | None:
+    """``(raw rect, text hash)`` identifying the sequence of a standalone
+    object, when the page has that sequence (:func:`_find_segment`)."""
     if not getattr(obj, "free", False) or not obj.lines:
         return None
     free = flow._free_blocks(doc, page)
     k = flow._free_of(obj.lines[0], free)
     if k < 0:
         return None
-    tag = _seg_tag(free[k].rect, obj.text)
+    r = free[k].rect
+    key = ((r.x0, r.y0, r.x1, r.y1), _text_hash(obj.text))
     try:
         for x in doc[page].get_contents():
-            if tag in (doc.xref_stream(x) or b""):
-                return tag
+            if _find_segment(doc.xref_stream(x) or b"", key) is not None:
+                return key
     except Exception:
         return None
+    return None
+
+
+def _seg_props(data: bytes, pos: int):
+    """``(R numbers, H, end of the BDC operator)`` of a ``/FolioFree``
+    property list starting after the tag name at ``pos`` – whatever
+    whitespace and number format the content was written with
+    (``/FolioFree <</R [90.00 …] /H 1>> BDC`` or, after MuPDF rewrote the
+    content, ``/FolioFree<</R[90 …]/H 1>>BDC``); None if it is not one."""
+    from .pageobjects import _tokens
+
+    toks = []
+    for kind, s, e in _tokens(data, pos):
+        toks.append((kind, data[s:e], e))
+        if kind == "op" or len(toks) > 16:
+            break
+    if not toks or toks[0][0] != "dopen" or toks[-1][1] != b"BDC" or toks[-2][0] != "dclose":
+        return None
+    rect, h, k = None, None, 1
+    while k < len(toks) - 2:
+        kind, val, _e = toks[k]
+        if kind == "name" and val == b"/R" and toks[k + 1][0] == "aopen":
+            nums = []
+            k += 2
+            while k < len(toks) and toks[k][0] == "num":
+                nums.append(float(toks[k][1]))
+                k += 1
+            if k < len(toks) and toks[k][0] == "aclose" and len(nums) == 4:
+                rect = tuple(nums)
+            k += 1
+        elif kind == "name" and val == b"/H" and toks[k + 1][0] == "num":
+            try:
+                h = int(float(toks[k + 1][1]))
+            except ValueError:
+                return None
+            k += 2
+        else:
+            k += 1
+    if rect is None or h is None:
+        return None
+    return rect, h, toks[-1][2]
+
+
+def _find_segment(data: bytes, key) -> tuple[int, int] | None:
+    """``(start, end)`` of the marked-content sequence of ``key`` (raw rect
+    within 0.01 pt, equal text hash): from its tag name to its EMC."""
+    if _SEG_NAME not in data:
+        return None
+    (x0, y0, x1, y1), h = key
+    i = data.find(_SEG_NAME)
+    while i >= 0:
+        j = i + len(_SEG_NAME)
+        if j >= len(data) or data[j:j + 1] in b" \t\r\n\x0c<":      # the whole name, not a longer one
+            props = _seg_props(data, j)
+            if props is not None:
+                rect, ph, bdc_end = props
+                if ph == h and all(abs(a - b) <= 0.01 for a, b in zip(rect, (x0, y0, x1, y1))):
+                    end = _segment_end(data, bdc_end)
+                    if end is not None:
+                        return i, end
+        i = data.find(_SEG_NAME, j)
     return None
 
 
@@ -741,18 +804,15 @@ def _segment_end(data: bytes, start: int) -> int | None:
     return None
 
 
-def _cut_segment(page: pymupdf.Page, tag: bytes) -> bool:
-    """Cut the first sequence opened by ``tag`` out of the page's content."""
+def _cut_segment(page: pymupdf.Page, key) -> bool:
+    """Cut the sequence of ``key`` (:func:`_cut_tag`) out of the page's content."""
     doc = page.parent
     for x in page.get_contents():
         data = doc.xref_stream(x) or b""
-        i = data.find(tag)
-        if i < 0:
+        span = _find_segment(data, key)
+        if span is None:
             continue
-        end = _segment_end(data, i + len(tag))
-        if end is None:
-            return False
-        doc.update_stream(x, data[:i] + data[end:])
+        doc.update_stream(x, data[:span[0]] + data[span[1]:])
         return True
     return False
 
@@ -791,9 +851,9 @@ class _Rewrite:
                  rx: float = 0.0, ry: float = 0.0, objs=None, tag: bool = False):
         pg = doc[page]
         objs = list(objs or ())
-        self.cut = [t for t in (_cut_tag(doc, page, o) for o in objs) if t is not None]
-        cut_ids = {id(ln) for o, t in zip(objs, (_cut_tag(doc, page, o) for o in objs)) if t is not None
-                   for ln in o.lines}
+        tags = [_cut_tag(doc, page, o) for o in objs]
+        self.cut = [t for t in tags if t is not None]
+        cut_ids = {id(ln) for o, t in zip(objs, tags) if t is not None for ln in o.lines}
         self.lines = _own_decor(lines)
         redact = _own_decor([ln for ln in lines if id(ln) not in cut_ids])
         self.redact = redact

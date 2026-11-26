@@ -98,8 +98,10 @@ class ActionCard(QFrame):
         self.setObjectName("ActionCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(132)
+        # equal columns whatever the text length (Ignored: the grid's stretch
+        # decides the width), and every card as tall as the tallest one
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        self.setMinimumSize(132, 132)
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 18, 18, 16)
         v.setSpacing(4)
@@ -184,6 +186,7 @@ class HomeView(QWidget):
         ("file.open", "folder-open", "shell.home.card.open", "shell.home.card.open_text"),
         ("tools.merge", "stack", "shell.home.card.merge", "shell.home.card.merge_text"),
         ("tools.images_to_pdf", "image", "shell.home.card.images", "shell.home.card.images_text"),
+        ("file.new_from_clipboard", "clipboard-text", "clipboard.card", "clipboard.card_text"),
         ("file.new", "file-plus", "shell.home.card.new", "shell.home.card.new_text"),
     )
 
@@ -238,6 +241,7 @@ class HomeView(QWidget):
             card.clicked.connect(lambda aid=aid: self.actionRequested.emit(aid))
             card.setAccessibleName(aid)
             grid.addWidget(card, 0, i)
+            grid.setColumnStretch(i, 1)
             self.cards[aid] = card
         col.addLayout(grid)
         col.addSpacing(36)

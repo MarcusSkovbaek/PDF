@@ -893,6 +893,73 @@ class DocumentWorkspace(QWidget):
                        action_text=tr("shell.undo_short"), on_action=self.pdf.undo)
             self._select_after(inserted)
 
+    def insert_from_clipboard(self, before: bool = False, *, at: int | None = None,
+                              prefer: str | None = None, content=None) -> list[int]:
+        """"Indsæt fra udklipsholder" (U10–U13): new pages after the last
+        selected page (else after the current page); ``before`` = at the
+        first selected page. One undo step; the new pages are selected."""
+        from ..core import clipboard_pdf
+        from .clipboard_source import (
+            busy,
+            clip_options,
+            password_prompt,
+            read_clipboard,
+        )
+
+        if at is None:
+            pages = self.selected_pages()
+            if before:
+                at = min(pages) if pages else 0
+            else:
+                at = (max(pages) + 1) if pages else self.pdf.page_count
+        at = max(0, min(at, self.pdf.page_count))
+        if content is None:
+            content = read_clipboard()
+        if content.is_empty():
+            self.toast(tr("clipboard.empty"), "info")
+            return []
+        settings = getattr(self.window_, "settings", None)
+        try:
+            with busy():
+                result = clipboard_pdf.insert_content(self.pdf, content, at,
+                                                      clip_options(settings, "insert", prefer=prefer),
+                                                      passwords=password_prompt(self))
+        except ValueError as exc:
+            self.toast(str(exc) or tr("clipboard.empty"), "info")
+            return []
+        except Exception as exc:  # noqa: BLE001 - a broken file or odd clipboard data
+            self.toast(tr("clipboard.error", err=str(exc) or type(exc).__name__), "error")
+            return []
+        pages = list(result.pages)
+        revision = self.pdf.revision
+        pdf = self.pdf
+
+        def unchanged() -> bool:
+            return self.pdf is pdf and pdf.revision == revision
+
+        def undo() -> None:
+            if unchanged():
+                pdf.undo()
+
+        def use_text() -> None:
+            if not unchanged():
+                self.toast(tr("clipboard.stale"), "info")
+                return
+            pdf.undo()
+            self.insert_from_clipboard(at=at, prefer="text", content=content)
+
+        text = tr_n("clipboard.inserted", len(pages))
+        if result.alternative == "text" and prefer is None:
+            self.toast(text, "success", action_text=tr("clipboard.use_text"), on_action=use_text)
+        else:
+            self.toast(text, "success", action_text=tr("shell.undo_short"), on_action=undo)
+        if result.skipped:
+            from .clipboard_source import skipped_message
+
+            self.toast(skipped_message(list(result.skipped)), "warning")
+        self._select_after(pages)
+        return pages
+
     def insert_from_file_dialog(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, tr("shell.pages.insert_file_title"), _last_dir(),
                                                 tr("shell.filter.open"))

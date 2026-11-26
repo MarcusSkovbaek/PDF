@@ -122,6 +122,7 @@ class MainWindow(QMainWindow):
         self._inspector_on = self.settings.value("view/inspector", True, type=bool)
 
         self.actions = ActionRegistry(self)
+        self._clip_ok = False
         self.theme = theme_manager()
         from .saving import SaveController
 
@@ -161,6 +162,9 @@ class MainWindow(QMainWindow):
         self._menu_timer.timeout.connect(self._build_menu)
 
         self.theme.changed.connect(self._on_theme)
+        # the clipboard commands follow what is copied, in Folio or elsewhere
+        QGuiApplication.clipboard().dataChanged.connect(self._on_clipboard_changed)
+        self._on_clipboard_changed()
         self.show_home()
         self._update_chrome()
 
@@ -321,6 +325,9 @@ class MainWindow(QMainWindow):
         # -- file
         r("file.new", tr("shell.file.new"), icon="file-plus", shortcut="Ctrl+N", handler=self.new_document,
           category=cat_file, order=10)
+        r("file.new_from_clipboard", tr("clipboard.new"), icon="clipboard-text", shortcut="Ctrl+Shift+N",
+          handler=self.new_from_clipboard, enabled=lambda: self._clip_ok, category=cat_file, order=15,
+          keywords=tr("clipboard.keywords"))
         r("file.open", tr("shell.file.open"), icon="folder-open", shortcut=QKeySequence.StandardKey.Open,
           handler=self.open_dialog, category=cat_file, order=20)
         r("file.save", tr("shell.file.save"), icon="floppy-disk", shortcut="Ctrl+S",
@@ -434,6 +441,9 @@ class MainWindow(QMainWindow):
         r("pages.insert_file", tr("shell.pages.insert_file"), icon="file-arrow-down", shortcut="Ctrl+Shift+I",
           handler=pw(lambda ws: ws.insert_from_file_dialog()), enabled=has_ws, menu="pages", mode="pages",
           category=cat_pages, order=60)
+        r("pages.insert_clipboard", tr("clipboard.insert"), icon="clipboard-text",
+          handler=pw(lambda ws: ws.insert_from_clipboard()), enabled=lambda: has_ws() and self._clip_ok,
+          menu="pages", mode="pages", category=cat_pages, order=65, keywords=tr("clipboard.keywords"))
         # Delete works on selected pages in the grid / thumbnails (not a window
         # shortcut: the tools use Delete for their own selection)
         del_key = QKeySequence(Qt.Key.Key_Delete).toString(QKeySequence.SequenceFormat.NativeText)
@@ -541,7 +551,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
 
         m_file = menu.addMenu(tr("shell.menu.file"))
-        add(m_file, ["file.new", "file.open"])
+        add(m_file, ["file.new", "file.new_from_clipboard", "file.open"])
         self.recent_menu = m_file.addMenu(icon("clock-counter-clockwise"), tr("shell.file.recent"))
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         add(m_file, [None, "file.save", "file.save_as", "file.save_copy", None, "file.security", "file.reduce",
@@ -648,7 +658,7 @@ class MainWindow(QMainWindow):
 
             key = "home"
             home = HomeView(recent_files)
-            home.actionRequested.connect(lambda aid: self.actions.trigger(aid))
+            home.actionRequested.connect(self._home_action)
             home.openRequested.connect(self.open_path)
             home.clearRecentRequested.connect(self._clear_recent)
             self._widgets[key] = home
@@ -827,6 +837,98 @@ class MainWindow(QMainWindow):
     def new_document(self) -> None:
         pdf = PdfDocument.new_blank(title=tr("app.untitled"))
         self.add_document(pdf)
+
+    # ---------------------------------------------------------- clipboard
+    def _on_clipboard_changed(self) -> None:
+        """Keep "Ny PDF fra udklipsholder" / "Indsæt fra udklipsholder"
+        enabled only while there is something usable, and say why not."""
+        from .clipboard_source import clipboard_available
+
+        self._clip_ok = clipboard_available()
+        for aid, text in (("file.new_from_clipboard", tr("clipboard.new")),
+                          ("pages.insert_clipboard", tr("clipboard.insert"))):
+            if not self.actions.has(aid):
+                continue
+            act = self.actions.action(aid)
+            if self._clip_ok:
+                sc = act.shortcut()
+                act.setToolTip(f"{text}  ({sc.toString(QKeySequence.SequenceFormat.NativeText)})"
+                               if not sc.isEmpty() else text)
+            else:
+                act.setToolTip(tr("clipboard.empty_tip"))
+        self.actions.refresh_enabled()
+
+    def _home_action(self, aid: str) -> None:
+        if aid == "file.new_from_clipboard" and not self._clip_ok:
+            self._on_clipboard_changed()        # it may have changed unnoticed
+            if not self._clip_ok:
+                self.toast(tr("clipboard.empty"), "info")
+                return
+        self.actions.trigger(aid)
+
+    def new_from_clipboard(self) -> DocumentWorkspace | None:
+        """"Ny PDF fra udklipsholder" (U7–U9): a new, unsaved tab – nothing is
+        written anywhere until the user saves."""
+        from .clipboard_source import read_clipboard
+
+        content = read_clipboard()
+        if content.is_empty():
+            self.toast(tr("clipboard.empty"), "info")
+            return None
+        result = self._clip_pdf(content)
+        if result is None:
+            return None
+        from .clipboard_source import clipboard_title, describe
+
+        pdf = PdfDocument.from_bytes(result.data, title=clipboard_title())
+        ws = self.add_document(pdf)
+        text = tr("clipboard.created", what=describe(content, result.kind))
+        if result.alternative == "text":
+            rev = pdf.revision
+            self.toast(text, "success", action_text=tr("clipboard.use_text"),
+                       on_action=lambda: self._use_clip_text(ws, pdf, rev, content))
+        else:
+            self.toast(text, "success")
+        self._toast_skipped(result.skipped)
+        return ws
+
+    def _clip_pdf(self, content, prefer: str | None = None):
+        from ..core import clipboard_pdf
+        from .clipboard_source import busy, clip_options, password_prompt
+
+        try:
+            with busy():
+                return clipboard_pdf.content_to_pdf(content, clip_options(self.settings, "new", prefer=prefer),
+                                                    passwords=password_prompt(self))
+        except ValueError as exc:
+            self.toast(str(exc) or tr("clipboard.empty"), "info")
+        except Exception as exc:  # noqa: BLE001 - a broken file or odd clipboard data
+            self.toast(tr("clipboard.error", err=str(exc) or type(exc).__name__), "error")
+        return None
+
+    def _toast_skipped(self, skipped) -> None:
+        if skipped:
+            from .clipboard_source import skipped_message
+
+            self.toast(skipped_message(list(skipped)), "warning")
+
+    def _use_clip_text(self, ws: DocumentWorkspace, pdf, revision: int, content) -> DocumentWorkspace | None:
+        """"Brug teksten i stedet": rebuild the new PDF from the text and put it
+        in that tab's place – only while the tab is still untouched."""
+        if ws not in self.workspaces() or ws.pdf is not pdf or pdf.revision != revision:
+            self.toast(tr("clipboard.stale"), "info")
+            return None
+        result = self._clip_pdf(content, prefer="text")
+        if result is None:
+            return None
+        new = PdfDocument.from_bytes(result.data, title=pdf.display_name)
+        old_key = self._key_of(ws)
+        self.tabs.setCurrentIndex(self.tabs.index_of(old_key))
+        new_ws = self.add_document(new)        # opens right after the old tab …
+        self._remove_tab(self.tabs.index_of(old_key))   # … which then goes
+        self._update_chrome()
+        self.toast(tr("clipboard.used_text"), "success")
+        return new_ws
 
     def _clear_recent(self) -> None:
         from .app import clear_recent
@@ -1236,6 +1338,10 @@ class MainWindow(QMainWindow):
         self.settings.setValue("window/geometry", self.saveGeometry())
         try:  # the theme manager outlives this window; stop reacting to it
             self.theme.changed.disconnect(self._on_theme)
+        except (RuntimeError, TypeError):
+            pass
+        try:  # so does the clipboard
+            QGuiApplication.clipboard().dataChanged.disconnect(self._on_clipboard_changed)
         except (RuntimeError, TypeError):
             pass
         for ws in self.workspaces():

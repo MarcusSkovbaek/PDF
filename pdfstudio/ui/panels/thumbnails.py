@@ -9,7 +9,6 @@ actions registered by the workspace.
 
 from __future__ import annotations
 
-import os
 import time
 
 from PySide6.QtCore import (
@@ -19,14 +18,21 @@ from PySide6.QtCore import (
     QMimeData,
     QModelIndex,
     QPoint,
-    QRect,
     QRectF,
     QSize,
     Qt,
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QFont,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QListView,
@@ -40,6 +46,7 @@ from PySide6.QtWidgets import (
 
 from ...i18n import tr
 from ..theme import tokens as T
+from ..theme.icons import icon
 from ..viewer.page_view import paint_soft_shadow
 from ..viewer.render_util import page_size, render_qpixmap
 
@@ -398,10 +405,33 @@ class ThumbnailView(QListView):
             self.workspace.trigger_action("pages.delete")
             ev.accept()
             return
+        if ev.matches(QKeySequence.StandardKey.Paste):
+            # Ctrl+V while the strip / grid has focus: pages from the clipboard
+            # after the selection (U10); elsewhere Ctrl+V keeps its own meaning
+            self.paste_from_clipboard()
+            ev.accept()
+            return
         super().keyPressEvent(ev)
+
+    def paste_from_clipboard(self, before: bool = False) -> list[int]:
+        """Insert the clipboard's content after the selected pages (``before``:
+        at the first one); without a selection the workspace decides."""
+        fn = getattr(self.workspace, "insert_from_clipboard", None)
+        if fn is None:
+            return []
+        sel = self.selected_pages()
+        if not sel:
+            return fn(before=before)
+        return fn(before=before, at=min(sel) if before else max(sel) + 1)
 
     # -- context menu ---------------------------------------------------------
     def _context_menu(self, pos: QPoint) -> None:
+        menu = self.build_context_menu(pos)
+        if menu.actions():
+            menu.exec(self.viewport().mapToGlobal(pos))
+        menu.deleteLater()
+
+    def build_context_menu(self, pos: QPoint) -> QMenu:
         idx = self.indexAt(pos)
         if idx.isValid() and idx.row() not in self.selected_pages():
             self.selectionModel().setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.ClearAndSelect)
@@ -419,8 +449,23 @@ class ThumbnailView(QListView):
                 act = self.workspace.action(aid)
                 if act is not None:
                     menu.addAction(act)
-        if menu.actions():
-            menu.exec(self.viewport().mapToGlobal(pos))
+            if "pages.insert_file" in group and hasattr(self.workspace, "insert_from_clipboard"):
+                self._add_clipboard_entries(menu)
+        return menu
+
+    def _add_clipboard_entries(self, menu: QMenu) -> None:
+        from ..clipboard_source import clipboard_available
+
+        ok = clipboard_available()
+        for before, key in ((True, "clipboard.insert_before"), (False, "clipboard.insert_after")):
+            act = QAction(icon("clipboard-text"), tr(key), menu)
+            act.setObjectName("clipboard.before" if before else "clipboard.after")
+            act.setEnabled(ok)
+            if not ok:
+                act.setToolTip(tr("clipboard.empty_tip"))
+            act.triggered.connect(lambda _c=False, b=before: self.paste_from_clipboard(b))
+            menu.addAction(act)
+        menu.setToolTipsVisible(not ok)
 
     # -- drag & drop -----------------------------------------------------------
     def _accepts(self, md: QMimeData) -> bool:

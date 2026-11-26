@@ -12,7 +12,7 @@ from ..theme.icons import icon
 from ..widgets.util import label, on_theme_change
 
 SELECTION_ACTIONS = ("pages.rotate_left", "pages.rotate_right", "pages.duplicate", "pages.extract", "pages.delete")
-DOCUMENT_ACTIONS = ("pages.insert_blank", "pages.insert_file", "tools.split")
+DOCUMENT_ACTIONS = ("pages.insert_blank", "pages.insert_file", "pages.insert_clipboard", "tools.split")
 
 
 def format_pages(pages: list[int]) -> str:

@@ -234,7 +234,9 @@ def add_text_box(pdf, page, rect, text, style: SpanStyle, align="left", *, forma
 def add_image(pdf, page, rect, image: str | bytes, keep_aspect=True) -> None
 
 # graphics.py  (painted paths edited in the content stream: a move inserts/rewrites ONE cm; scale rewrites
-#  coordinates so stroke widths stay; everything else byte-identical)
+#  coordinates so stroke widths stay; everything else byte-identical, except that the FIRST edit of an object
+#  wraps its paths in /FolioGroup <</G n>> BDC … EMC – a fixed group that never absorbs or joins neighbours.
+#  Pasted content sits in /FolioPaste BMC … EMC (its own segment). Marked content survives MuPDF's filter.)
 KEEP                                                     # "leave unchanged" sentinel
 @dataclass class GraphicObject: page; index; paths: tuple; rect; kind "shape"|"line"|"background"|"template"|"table";
                                 stroke; fill; width; selectable; editable; in_form; items; key

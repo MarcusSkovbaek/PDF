@@ -179,6 +179,9 @@ _STATE = {b"w": "w", b"J": "J", b"j": "j", b"M": "M", b"d": "d", b"ri": "ri", b"
 _RESETS = {b"G": "CS", b"RG": "CS", b"K": "CS", b"g": "cs", b"rg": "cs", b"k": "cs", b"CS": "S", b"cs": "F"}
 _TEXT_SHOW = {b"Tj", b"TJ", b"'", b'"'}
 PASTE_TAG = b"FolioPaste"   # marked-content tag around pasted content: /FolioPaste BMC … EMC
+GROUP_TAG = b"FolioGroup"   # around each path of a group Folio edited: /FolioGroup <</G n>> BDC … EMC
+_GROUP_AT_END = re.compile(rb"/FolioGroup[\x00\t\n\x0c\r ]*<<[\x00\t\n\x0c\r ]*/G[\x00\t\n\x0c\r ]+(\d+)"
+                           rb"[\x00\t\n\x0c\r ]*>>[\x00\t\n\x0c\r ]*\Z")
 _FLAT_STEPS = 8
 _BAND = 0.2                 # header/footer band (fraction of the page height) for the template test
 _MAX_FORM_DEPTH = 10
@@ -220,7 +223,7 @@ class _Cont:
     """The page's content, or one invocation of a Form XObject."""
 
     __slots__ = ("kind", "xref", "data", "xobjects", "parent_ev", "depth", "events", "mc_ok", "path_only",
-                 "q_depth_end", "top_dirty", "owner")
+                 "q_depth_end", "top_dirty", "owner", "max_gid")
 
     def __init__(self, kind, xref, data, xobjects, parent_ev, depth, owner) -> None:
         self.kind: str = kind              # "page" | "form"
@@ -235,20 +238,21 @@ class _Cont:
         self.q_depth_end = 0               # unclosed q at the end
         self.top_dirty = False             # state / cm / clip changed outside any q (page)
         self.owner = owner                 # xref whose /Resources apply (colour spaces)
+        self.max_gid = 0                   # highest /FolioGroup id in this container
 
 
 class _Ev:
     """One paint event in a container: a painted path, an image, an inline
     image, a form invocation, a text show operator, a shading."""
 
-    __slots__ = ("cont", "seq", "kind", "start", "end", "ctm", "block", "state", "clean", "brk", "seg",
+    __slots__ = ("cont", "seq", "kind", "start", "end", "ctm", "block", "state", "clean", "brk", "seg", "gid", "gpos",
                  # path
                  "num", "op", "op_span", "segs", "items", "polys", "clip", "broken", "pre", "M",
                  "stroke", "fill", "close", "evenodd", "bbox", "geom", "wdisp", "_rgb", "inner",
                  # xobjects
                  "xref", "name_span", "child", "index")
 
-    def __init__(self, cont, seq, kind, start, end, ctm, block, state, clean, brk, seg=0) -> None:
+    def __init__(self, cont, seq, kind, start, end, ctm, block, state, clean, brk, seg=0, gid=0, gpos=-1) -> None:
         self.cont: _Cont = cont
         self.seq = seq
         self.kind = kind
@@ -260,6 +264,8 @@ class _Ev:
         self.clean = clean                 # no operator between the previous paint event and this one
         self.brk = brk                     # grouping break counter (text/images/forms/shadings)
         self.seg = seg                     # paste segment: innermost /FolioPaste sequence (0: none)
+        self.gid = gid                     # fixed group: innermost /FolioGroup <</G n>> (0: none)
+        self.gpos = gpos                   # where that BDC operator starts
         self.num = -1
         self.child: _Cont | None = None
         self.index = None
@@ -394,14 +400,16 @@ class _Scanner:
         brk = 0
         seg = 0                              # current paste segment (innermost /FolioPaste BMC)
         seg_n = 0
-        mc_segs: list[int] = []              # segment in force inside each open marked-content sequence
+        gid = 0                              # current fixed group (innermost /FolioGroup <</G n>> BDC)
+        gpos = -1                            # start of its BDC operator
+        mc_segs: list[tuple] = []            # (segment, group, gpos) in force inside each open sequence
         gs_n = 0
         in_text = False
 
         def event(kind, start, end):
             nonlocal last_ev_end, last_op_end
             clean = last_ev_end >= 0 and last_op_end <= last_ev_end
-            ev = _Ev(cont, len(events), kind, start, end, ctm, block, st, clean, brk, seg)
+            ev = _Ev(cont, len(events), kind, start, end, ctm, block, st, clean, brk, seg, gid, gpos)
             events.append(ev)
             last_ev_end = last_op_end = end
             return ev
@@ -564,7 +572,7 @@ class _Scanner:
                 mc -= 1
                 if mc_segs:
                     mc_segs.pop()
-                seg = mc_segs[-1] if mc_segs else 0
+                seg, gid, gpos = mc_segs[-1] if mc_segs else (0, 0, -1)
                 b = block
                 while b is not None and b.mc > mc:
                     b.mc_ok = False
@@ -580,7 +588,15 @@ class _Scanner:
                         # groups, merges or forms a table with anything outside it
                         seg_n += 1
                         seg = seg_n
-                mc_segs.append(seg)
+                else:
+                    a = _GROUP_AT_END.search(region)
+                    if a is not None:
+                        # a group Folio has moved / scaled / restyled: fixed for good
+                        gid = int(a.group(1))
+                        gpos = s - len(region) + a.start()
+                        if gid > cont.max_gid:
+                            cont.max_gid = gid
+                mc_segs.append((seg, gid, gpos))
             last_op_end = e
         if mc != 0:
             cont.mc_ok = False
@@ -762,7 +778,7 @@ class _Unit:
     invocation of a form that draws only paths."""
 
     __slots__ = ("paths", "evs", "ev", "bbox", "editable", "in_form", "form_xref", "lineish", "stroke", "fill",
-                 "groupable", "ordinal", "seg")
+                 "groupable", "ordinal", "seg", "gkey")
 
     def __init__(self, ev: _Ev, evs: list[_Ev], in_form: bool, form_xref: int, editable: bool) -> None:
         self.ev = ev                      # the event an edit acts on (path, or form invocation)
@@ -786,6 +802,8 @@ class _Unit:
         while top.cont.kind == "form" and top.cont.parent_ev is not None:
             top = top.cont.parent_ev
         self.seg = top.seg                # paste segment of the page-level event
+        # fixed group (Folio edited it): one group of exactly these units
+        self.gkey = (self.seg, id(ev.cont), ev.gid) if ev.gid else None
 
 
 class _PageScan:
@@ -1148,13 +1166,13 @@ def _classify(doc, index: int, scan: _PageScan, neighbours) -> list[str]:
         for q in neighbours:
             others.extend(_band_units(_page_scan(doc, q), doc).values())
         for o, me in sigs.items():
-            if not kinds[o] and any(_same_sig(me, other) for other in others):
+            if not kinds[o] and units[o].gkey is None and any(_same_sig(me, other) for other in others):
                 kinds[o] = "template"
     # a pasted block (its own segment) never forms a table with what was
     # already there – two overlapping framed boxes are not a lattice
     by_seg: dict[int, list[_Unit]] = {}
     for u in units:
-        if not kinds[u.ordinal]:
+        if not kinds[u.ordinal] and u.gkey is None:      # a group Folio edited is never a table
             by_seg.setdefault(u.seg, []).append(u)
     for part in by_seg.values():
         for o in _tables(part):
@@ -1256,8 +1274,13 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
     cur_box = None
     cur_boxes: list = []
     last = None
+    fixed: dict[tuple, list[_Unit]] = {}
     for u in scan.units:
-        if kinds[u.ordinal]:
+        if kinds[u.ordinal] or u.gkey is not None:
+            # (a fixed group – Folio moved / scaled / restyled it – is exactly
+            # its tagged units, and still separates its neighbours as before)
+            if not kinds[u.ordinal]:
+                fixed.setdefault(u.gkey, []).append(u)
             if last is not None and u.ev.cont is last.ev.cont:
                 cur = None
             continue
@@ -1321,6 +1344,9 @@ def _group(scan: _PageScan, kinds: list[str]) -> list[list[_Unit]]:
             groups[target] = groups[target] + groups[gi]
             groups[gi] = []
         groups = [g for g in groups if g]
+    if fixed:
+        groups.extend(fixed.values())
+        groups.sort(key=lambda g: min(u.ordinal for u in g))
     return groups
 
 
@@ -1798,12 +1824,63 @@ def _olist(objs) -> list:
 def _commit(pdf, label: str, page: int, edits: dict, *, merge: bool = False) -> None:
     """One undo step that applies planned ``edits`` (``merge``: fold into the
     previous step when that has the same label – a burst of nudges)."""
+    _commit_fn(pdf, label, page, lambda doc: _commit_all(doc, doc[page], edits), merge=merge)
+
+
+def _commit_fn(pdf, label: str, page: int, fn, *, merge: bool = False) -> None:
     fold = merge and pdf.history.undo_label == label
     with pdf.edit(label, CONTENT, (page,)):
-        doc = pdf.doc
-        _commit_all(doc, doc[page], edits)
+        fn(pdf.doc)
     if fold:
         pdf.history.discard_last()      # the state before the burst stays the undo target
+
+
+# Fixed groups: the first time Folio moves, scales, restyles or restacks a
+# graphic object, each of its paths is wrapped in ``/FolioGroup <</G n>> BDC …
+# EMC`` (one id per object, shared by all its paths – also when they are not
+# contiguous in the stream). The grouping then takes exactly those paths as one
+# object: it never absorbs other paths or joins another group, and it no longer
+# takes part in the contact grouping of its untouched neighbours. Marked content
+# survives MuPDF's content filter (redactions, clean), unlike byte offsets.
+def _plan_tags(doc, page: int, olist) -> dict:
+    """Edits that tag the objects that are not yet exactly one fixed group."""
+    lst = _listing(doc, page)
+    counts: dict = {}
+    for u in lst.scan.units:
+        if u.gkey is not None:
+            counts[u.gkey] = counts.get(u.gkey, 0) + 1
+    gid = max((c.max_gid for c in lst.scan.conts), default=0)
+    edits: dict = {}
+    for o in olist:
+        us = _units_for(lst, o.paths) if isinstance(o, GraphicObject) else None
+        if not us:
+            continue
+        keys = {u.gkey for u in us}
+        if len(keys) == 1 and None not in keys and counts.get(next(iter(keys))) == len(us):
+            continue                                     # already exactly one fixed group
+        gid += 1
+        open_ = b"/" + GROUP_TAG + b" <</G " + str(gid).encode() + b">> BDC\n"
+        for u in us:
+            ev = u.ev
+            ed = edits.setdefault(ev.cont, [])
+            ed.append((ev.start, ev.start, open_))
+            ed.append((ev.end, ev.end, b"\nEMC\n"))
+    return edits
+
+
+def _commit_tagged(pdf, label: str, page: int, olist, plan, *, merge: bool = False) -> None:
+    """One undo step: tag the objects as fixed groups (when needed), then
+    apply the edits ``plan(doc)`` makes on the (tagged) document."""
+    edits = plan(pdf.doc)                                # validates before anything changes
+    tags = _plan_tags(pdf.doc, page, olist)
+    if not tags:
+        _commit(pdf, label, page, edits, merge=merge)
+        return
+
+    def fn(doc):
+        _commit_all(doc, doc[page], tags)
+        _commit_all(doc, doc[page], plan(doc))
+    _commit_fn(pdf, label, page, fn, merge=merge)
 
 
 # Edits are planned on the current document (validation errors are raised
@@ -1840,8 +1917,8 @@ def transform_graphics(pdf, page: int, objs, matrix, *, keep_stroke: bool = True
         label = (_label("graphics.undo.move", "Flyt grafik") if _is_translation(T)
                  else _label("graphics.undo.transform", "Transformér grafik"))
     olist = _olist(objs)
-    edits = _plan_transform(pdf.doc, page, olist, T, keep_stroke)
-    _commit(pdf, label, page, edits, merge=merge)
+    _commit_tagged(pdf, label, page, olist, lambda doc: _plan_transform(doc, page, olist, T, keep_stroke),
+                   merge=merge)
     return _rebuild(pdf.doc, page, [o.paths for o in olist])
 
 
@@ -1988,8 +2065,8 @@ def set_graphic_style(pdf, page: int, objs, *, stroke=KEEP, fill=KEEP,
         return olist
     if width is not None and (not math.isfinite(width) or width < 0):
         raise ValueError("bad width")
-    edits = _plan_style(pdf.doc, page, olist, stroke, fill, width)
-    _commit(pdf, _label("graphics.undo.style", "Skift udseende"), page, edits)
+    _commit_tagged(pdf, _label("graphics.undo.style", "Skift udseende"), page, olist,
+                   lambda doc: _plan_style(doc, page, olist, stroke, fill, width))
     return _rebuild(pdf.doc, page, [o.paths for o in olist])
 
 
@@ -2011,11 +2088,16 @@ def _restack_edits(cont: _Cont, evs: list[_Ev], front: bool) -> list:
         seg = next((ev.seg for ev in evs if s <= ev.start and ev.end <= e), 0)
         sb = _state_bytes(st)
         plain = _close_m(ctm, _IDENTITY)
+        body = data[s:e]
+        first = what[0] if kind == "run" else next((ev for ev in evs if s <= ev.start and ev.end <= e), None)
+        if first is not None and first.gid and first.gpos < s:
+            # the span's /FolioGroup sequence lies outside it: re-emit it around
+            body = b"/" + GROUP_TAG + b" <</G " + str(first.gid).encode() + b">> BDC\n" + body + b"\nEMC"
         if kind == "block" and not sb and plain:
-            chunks.append((seg, data[s:e] + b"\n"))       # already a self-contained q … Q
+            chunks.append((seg, body + b"\n"))       # already a self-contained q … Q
         else:
             head = b"q\n" + (sb + b"\n" if sb else b"") + (b"" if plain else _fmt(ctm) + b" cm\n")
-            chunks.append((seg, head + data[s:e] + b"\nQ\n"))
+            chunks.append((seg, head + body + b"\nQ\n"))
         tail = _tail(what) if kind == "run" else b""
         edits.append((s, e, tail) if tail else _removal(data, s, e))
     # pasted content keeps its own segment: each run of chunks from one
@@ -2064,10 +2146,14 @@ def restack_graphics(pdf, page: int, objs, *, front: bool = True) -> list[Graphi
     evs = [u.ev for u in units]
     if any(ev.cont.kind != "page" for ev in evs):
         raise ValueError("only graphics in the page content can be restacked")
-    cont = evs[0].cont
     moved = sorted(n for u in units for n in u.paths)
     total = len(lst.scan.paths)
-    _commit(pdf, _restack_label(front), page, {cont: _restack_edits(cont, evs, front)})
+
+    def plan(doc):
+        _l, us = _resolve(doc, page, olist)
+        es = [u.ev for u in us]
+        return {es[0].cont: _restack_edits(es[0].cont, es, front)}
+    _commit_tagged(pdf, _restack_label(front), page, olist, plan)
     base = total - len(moved) if front else 0
     new_of = {n: base + i for i, n in enumerate(moved)}
     return _rebuild(pdf.doc, page, [tuple(sorted(new_of[n] for n in o.paths if n in new_of)) for o in olist])

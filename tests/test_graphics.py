@@ -98,6 +98,15 @@ def contents(pdf, page=0) -> bytes:
     return pdf.doc[page].read_contents()
 
 
+_GROUP_TAGS = re.compile(rb"/FolioGroup <</G \d+>> BDC\n|\nEMC\n")
+
+
+def untag(data: bytes) -> bytes:
+    """Content without the /FolioGroup sequences Folio wraps around the
+    paths of a group it edited (fixed groups)."""
+    return _GROUP_TAGS.sub(b"", data)
+
+
 # ---------------------------------------------------------------------------
 # listing
 # ---------------------------------------------------------------------------
@@ -382,7 +391,8 @@ def test_move_inserts_one_cm_and_changes_nothing_else():
     # byte level: the bare fill got one q/cm/Q wrap, the stroke block one cm
     want = before.replace(b"100 600 120 80 re f\n", b"\nq 1 0 0 1 150 -40 cm\n100 600 120 80 re f\nQ\n\n")
     want = want.replace(b"q 2 w", b"q\n1 0 0 1 150 -40 cm\n 2 w")
-    assert after == want
+    # (each path of the moved group is wrapped once in a /FolioGroup sequence)
+    assert untag(after) == want and after.count(b"/FolioGroup <</G 1>> BDC") == 2
     # pixels: identical outside the old and the new box
     after_pix = render(pdf.doc)
     assert diff_outside(before_pix, after_pix, [box.rect, moved.rect]) == 0
@@ -398,7 +408,7 @@ def test_move_rewrites_existing_cm_in_exclusive_block():
     pdf, _ = build(content)
     o = only(pdf.doc)
     o = gr.move_graphics(pdf, 0, o, 10, -5)[0]
-    assert contents(pdf) == TEXT + b"q 1 0 0 1 10 5 cm 0 0 1 rg 100 100 50 50 re f Q\n"
+    assert untag(contents(pdf)) == TEXT + b"q 1 0 0 1 10 5 cm 0 0 1 rg 100 100 50 50 re f Q\n"
 
 
 def test_repeated_moves_do_not_grow_the_stream():
@@ -1018,3 +1028,92 @@ def test_edits_keep_pasted_paths_in_their_segment():
     assert b"BT ET" not in contents(pdf)
     gr.delete_graphics(pdf, 0, [gr.list_graphics(pdf.doc, 0)[0]])
     assert len(gr.list_graphics(pdf.doc, 0)) == 1
+
+
+# ---------------------------------------------------------------------------
+# fixed groups: a graphic Folio moved / scaled / restyled / restacked keeps
+# exactly its paths (/FolioGroup <</G n>> BDC … EMC around each of them)
+# ---------------------------------------------------------------------------
+# a box (fill + border) and, right of it, an arrow (shaft + head) – separate
+ARROW_BOX = (b"q 0.9 0.9 1 rg 100 600 100 40 re f Q\nq 0 0 1 RG 1 w 100 600 100 40 re S Q\n" + TEXT
+             + b"q 0 G 1 w 230 620 m 280 620 l S Q\nq 0 g 280 615 m 292 620 l 280 625 l h f Q\n")
+
+
+def kinds_rects(doc, page=0):
+    return [(o.kind, tuple(round(v, 1) for v in o.rect), o.paths) for o in gr.list_graphics(doc, page)]
+
+
+def test_moved_graphic_never_absorbs_a_neighbour():
+    pdf, _ = build(ARROW_BOX)
+    box, arrow = gr.list_graphics(pdf.doc, 0)
+    assert box.paths == (0, 1) and arrow.paths == (2, 3)
+    # the box's border now touches the arrow's open end: still two objects
+    (moved,) = gr.move_graphics(pdf, 0, box, 30, 0)
+    objs = gr.list_graphics(pdf.doc, 0)
+    assert [o.paths for o in objs] == [(0, 1), (2, 3)]
+    assert objs[1].key == arrow.key and moved.paths == (0, 1)
+    # and the moved arrow does not join the box either
+    (a2,) = gr.move_graphics(pdf, 0, objs[1], -40, 0)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1), (2, 3)]
+    # moving it back and forth, nudging: always the same two objects
+    for dx in (5, -5, 12):
+        a2 = gr.move_graphics(pdf, 0, a2, dx, 0, merge=True)[0]
+        assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0, 1), (2, 3)]
+    assert contents(pdf).count(b"/FolioGroup") == 4                     # tagged once per path
+
+
+def test_untouched_neighbours_keep_their_segmentation():
+    # A and C (drawn before / after X) are separate; X moved so that both
+    # their open ends lie on its outline must not chain them into one group
+    a = b"q 0 G 1 w 100 300 m 300 300 l S Q\n"
+    x = b"q 1 0 0 RG 1 w 400 400 30 30 re S Q\n"
+    c = b"q 0 G 1 w 330 330 m 330 500 l S Q\n"
+    pdf, _ = build(a + x + c)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,), (2,)]
+    xo = gr.list_graphics(pdf.doc, 0)[1]
+    (xo,) = gr.move_graphics(pdf, 0, xo, -100, 100)                     # corners on A's and C's ends
+    assert_rect(xo.rect, pymupdf.Rect(299.5, 511.5, 330.5, 542.5))
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,), (2,)]
+    gr.move_graphics(pdf, 0, xo, 100, -100)
+    assert [o.paths for o in gr.list_graphics(pdf.doc, 0)] == [(0,), (1,), (2,)]
+
+
+def test_fixed_group_with_paths_apart_in_the_stream_stays_one():
+    # LibreOffice callout: fill, text, four border lines (not contiguous)
+    content = (b"0.89 0.93 0.96 rg\n56.65 475.7 m 538.55 475.7 l 538.55 405.7 l 56.65 405.7 l h f*\n"
+               + TEXT + b"0.24 0.49 0.67 RG\n"
+               b"q 0.75 w 56.7 475.3 m 538.55 475.3 l S Q\nq 0.75 w 538.2 475.7 m 538.2 405.7 l S Q\n"
+               b"q 0.75 w 538.55 406.1 m 56.7 406.1 l S Q\nq 0.75 w 57.1 405.7 m 57.1 475.7 l S Q\n"
+               + b"q 0 G 1 w 300 300 m 450 300 l S Q\n")
+    pdf, _ = build(content)
+    box, rule = gr.list_graphics(pdf.doc, 0)
+    assert box.paths == (0, 1, 2, 3, 4)
+    (box,) = gr.set_graphic_style(pdf, 0, box, fill=(1, 0, 0))
+    (box,) = gr.move_graphics(pdf, 0, box, 0, -300)                    # onto the rule
+    objs = gr.list_graphics(pdf.doc, 0, all_items=True)
+    assert [o.paths for o in objs] == [(0, 1, 2, 3, 4), (5,)] and all(o.selectable for o in objs)
+    # the tags survive MuPDF's content filter and a cleaned save
+    pdf.doc[0].clean_contents()
+    again = PdfDocument.from_bytes(pdf.doc.tobytes(clean=True, garbage=3, deflate=True))
+    assert [o.paths for o in gr.list_graphics(again.doc, 0)] == [(0, 1, 2, 3, 4), (5,)]
+    # restack keeps the group: still one object of five paths
+    (front,) = gr.restack_graphics(pdf, 0, gr.list_graphics(pdf.doc, 0)[0], front=True)
+    assert len(front.paths) == 5
+    objs = gr.list_graphics(pdf.doc, 0)
+    assert sorted(len(o.paths) for o in objs) == [1, 5]
+    # a deep-selected single path moved out of the fixed group is its own group
+    (one,) = [o for o in gr.list_graphics(pdf.doc, 0) if len(o.paths) == 5]
+    path = gr.graphic_at(pdf.doc, 0, (300, 842 - (475.3 + 300)), alt=True)
+    assert path is not None and len(path.paths) == 1 and set(path.paths) < set(one.paths)
+    gr.move_graphics(pdf, 0, path, 0, -50)
+    assert sorted(len(o.paths) for o in gr.list_graphics(pdf.doc, 0)) == [1, 1, 4]
+
+
+def test_fixed_groups_and_paste_segments_together():
+    pdf, _ = build(ARROW_BOX)
+    box = gr.list_graphics(pdf.doc, 0)[0]
+    gr.move_graphics(pdf, 0, box, 0, 10)
+    data = contents(pdf)
+    # the same tagged group pasted (its own segment): two objects, not one
+    pdf2, _ = build(data + b"/FolioPaste BMC\n" + data + b"EMC\n")
+    assert [len(o.paths) for o in gr.list_graphics(pdf2.doc, 0)] == [2, 2, 2, 2]

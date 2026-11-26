@@ -1109,3 +1109,63 @@ def test_a_duplicated_list_item_dropped_on_another_leaves_that_item_alone():
     for s in [(c.kind, tuple(round(v, 1) for v in c.rect), " ".join(c.ref.text.split())) for c in copies]:
         after.remove(s)
     assert after == before
+
+
+def heading_doc(rotation: int = 0) -> PdfDocument:
+    """A heading, a full-width rule under it, a box with an arrow, body text."""
+    doc = pymupdf.open()
+    pg = doc.new_page(width=595, height=842)
+    pg.insert_text((60, 100), "Opfølgning på mål", fontname="helv", fontsize=14)
+    pg.draw_line((56, 130), (540, 130), color=(0.2, 0.3, 0.6), width=0.75)
+    pg.draw_rect(pymupdf.Rect(100, 300, 200, 340), color=(0, 0, 1), fill=(0.9, 0.9, 1), width=1)
+    pg.draw_line((230, 320), (280, 320), color=(0, 0, 0), width=1)
+    pg.draw_polyline([(280, 315), (292, 320), (280, 325)], color=None, fill=(0, 0, 0), closePath=True)
+    for i, line in enumerate(BODY_LINES):
+        pg.insert_text((60, 420 + i * 15), line, fontname="helv", fontsize=11)
+    if rotation:
+        pg.set_rotation(rotation)
+    return PdfDocument.from_bytes(doc.tobytes())
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_heading_moved_onto_its_rule_keeps_the_rule(rotation):
+    pdf = heading_doc(rotation)
+    objs = po.page_objects(pdf.doc, 0)
+    rule = next(g for g in by_kind(objs, "graphic") if g.ref.kind == "line" and max(g.rect.width, g.rect.height) > 400)
+    head = text_obj(objs, "Opfølgning på mål")
+    # move the heading so the rule lies in its underline zone (raw: 28 pt down)
+    rot = pdf.doc[0].rotation_matrix
+    d = pymupdf.Point(0, 28) * rot - pymupdf.Point(0, 0) * rot
+    po.move_objects(pdf, 0, [head], d.x, d.y)
+    now = po.page_objects(pdf.doc, 0)
+    assert po.find_again(pdf.doc, 0, rule) is not None
+    assert len(by_kind(now, "graphic")) == len(by_kind(objs, "graphic"))
+    assert any(g.ref.kind == "line" and g.rect == rule.rect for g in by_kind(now, "graphic"))
+    assert not po._page_decor(pdf.doc, 0)
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_moved_graphic_keeps_its_group_after_text_edits(rotation):
+    pdf = heading_doc(rotation)
+    graphics = by_kind(po.page_objects(pdf.doc, 0), "graphic")
+    assert len(graphics) == 3
+    box = next(g for g in graphics if g.ref.fill is not None and g.ref.stroke is not None and len(g.ref.paths) == 1)
+    arrow = next(g for g in graphics if len(g.ref.paths) == 2)
+    # the box moved so that its border touches the arrow's open end
+    rot = pdf.doc[0].rotation_matrix
+    d = pymupdf.Point(30, 0) * rot - pymupdf.Point(0, 0) * rot
+    (moved,) = po.move_objects(pdf, 0, [box], d.x, d.y)
+
+    def check(step):
+        gs = by_kind(po.page_objects(pdf.doc, 0), "graphic")
+        assert len(gs) == 3, step
+        assert po.find_again(pdf.doc, 0, arrow).rect == arrow.rect, step
+        assert sorted(len(g.ref.paths) for g in gs) == [1, 1, 2], step
+
+    check("move")
+    # text edits rewrite the content through MuPDF's filter: the group stays
+    po.move_objects(pdf, 0, [text_obj(po.page_objects(pdf.doc, 0), BODY_LINES[0])], 0, 5)
+    check("move text")
+    from pdfstudio.core.document import write_bytes
+    pdf = PdfDocument.from_bytes(write_bytes(pdf.doc, garbage=3, clean=True, deflate=True))
+    check("reopen")

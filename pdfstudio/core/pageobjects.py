@@ -582,8 +582,17 @@ def _decor_paths(d: pymupdf.Document, page: int, texts: list) -> set[int]:
     rot = d[page].rotation_matrix
     for t in texts:
         for ln in t.lines:
+            if not ln.decor_rects:
+                continue
+            # a stroke reaching well past the line is a rule the line lies on
+            # (e.g. moved onto a heading rule), not its underline / strike
+            tol = max(3.0, 0.5 * (ln.style.size or 10.0))
+            lo, hi = ln.extent
             for r in ln.decor_rects:
-                rects.append((pymupdf.Rect(r) * rot, bool(getattr(t, "free", False))))
+                r = pymupdf.Rect(r)
+                if r.x0 < lo - tol or r.x1 > hi + tol:
+                    continue
+                rects.append((r * rot, bool(getattr(t, "free", False))))
     if not rects:
         return set()
     out = set()

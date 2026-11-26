@@ -63,6 +63,7 @@ pdfstudio/
     graphics.py               vector paths in the page content: list/group/classify, move, scale, style, restack, delete
     textobjects.py            text blocks as movable objects (glyph for glyph), /Free = standalone after a move
     pageobjects.py            facade: images + text + graphics as one selection ("Markér objekt"), object clipboard
+    clipboard_pdf.py          new PDF / inserted pages from clipboard content (images, files, PDF, HTML, text, Folio clip)
   ui/
     app.py                    QApplication setup, theme, run()
     actions.py                ActionRegistry (id -> QAction, palette)
@@ -73,6 +74,7 @@ pdfstudio/
             tools/*.py        one module per tool
     panels/                   thumbnails, properties inspector, search, outline, comments
     saving.py                 SaveController: background save, autosave, recovery, conflicts
+    clipboard_source.py       reads the system clipboard into a core ClipContent (cheap availability check)
     dialogs/                  merge, images->pdf, split, password, security, reduce, settings, find/replace, ...
     widgets/                  toast, color button, segmented control, ...
 tests/                        pytest; core tests + offscreen UI smoke tests
@@ -291,6 +293,19 @@ def paste_clip(pdf, page, clip, *, offset=(0, 0)) -> list[PageObject]   # at cli
                           # any page size / /Rotate / document); the form is flattened into the page content
                           # (resources merged, names renamed); pasted text is "free"
 def duplicate_objects(pdf, page, objs, offset=(10, 10)) -> list[PageObject]
+
+# clipboard_pdf.py  (spec docs/kravspec-udklipsholder.md; priority folio > files > pdf > image > html > text)
+@dataclass class ClipContent: images: list[bytes]; files: list[str]; pdf: bytes | None; html: str | None;
+                              text: str | None; folio: Clip | None      # .kinds() .is_empty()
+@dataclass class ClipOptions: page_size="image"|"A4"|"Letter"|"match"; margin_mm=10.0; text_page=None;
+                              text_style: SpanStyle | None = None; prefer: str | None = None   # prefer "text" = use the text
+def content_to_pdf(content, options=None, *, passwords=None) -> ClipResult    # .data .kind .pages .skipped .alternative
+def insert_content(pdf, content, at, options=None, *, passwords=None) -> ClipInsert   # ONE pdf.edit; "match" = neighbour
+                          # page's paper size, orientation follows the image; text in the document's body style
+def text_to_pdf(text, *, page_size=A4, margin_mm=20.0, style=None) -> bytes   # Story + embedded local font
+def html_to_pdf(html, *, page_size=A4, margin_mm=20.0, style=None) -> bytes   # CF_HTML aware, sanitized, nothing fetched
+def usable_files(paths) -> (usable, skipped) ; chosen_kind(content, prefer=None) -> str | None
+# PNGs are embedded pixel for pixel (own embedder: no premultiplied alpha); "image" = 96 dpi page, no margin
 ```
 
 ## UI contract
@@ -332,6 +347,13 @@ def duplicate_objects(pdf, page, objs, offset=(10, 10)) -> list[PageObject]
   objects (`_warm`) so hover/click stay < 100 ms.
 * `ui/saving.py` – `SaveController` on the window: `save/save_as/save_copy`, background writing (QThread),
   autosave every `save/autosave_minutes` (default 2) to the recovery store, recovery prompt at start.
+* Clipboard: `ui/clipboard_source.py` – `read_clipboard()`, `clipboard_available()` (formats only; actions
+  refresh on `QClipboard.dataChanged`), `describe()`, `clip_options(settings, "new"|"insert")` (QSettings
+  `clipboard/new_page_size`, `clipboard/insert_page_size`, `clipboard/margin_mm`). Actions
+  `file.new_from_clipboard` (Ctrl+Shift+N, home card; new unsaved tab "Udklipsholder ÅÅÅÅ-MM-DD TT.MM.pdf") and
+  `pages.insert_clipboard` (`ws.insert_from_clipboard(before=False)`; Ctrl+V and the context menu in
+  `ThumbnailView`); toasts offer "Brug teksten i stedet" when `alternative == "text"` (only while
+  `pdf.revision` is unchanged).
 * `DocumentWorkspace` (one per tab) owns the `PdfDocument`, `PageView`, side
   panels, current tool, and subscribes to `pdf.listen` to refresh. The right-hand
   `Inspector` has two tabs, "Egenskaber" and "Kommentarer" (`ws.comments`,

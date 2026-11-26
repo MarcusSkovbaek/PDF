@@ -1,5 +1,22 @@
 # Status / handover – Folio PDF
 
+## 2026-11-26: PDF and pages from the clipboard (spec `docs/kravspec-udklipsholder.md`, U1–U17)
+Spec approved 2026-11-26 with the proposals of section G (new PDF from an image: page = the image at 96 dpi;
+inserted page: the neighbour's paper size, orientation following the image; image preferred with "Brug teksten i
+stedet"; Ctrl+Shift+N). **Core** `core/clipboard_pdf.py`: `content_to_pdf` / `insert_content` (one undo step)
+for Folio's object clip, files copied in Explorer (PDFs with password callback, images, multi-page TIFF), PDF
+data, images (own PNG embedder: pixel for pixel, alpha as /SMask without premultiplying – MuPDF's image path
+changed semi-transparent pixels by 1–4), HTML (CF_HTML aware, allow-listed tags/attributes, no external
+reference is ever touched, local `file:`/`data:` images only) and plain text (PyMuPDF Story, embedded local font:
+Arial on Windows / Liberation Sans on Linux, subset). **UI** `ui/clipboard_source.py` + actions
+`file.new_from_clipboard` (File menu, palette, home card) and `pages.insert_clipboard` (Pages menu, toolbar,
+inspector, Ctrl+V and context menu in the page grid/thumbnails), settings section *Udklipsholder*.
+**Measured**: 4K RGBA screenshot → new PDF ≈ 0.3 s, inserted page ≈ 0.27 s; 54 pages of text ≈ 0.15 s (U17: 1 s /
+2 s). Tests: `tests/test_clipboard_pdf.py` (45), `tests/test_clipboard_ui.py` (32, incl. 3 with the real core).
+**Limitations**: CSS from `<head>`/`<style>` (Word/Excel class styles) is dropped, links are not clickable, PNG
+colour profiles are ignored, 16-bit/interlaced/tRNS PNGs go through MuPDF (exact for opaque pixels only), text
+pages use a 20 mm margin.
+
 ## 2026-11-26: move text blocks and graphics – "Markér objekt" (spec `docs/kravspec-flyt-objekter.md`, O1–O17)
 Spec approved 2026-11-20; plan and API contracts in `docs/plan-flyt-objekter.md`. Built by sub-agents in work
 packages (WP-Z corpus, A graphics, B text objects, C facade, D1/D2 UI, E/E2–E6 stress test and fixes).

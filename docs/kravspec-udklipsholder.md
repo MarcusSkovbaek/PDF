@@ -1,6 +1,6 @@
 # Kravspecifikation – PDF og sider fra udklipsholderen
 
-Version 1.0 · 2026-11-23 · Folio PDF 1.3 → 1.4 · Status: **til godkendelse**
+Version 1.0 · 2026-11-23 · Folio PDF 1.3 → 1.4 · Status: **godkendt 2026-11-26** (forslagene i afsnit G) · **bygget**
 
 Prioritet: **SKAL** = indgår og testes. **BØR** = indgår, medmindre det strider mod en SKAL, og det meldes.
 **KAN** = kun hvis der er tid. Alle krav har et ID, så du kan godkende, rette eller stryge enkeltpunkter

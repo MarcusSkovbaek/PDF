@@ -409,9 +409,113 @@ def _story_pdf(body: str, setup: _Setup, page_size, margin_mm: float, extra_css:
             doc.subset_fonts()          # the whole TTF is embedded otherwise (~1 MB)
         except Exception:  # pragma: no cover - keeps the full fonts
             pass
+        fix_shared_glyph_unicode(doc)
         return write_bytes(doc, garbage=3, deflate=True)
     finally:
         doc.close()
+
+
+# -- ToUnicode repair -------------------------------------------------------------
+#: (wrongly read character, the plain one) for fonts that draw both with one glyph
+_SHARED_GLYPHS = ((0x00A0, 0x0020), (0x00AD, 0x002D))   # no-break space -> space, soft hyphen -> "-"
+_BFCHAR = re.compile(r"(\d+)\s+beginbfchar(.*?)endbfchar", re.DOTALL)
+_BFRANGE = re.compile(r"(\d+)\s+beginbfrange(.*?)endbfrange", re.DOTALL)
+_HEX = re.compile(r"<([0-9A-Fa-f]+)>")
+_RANGE_LINE = re.compile(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(<[0-9A-Fa-f]+>|\[[^\]]*\])")
+
+
+def _blocks(kind: str, entries: list[str]) -> str:
+    out = []
+    for i in range(0, len(entries), 100):          # at most 100 entries per block (CMap spec)
+        chunk = entries[i:i + 100]
+        out.append(f"{len(chunk)} begin{kind}\n" + "\n".join(chunk) + f"\nend{kind}\n")
+    return "".join(out)
+
+
+def _fix_cmap(cmap: str) -> str:
+    """``cmap`` with the glyph of a space / hyphen reading back as U+0020 /
+    U+002D instead of U+00A0 / U+00AD – only for a character that has no
+    glyph of its own mapped to it (Arial, IPA Gothic: one glyph for both).
+    bfchar entries are rewritten in place; a bfrange that covers the code is
+    split around it (the other codes keep their values)."""
+    chars: list[tuple[int, int, str]] = []          # (code, unicode or -1, original dst hex)
+    for m in _BFCHAR.finditer(cmap):
+        hexes = _HEX.findall(m.group(2))
+        for src, dst in zip(hexes[0::2], hexes[1::2]):
+            chars.append((int(src, 16), int(dst, 16) if len(dst) == 4 else -1, dst))
+    ranges: list[tuple[int, int, str]] = []
+    for m in _BFRANGE.finditer(cmap):
+        for a, b, dst in _RANGE_LINE.findall(m.group(2)):
+            ranges.append((int(a, 16), int(b, 16), dst))
+    width = 4
+    hexes = _HEX.findall(cmap)
+    if hexes:
+        width = max(2, min(len(h) for h in hexes[:8]))
+
+    def maps_to(u: int) -> bool:
+        if any(c[1] == u for c in chars):
+            return True
+        for a, b, dst in ranges:
+            if dst.startswith("<"):
+                d = int(dst[1:-1], 16)
+                if len(dst) == 6 and d <= u <= d + (b - a):
+                    return True
+            elif f"<{u:04x}>" in dst.lower():
+                return True
+        return False
+
+    todo = {wrong: plain for wrong, plain in _SHARED_GLYPHS if maps_to(wrong) and not maps_to(plain)}
+    if not todo:
+        return cmap
+    new_chars = [f"<{c:0{width}x}> <{todo.get(u, u):04x}>" if u in todo else f"<{c:0{width}x}> <{dst}>"
+                 for c, u, dst in chars]
+    new_ranges: list[str] = []
+    for a, b, dst in ranges:
+        if dst.startswith("["):
+            items = _HEX.findall(dst)
+            items = [f"{todo[int(h, 16)]:04x}" if len(h) == 4 and int(h, 16) in todo else h for h in items]
+            new_ranges.append(f"<{a:0{width}x}> <{b:0{width}x}> [" + " ".join(f"<{h}>" for h in items) + "]")
+            continue
+        d = int(dst[1:-1], 16)
+        hits = sorted(a + (w - d) for w in todo if len(dst) == 6 and d <= w <= d + (b - a))
+        start = a
+        for code in hits:
+            if code > start:
+                new_ranges.append(f"<{start:0{width}x}> <{code - 1:0{width}x}> <{d + start - a:04x}>")
+            new_chars.append(f"<{code:0{width}x}> <{todo[d + code - a]:04x}>")
+            start = code + 1
+        if start <= b:
+            new_ranges.append(f"<{start:0{width}x}> <{b:0{width}x}> <{d + start - a:04x}>")
+    first = min([m.start() for m in _BFCHAR.finditer(cmap)] + [m.start() for m in _BFRANGE.finditer(cmap)])
+    rest = _BFRANGE.sub("", _BFCHAR.sub("", cmap[first:]))
+    return cmap[:first] + _blocks("bfchar", new_chars) + _blocks("bfrange", new_ranges) + rest
+
+
+def fix_shared_glyph_unicode(doc: pymupdf.Document) -> int:
+    """Repair the ToUnicode maps of the fonts in ``doc`` (see :func:`_fix_cmap`)
+    so copied / searched text has plain spaces and hyphens. Returns the
+    number of maps changed."""
+    done: set[int] = set()
+    changed = 0
+    for xref in range(1, doc.xref_length()):
+        try:
+            if doc.xref_get_key(xref, "Type")[1] != "/Font":
+                continue
+            kind, val = doc.xref_get_key(xref, "ToUnicode")
+            if kind != "xref":
+                continue
+            tu = int(val.split()[0])
+            if tu in done:
+                continue
+            done.add(tu)
+            cmap = doc.xref_stream(tu).decode("latin-1")
+            fixed = _fix_cmap(cmap)
+        except Exception:
+            continue
+        if fixed != cmap:
+            doc.update_stream(tu, fixed.encode("latin-1"))
+            changed += 1
+    return changed
 
 
 # =============================================================================

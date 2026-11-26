@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import socket
 import struct
 import time
@@ -688,3 +689,52 @@ def test_speed_4k_screenshot_and_50_pages_of_text():
     factor = 2.0 if os.environ.get("CI") else 1.0
     assert t_new < 1.0 * factor and t_insert < 1.0 * factor
     assert t_text < 2.0 * factor
+
+
+# -- fonts that draw space/NBSP and hyphen/soft hyphen with one glyph (Arial on Windows) ----------
+def _shared_glyph_font() -> str | None:
+    import glob
+
+    for root in ("/usr/share/fonts", "C:/Windows/Fonts"):
+        for path in sorted(glob.glob(os.path.join(root, "**", "ipag.ttf"), recursive=True)) + \
+                sorted(glob.glob(os.path.join(root, "arial.ttf"))):
+            f = pymupdf.Font(fontfile=path)
+            if f.has_glyph(0x20) == f.has_glyph(0xA0) and f.has_glyph(0x2D) == f.has_glyph(0xAD):
+                return path
+    return None
+
+
+SHARED_FONT = _shared_glyph_font()
+
+
+@pytest.mark.skipif(not SHARED_FONT, reason="no font sharing the space/NBSP glyph (IPA Gothic / Arial)")
+def test_shared_space_and_hyphen_glyphs_read_back_as_plain_characters(monkeypatch):
+    with open(SHARED_FONT, "rb") as fh:
+        fam = cp._Family("Delt", {(False, False): fh.read()})
+    monkeypatch.setattr(cp, "_local_family", lambda keys: fam)
+    d = open_pdf(cp.text_to_pdf("Første afsnit\n\tTab-indrykket – 25 €"))
+    t = d[0].get_text()
+    assert "Første afsnit" in t and "Tab-indrykket" in t and "\xa0" not in t and "\xad" not in t
+    assert d[0].search_for("Første afsnit") and d[0].search_for("Tab-indrykket")
+    h = open_pdf(cp.html_to_pdf("<p>Første afsnit <b>fed-tekst her</b></p>"))
+    assert "Første afsnit fed-tekst her" in h[0].get_text()
+    pdf = doc_with(pages=1)
+    cp.insert_content(pdf, ClipContent(text="Indsat tekst-stykke"), 1)
+    assert "Indsat tekst-stykke" in pdf.doc[1].get_text()
+
+
+def test_fix_cmap_splits_ranges_and_keeps_other_codes():
+    cmap = ("begincmap\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+            "2 beginbfchar\n<0003> <00a0>\n<0010> <0041>\nendbfchar\n"
+            "2 beginbfrange\n<0020> <0030> <00a8>\n<0040> <0042> [<0061> <00a0> <0063>]\nendbfrange\n"
+            "endcmap\n")
+    fixed = cp._fix_cmap(cmap)
+    entries = dict(re.findall(r"^<([0-9a-f]{4})> <([0-9a-f]{4})>$", fixed, re.MULTILINE))
+    assert entries["0003"] == "0020" and entries["0010"] == "0041"
+    assert entries["0025"] == "002d"                                # 0x20 + (0xad - 0xa8)
+    assert "<0020> <0024> <00a8>" in fixed and "<0026> <0030> <00ae>" in fixed
+    assert "[<0061> <0020> <0063>]" in fixed
+    assert fixed.endswith("endcmap\n") and fixed.count("beginbfrange") == 1
+    # a font with its own space glyph is left alone
+    own = cmap.replace("<0010> <0041>", "<0010> <0020>").replace("<00a8>", "<0041>")
+    assert cp._fix_cmap(own).count("<00a0>") == 2

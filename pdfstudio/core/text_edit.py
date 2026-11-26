@@ -813,7 +813,8 @@ def _strokes(page: pymupdf.Page) -> list[tuple[float, float, float, float, pymup
 def _attach_decorations(page: pymupdf.Page, lines: list[TextLine]) -> None:
     """Mark characters that have an underline / strike-through stroke (left to
     right text): their style gets ``underline`` / ``strike``, and the line
-    remembers the stroke geometry so an edit can remove and redraw it."""
+    remembers the stroke geometry so an edit can remove and redraw it. Only
+    strokes within the line's extent ± max(3 pt, half the size) count."""
     horizontal = [ln for ln in lines if abs(ln.dir[1]) < 1e-3 and ln.dir[0] > 0
                   and len(ln.char_pos) == len(ln.text) == len(ln.char_styles)]
     if not horizontal:
@@ -825,8 +826,14 @@ def _attach_decorations(page: pymupdf.Page, lines: list[TextLine]) -> None:
     for ln in horizontal:
         size = ln.style.size or 10.0
         base = ln.raw_origin[1]
+        # a stroke is the line's own only when it stays within the line's extent
+        # (as pageobjects._decor_paths decides): a rule running far past it – the
+        # line moved onto a long rule, a table's row rule under a label – is not
+        tol = max(3.0, 0.5 * size)
         for x0, x1, y, w, rect in strokes:
             if w > _DECOR_MAX * size or x1 < ln.extent[0] - 1.0 or x0 > ln.extent[1] + 1.0:
+                continue
+            if x0 < ln.extent[0] - tol or x1 > ln.extent[1] + tol:
                 continue
             off = (y - base) / size
             if _UNDERLINE_ZONE[0] <= off <= _UNDERLINE_ZONE[1]:

@@ -639,7 +639,7 @@ def test_a_rule_under_a_heading_is_not_its_underline():
     pdf = PdfDocument.from_bytes(doc.tobytes())
     head = next(o for o in to.list_text(pdf.doc, 0) if o.text == "Overskrift")
     moved = to.move_text(pdf, 0, [head], 0, 100)          # the rule now sits right under it
-    assert moved[0].lines[0].decor_rects                  # (the engine takes it for an underline)
+    assert not moved[0].lines[0].decor_rects              # far longer than the heading: not its underline
     back = to.move_text(pdf, 0, moved, 0, -100)
     assert back[0].text == "Overskrift"
     rules = [d["rect"] for d in pdf.doc[0].get_drawings()]
@@ -947,3 +947,48 @@ def test_free_sequences_are_found_in_any_format(tag):
     assert data[:start] + data[end:] == b"0 g " + other + b"\n1 g"
     assert to._find_segment(data, ((90.0, 175.95, 206.92, 189.57), 43)) is None       # another text
     assert to._find_segment(data, ((90.5, 175.95, 206.92, 189.57), 42)) is None       # another place
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_a_heading_moved_onto_a_long_rule_gets_no_underline(rotation):
+    # the rule (far longer than the heading) lies in the heading's underline zone
+    # after the move: it is not the heading's decoration (as pageobjects._decor_paths)
+    doc = pymupdf.open()
+    pg = doc.new_page()
+    pg.draw_line((56, 302), (538, 302), color=(0.2, 0.5, 0.4), width=0.75)
+    pg.insert_text((72, 120), "Opfølgning på mål", fontname="helv", fontsize=12)
+    w = pymupdf.Font("helv").text_length("Delvis understreget", fontsize=12)
+    pg.insert_text((72, 400), "Delvis understreget og resten ikke", fontname="helv", fontsize=12)
+    pg.draw_line((72, 402), (72 + w, 402), color=(0, 0, 0), width=0.6)      # a real underline
+    if rotation:
+        pg.set_rotation(rotation)
+    pdf = _pdf(doc)
+    head = next(o for o in to.list_text(pdf.doc, 0) if o.text.startswith("Opfølgning"))
+    real = next(o for o in to.list_text(pdf.doc, 0) if o.text.startswith("Delvis"))
+    assert real.lines[0].decor_rects and real.lines[0].char_styles[0].underline
+    assert not real.lines[0].char_styles[-1].underline
+    # the move that puts the heading's baseline 2 pt above the rule, in display space
+    rx, ry = 0, 180                                          # raw: baseline 120 -> 300
+    m = pdf.doc[0].rotation_matrix
+    dx, dy = rx * m.a + ry * m.c, rx * m.b + ry * m.d
+    (moved,) = to.move_text(pdf, 0, [head], dx, dy)
+    ln = moved.lines[0]
+    assert not ln.decor_rects and not ln.decor and not any(st.underline for st in ln.char_styles)
+    real = next(o for o in to.list_text(pdf.doc, 0) if o.text.startswith("Delvis"))
+    assert real.lines[0].decor_rects and real.lines[0].char_styles[0].underline
+
+
+@pytest.mark.skipif(not os.path.exists(CORPUS), reason="corpus not generated")
+@pytest.mark.parametrize("rotation", [0, 90])
+def test_annual_report_heading_moved_onto_its_rule_has_no_decoration(rotation):
+    from pdfstudio.core import pageobjects as po
+    from pdfstudio.core.document import write_bytes
+
+    d = pymupdf.open(CORPUS)
+    for p in d:
+        p.set_rotation(rotation)
+    pdf = PdfDocument.from_bytes(write_bytes(d))
+    obj = next(o for o in po.page_objects(pdf.doc, 4) if o.kind == "text" and o.ref.text.startswith("Opfølgning"))
+    (moved,) = po.move_objects(pdf, 4, [obj], 30, 20)
+    t = to.find_text(pdf.doc, 4, moved.ref)
+    assert all(not ln.decor_rects and not any(st.underline or st.strike for st in ln.char_styles) for ln in t.lines)

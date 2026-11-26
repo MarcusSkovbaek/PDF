@@ -32,10 +32,12 @@ API contract (binding – the UI codes against it; see
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from .fonts import SpanStyle
+from .images import SUPPORTED_IMAGE_EXTENSIONS
 
 #: kinds in priority order (U6)
 KINDS = ("folio", "files", "pdf", "image", "html", "text")
@@ -44,7 +46,7 @@ KINDS = ("folio", "files", "pdf", "image", "html", "text")
 A4 = (595.28, 841.89)
 
 #: files that can be used when copied in Explorer (U2): PDFs + images.py's image types
-SUPPORTED_FILE_EXTENSIONS: tuple[str, ...] = (".pdf",)   # filled in with the image types by the implementation
+SUPPORTED_FILE_EXTENSIONS: tuple[str, ...] = (".pdf",) + tuple(SUPPORTED_IMAGE_EXTENSIONS)
 
 
 @dataclass
@@ -69,11 +71,19 @@ class ClipContent:
 
     def kinds(self) -> list[str]:
         """The usable kinds present, in priority order (:data:`KINDS`)."""
-        raise NotImplementedError
+        have = {
+            "folio": self.folio is not None,
+            "files": bool(usable_files(self.files)[0]),
+            "pdf": bool(self.pdf),
+            "image": bool(self.images),
+            "html": bool(self.html and self.html.strip()),
+            "text": bool(self.text and self.text.strip()),
+        }
+        return [k for k in KINDS if have[k]]
 
     def is_empty(self) -> bool:
         """True when nothing in it can become a page."""
-        raise NotImplementedError
+        return not self.kinds()
 
 
 @dataclass
@@ -126,12 +136,22 @@ class ClipInsert:
 def usable_files(paths: Sequence[str]) -> tuple[list[str], list[str]]:
     """Split copied file paths into usable ones (existing PDFs and images, in
     order) and skipped ones (file names, for the message)."""
-    raise NotImplementedError
+    usable: list[str] = []
+    skipped: list[str] = []
+    for p in paths or ():
+        if os.path.isfile(p) and os.path.splitext(p)[1].lower() in SUPPORTED_FILE_EXTENSIONS:
+            usable.append(p)
+        else:
+            skipped.append(os.path.basename(p.rstrip("/\\")) or p)
+    return usable, skipped
 
 
 def chosen_kind(content: ClipContent, prefer: str | None = None) -> str | None:
     """The kind :func:`content_to_pdf` would use (``prefer`` when present)."""
-    raise NotImplementedError
+    kinds = content.kinds()
+    if prefer in kinds:
+        return prefer
+    return kinds[0] if kinds else None
 
 
 def text_to_pdf(text: str, *, page_size: tuple[float, float] = A4, margin_mm: float = 20.0,

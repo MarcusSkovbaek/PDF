@@ -3,7 +3,12 @@
 ``PdfDocument`` wraps a :class:`pymupdf.Document` and adds:
 
 * undo/redo (``edit()`` context manager + :class:`History`)
-* dirty tracking and atomic saving
+* dirty tracking and atomic saving – split into :meth:`PdfDocument.prepare_save`
+  (serialise, main thread), :func:`write_atomic` (pure file I/O, safe in a
+  worker thread) and :meth:`PdfDocument.finish_save`, so the UI can write in
+  the background; :meth:`PdfDocument.save` does all three
+* password protection that survives saving (:class:`Security`)
+* detection of changes made to the file by other programs
 * a tiny observer mechanism so the UI can react to changes without the core
   depending on Qt.
 
@@ -19,6 +24,7 @@ RULES FOR FEATURE CODE
 from __future__ import annotations
 
 import os
+import secrets
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -57,6 +63,154 @@ class ChangeEvent:
 
 Listener = Callable[[ChangeEvent], None]
 
+#: PDF permission bits meaning "everything allowed"
+ALL_PERMISSIONS = -1
+#: write PDFs into a native MuPDF buffer (see :func:`write_bytes`)
+NATIVE_WRITE = True
+
+
+def write_bytes(doc: pymupdf.Document, *, garbage: int = 0, clean: bool = False, deflate: bool = False,
+                deflate_images: bool = False, deflate_fonts: bool = False,
+                encryption: int = pymupdf.PDF_ENCRYPT_NONE, permissions: int = ALL_PERMISSIONS,
+                owner_pw: str | None = None, user_pw: str | None = None, use_objstms: bool = False) -> bytes:
+    """``doc.tobytes(...)`` with the same result, an order of magnitude
+    faster on big files: PyMuPDF writes to bytes through a Python callback
+    per chunk (450 000 calls for a 58-page report, ~110 ms); here MuPDF
+    writes into a native buffer (~8 ms). Falls back to ``tobytes`` when the
+    PyMuPDF internals it uses are not there."""
+    kw = dict(garbage=garbage, clean=clean, deflate=deflate, deflate_images=deflate_images,
+              deflate_fonts=deflate_fonts, encryption=encryption, permissions=permissions,
+              owner_pw=owner_pw, user_pw=user_pw, use_objstms=int(bool(use_objstms)))
+    if not NATIVE_WRITE:
+        return doc.tobytes(**kw)
+    try:
+        mupdf = pymupdf.mupdf
+        pdf = pymupdf._as_pdf_document(doc)
+        clean_embedded, ensure_id = pymupdf.JM_embedded_clean, pymupdf.JM_ensure_identity
+    except AttributeError:
+        return doc.tobytes(**kw)
+    if doc.is_closed or doc.is_encrypted:
+        raise ValueError("document closed or encrypted")
+    if doc.page_count < 1:
+        raise ValueError("cannot save with zero pages")
+    opts = mupdf.PdfWriteOptions()
+    opts.do_garbage = garbage
+    opts.do_clean = opts.do_sanitize = int(bool(clean))
+    opts.do_compress = int(bool(deflate))
+    opts.do_compress_images = int(bool(deflate_images))
+    opts.do_compress_fonts = int(bool(deflate_fonts))
+    opts.do_encrypt = encryption
+    opts.permissions = permissions
+    if owner_pw is not None:
+        opts.opwd_utf8_set_value(owner_pw)
+    elif user_pw is not None:
+        opts.opwd_utf8_set_value(user_pw)
+    if user_pw is not None:
+        opts.upwd_utf8_set_value(user_pw)
+    opts.do_preserve_metadata = 1
+    opts.do_use_objstms = int(bool(use_objstms))
+    pdf.m_internal.resynth_required = 0
+    clean_embedded(pdf)
+    ensure_id(pdf)
+    buf = mupdf.FzBuffer(1 << 16)
+    out = mupdf.FzOutput(buf)
+    mupdf.pdf_write_document(pdf, out, opts)
+    out.fz_close_output()
+    return buf.fz_buffer_extract()
+
+
+@dataclass(frozen=True)
+class Security:
+    """Password protection to write when saving (AES-256).
+
+    ``user_pw`` is needed to open the file ("" = opens without a password,
+    e.g. a file that only restricts printing/copying). ``owner_pw`` unlocks
+    all rights; ``""`` means unknown – a random one is used so the
+    restrictions in ``permissions`` stay in force."""
+
+    user_pw: str = ""
+    owner_pw: str = ""
+    permissions: int = ALL_PERMISSIONS
+
+    @property
+    def needs_password(self) -> bool:
+        return bool(self.user_pw)
+
+    def save_kwargs(self) -> dict:
+        return {
+            "encryption": pymupdf.PDF_ENCRYPT_AES_256,
+            "user_pw": self.user_pw,
+            "owner_pw": self.owner_pw or secrets.token_hex(16),
+            "permissions": self.permissions,
+        }
+
+
+@dataclass(frozen=True)
+class SaveJob:
+    """Serialised document, ready to be written by :func:`write_atomic`."""
+
+    data: bytes
+    revision: int
+
+
+def _stat(path: str | None) -> tuple[int, int] | None:
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def write_atomic(path: str, data: bytes) -> str:
+    """Write ``data`` to ``path`` via a temp file in the same folder and an
+    atomic replace (the old file stays intact if anything fails). Touches
+    no document – safe to call from a worker thread. Returns the path."""
+    target = os.path.abspath(path)
+    folder = os.path.dirname(target) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".folio-", suffix=".pdf", dir=folder)
+    try:
+        try:  # keep the file's permissions (mkstemp makes it private)
+            os.chmod(tmp, os.stat(target).st_mode & 0o7777)
+        except OSError:
+            pass
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException as exc:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        if isinstance(exc, Exception):
+            raise DocumentError(str(exc)) from exc
+        raise
+    return target
+
+
+def check_writable(path: str) -> str | None:
+    """Why ``path`` cannot be saved to, or ``None``: ``"readonly"`` (file is
+    write protected), ``"locked"`` (open in another program – Windows),
+    ``"folder"`` (no write access to the folder)."""
+    target = os.path.abspath(path)
+    folder = os.path.dirname(target) or "."
+    if not os.path.isdir(folder) or not os.access(folder, os.W_OK):
+        return "folder"
+    if os.path.exists(target):
+        if not os.access(target, os.W_OK):
+            return "readonly"
+        try:
+            with open(target, "r+b"):
+                pass
+        except PermissionError:
+            return "locked"
+        except OSError:
+            return "locked"
+    return None
+
 
 class PdfDocument:
     def __init__(self, doc: pymupdf.Document, path: str | None = None, *, title: str | None = None):
@@ -67,6 +221,11 @@ class PdfDocument:
         self._dirty = False
         self._listeners: list[Listener] = []
         self._edit_depth = 0
+        #: increases with every change event – a cheap cache key for views
+        self.revision = 0
+        #: password protection written on save (``None``: none)
+        self.security: Security | None = None
+        self._disk_stamp = _stat(path)
 
     # -- construction ----------------------------------------------------
     @classmethod
@@ -100,14 +259,28 @@ class PdfDocument:
             if password is None:
                 doc.close()
                 raise PasswordRequired(path)
-            if not doc.authenticate(password):
+        security = None
+        if doc.needs_pass:
+            level = doc.authenticate(password)
+            if not level:
                 doc.close()
                 raise InvalidPassword(path)
-            # Re-open decrypted in memory so saving/undo works uniformly.
-            data = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE)
+            # 2 = user password, 4 = owner password, 6 = both are this one.
+            # Opened with the owner password only, the user password is
+            # unknown: the one typed protects the saved file instead.
+            security = Security(user_pw=password, owner_pw=password if level & 4 else "",
+                                permissions=doc.permissions)
+        elif (doc.metadata or {}).get("encryption"):
+            security = Security(permissions=doc.permissions)  # restrictions without an open password
+        if security is not None:
+            # Re-open decrypted in memory so saving/undo works uniformly;
+            # the protection is put back on save.
+            data = write_bytes(doc)
             doc.close()
             doc = pymupdf.open("pdf", data)
-        return cls(doc, os.path.abspath(path))
+        pdf = cls(doc, os.path.abspath(path))
+        pdf.security = security
+        return pdf
 
     @classmethod
     def from_bytes(cls, data: bytes, title: str = "Unavngivet.pdf") -> "PdfDocument":
@@ -156,12 +329,13 @@ class PdfDocument:
         return unsubscribe
 
     def _emit(self, event: ChangeEvent) -> None:
+        self.revision += 1
         for cb in list(self._listeners):
             cb(event)
 
     # -- editing ---------------------------------------------------------
     def _serialize(self) -> bytes:
-        return self._doc.tobytes(garbage=0, deflate=False)
+        return write_bytes(self._doc)
 
     def _replace(self, data: bytes) -> None:
         old = self._doc
@@ -169,12 +343,14 @@ class PdfDocument:
         old.close()
 
     @contextmanager
-    def edit(self, label: str, kind: str = CONTENT, pages: Iterator[int] | tuple[int, ...] | None = None):
+    def edit(self, label: str, kind: str = CONTENT, pages: Iterator[int] | tuple[int, ...] | None = None, *,
+             merge: object = None):
         """Run a mutation as one undoable step.
 
         Nested ``edit`` blocks are merged into the outermost one. If the body
         raises, the document is restored to its previous state and the
-        exception propagates.
+        exception propagates. Consecutive edits with the same ``merge`` token
+        (any object, e.g. one per editing session) form a single undo step.
         """
         if self._edit_depth:
             self._edit_depth += 1
@@ -193,7 +369,7 @@ class PdfDocument:
             self._emit(ChangeEvent(RELOADED, None, label))
             raise
         self._edit_depth = 0
-        self.history.push(label, before)
+        self.history.push(label, before, merge)
         self._dirty = True
         self._emit(ChangeEvent(kind, tuple(pages) if pages is not None else None, label))
 
@@ -216,34 +392,91 @@ class PdfDocument:
         return True
 
     # -- persistence -----------------------------------------------------
+    def set_security(self, security: Security | None) -> None:
+        """Change the password protection (applies when saving)."""
+        if security == self.security:
+            return
+        self.security = security
+        self._dirty = True
+        self._emit(ChangeEvent(CONTENT, (), ""))
+
+    def changed_on_disk(self) -> bool:
+        """The file was changed (or removed) by something else since it was
+        opened or last saved here."""
+        return bool(self.path) and self._disk_stamp is not None and _stat(self.path) != self._disk_stamp
+
+    def has_signatures(self) -> bool:
+        """The document contains digital signatures (saving changes breaks them)."""
+        try:
+            if self._doc.get_sigflags() > 0:
+                return True
+        except Exception:
+            pass
+        for page in self._doc:
+            for w in page.widgets() or []:
+                if w.field_type == pymupdf.PDF_WIDGET_TYPE_SIGNATURE and w.field_value:
+                    return True
+        return False
+
+    def serialize(self, *, compact: bool = True, protect: bool = True) -> bytes:
+        """The PDF as saved: fonts subset, garbage collected and compressed
+        (``compact``), encrypted when protected (``protect``)."""
+        kw: dict = {}
+        if protect and self.security is not None:
+            kw.update(self.security.save_kwargs())
+        if compact:
+            self._subset_fonts()
+            return write_bytes(self._doc, garbage=3, deflate=True, **kw)
+        return write_bytes(self._doc, **kw)
+
+    def prepare_save(self) -> SaveJob:
+        """Serialise for saving (must run on the thread that owns the doc)."""
+        try:
+            return SaveJob(self.serialize(), self.revision)
+        except Exception as exc:  # pymupdf raises various types
+            raise DocumentError(str(exc)) from exc
+
+    def finish_save(self, path: str, job: SaveJob) -> None:
+        """Record a successful write of ``job`` to ``path``. Changes made
+        while it was being written keep the document dirty."""
+        self.path = os.path.abspath(path)
+        self._disk_stamp = _stat(self.path)
+        if self.revision == job.revision:
+            self._dirty = False
+        self._emit(ChangeEvent(SAVED, None, ""))
+
     def save(self, path: str | None = None) -> str:
         """Save atomically (temp file + replace). Returns the path written."""
         target = os.path.abspath(path or self.path or "")
         if not target or target == os.path.abspath(""):
             raise DocumentError("Ingen filsti angivet")
-        folder = os.path.dirname(target) or "."
-        fd, tmp = tempfile.mkstemp(prefix=".folio-", suffix=".pdf", dir=folder)
-        os.close(fd)
-        try:
-            self._doc.save(tmp, garbage=3, deflate=True, clean=False)
-            os.replace(tmp, target)
-        except Exception as exc:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise DocumentError(str(exc)) from exc
-        # Re-open from the saved bytes so the file on disk is not kept locked
-        # (important on Windows) and in-memory state matches the file.
-        with open(target, "rb") as fh:
-            self._replace(fh.read())
-        self.path = target
-        self._dirty = False
-        self._emit(ChangeEvent(SAVED, None, ""))
+        job = self.prepare_save()
+        write_atomic(target, job.data)
+        self.finish_save(target, job)
         return target
 
+    def save_copy(self, path: str) -> str:
+        """Write a copy; the document keeps its path and unsaved state."""
+        return write_atomic(path, self.prepare_save().data)
+
+    def recovery_bytes(self) -> bytes:
+        """Quick serialisation for crash recovery (no compaction, protected
+        like the file would be)."""
+        return self.serialize(compact=False)
+
+    def _subset_fonts(self) -> None:
+        """Keep only the glyphs actually used of every embedded font. Edited
+        text may embed a whole system font (hundreds of KB); Word/Acrobat
+        output is subset too. Best effort – a font that cannot be subset is
+        simply kept as is."""
+        try:
+            self._doc.subset_fonts()
+        except Exception:
+            pass
+
     def to_bytes(self) -> bytes:
-        return self._doc.tobytes(garbage=3, deflate=True)
+        """Unprotected, compacted PDF bytes (for exports and copies)."""
+        return self.serialize(protect=False)
 
     def close(self) -> None:
         self._listeners.clear()

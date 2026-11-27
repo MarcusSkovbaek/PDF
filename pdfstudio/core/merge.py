@@ -13,7 +13,7 @@ from typing import Sequence
 import pymupdf
 
 from ..i18n import tr
-from .document import DocumentError, InvalidPassword, PasswordRequired
+from .document import DocumentError, InvalidPassword, PasswordRequired, write_bytes
 from .images import ImagePageOptions, images_to_pdf, is_image_file
 
 
@@ -80,7 +80,7 @@ def open_source(
             doc.close()
             raise InvalidPassword(name)
         # Decrypt so pages can be copied / the result saved without the key.
-        plain = doc.tobytes(encryption=pymupdf.PDF_ENCRYPT_NONE)
+        plain = write_bytes(doc)
         doc.close()
         doc = pymupdf.open("pdf", plain)
     if doc.page_count == 0:
@@ -160,7 +160,7 @@ def merge_files(
             raise ValueError(tr("core.err.no_pages"))
         if toc:
             out.set_toc(toc)
-        return out.tobytes(garbage=3, deflate=True)
+        return write_bytes(out, garbage=3, deflate=True)
     finally:
         out.close()
 

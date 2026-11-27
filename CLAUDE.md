@@ -52,6 +52,18 @@ pdfstudio/
     fonts.py                  font resolution (embedded -> system -> base14)
     text_edit.py              edit existing text preserving its format
     insert.py                 new text boxes / images in document style
+    textsel.py                character-precise text selection (Word/Acrobat-like)
+    comments.py               comment threads: replies, status, author, summary
+    identity.py               comment author (Windows display name), PDF dates
+    replace.py                search & replace in text blocks
+    flow.py                   text surfaces ("stories"), Word-like flow over columns/pages, new pages
+    running.py                running headers/footers on new pages, page-number update ("Side 13 af 58")
+    recovery.py               autosave / crash-recovery store (local folder)
+    optimize.py               "Reducér filstørrelse"
+    graphics.py               vector paths in the page content: list/group/classify, move, scale, style, restack, delete
+    textobjects.py            text blocks as movable objects (glyph for glyph), /Free = standalone after a move
+    pageobjects.py            facade: images + text + graphics as one selection ("Markér objekt"), object clipboard
+    clipboard_pdf.py          new PDF / inserted pages from clipboard content (images, files, PDF, HTML, text, Folio clip)
   ui/
     app.py                    QApplication setup, theme, run()
     actions.py                ActionRegistry (id -> QAction, palette)
@@ -60,8 +72,10 @@ pdfstudio/
     viewer/ page_view.py      continuous page view (QGraphicsView)
             tools/base.py     Tool interface + ToolRegistry
             tools/*.py        one module per tool
-    panels/                   thumbnails, properties inspector, search, outline
-    dialogs/                  merge, images->pdf, split, password, ...
+    panels/                   thumbnails, properties inspector, search, outline, comments
+    saving.py                 SaveController: background save, autosave, recovery, conflicts
+    clipboard_source.py       reads the system clipboard into a core ClipContent (cheap availability check)
+    dialogs/                  merge, images->pdf, split, password, security, reduce, settings, find/replace, ...
     widgets/                  toast, color button, segmented control, ...
 tests/                        pytest; core tests + offscreen UI smoke tests
 packaging/                    PyInstaller spec + Windows build scripts
@@ -105,16 +119,74 @@ MARKUP_KINDS = ("highlight", "underline", "strikeout", "squiggly")
 SHAPE_KINDS = ("rect", "ellipse", "line", "arrow")
 @dataclass class AnnotInfo: xref: int; kind: str; rect: pymupdf.Rect; color; fill; opacity: float; width: float; contents: str
 def add_text_markup(pdf, page, kind, rect, color, opacity=1.0) -> int | None   # marks words inside rect; xref or None if no words
+AnnotRef = tuple[int, int]                          # (page, xref)
+Selection = dict[int, list[Rect]]                   # page -> line rects (display), e.g. textsel.selection_rects
+def add_markup(pdf, kind, selection, color, opacity=1.0, *, contents="", label=None) -> list[AnnotRef]   # one annot per page, one undo step
+def stamp_new(annot) -> None                        # /T author, CreationDate, M, /NM – call on every new annotation
 def add_note(pdf, page, point, text, color) -> int
 def add_ink(pdf, page, strokes, color, width=2.0, opacity=1.0) -> int          # strokes: list[list[(x, y)]]
 def add_shape(pdf, page, kind, p1, p2, stroke, fill=None, width=2.0, opacity=1.0) -> int
 def list_annotations(doc, page) -> list[AnnotInfo]
 def annotation_at(doc, page, point) -> AnnotInfo | None
 def update_annotation(pdf, page, xref, **props) -> None   # color, fill, opacity, width, contents, rect
-def delete_annotation(pdf, page, xref) -> None
+def delete_annotation(pdf, page, xref) -> None             # deletes the whole reply thread too
+# list_annotations / annotation_at skip thread children (replies, state annots, /IRT carets)
+
+# textsel.py  (character indices into PageText.text are the carets)
+class PageText: text: str; glyphs; lines; def text_between(a, b, line_sep="\n") -> str
+def page_text(doc, page) -> PageText                     # cached per page content
+def hit(pt, point) -> int | None; char_at(pt, point, pad=1.0) -> int | None
+def word_bounds(pt, i) / line_bounds(pt, i) / paragraph_bounds(pt, i) -> tuple[int, int]
+def selection_rects(pt, a, b) -> list[Rect]              # one rect per line, display space
+def text_in_rects(pt, rects) -> str                      # rejoins hyphenation
+
+# comments.py  (Acrobat-compatible: replies = hidden Text annots with /IRT;
+#  status = state annots /StateModel Review|Marked, newest /M wins)
+REVIEW_STATES = ("none", "accepted", "rejected", "cancelled", "completed")
+@dataclass class Reply: xref; author; text; created; modified
+@dataclass class Comment: page; xref; kind; author; text; quote; color; rect; created; modified;
+                          status; resolved; replies: list[Reply]; members   # .key, .last_activity, .matches(q)
+def comments(doc, pages=None) -> list[Comment]; comment(doc, page, xref) -> Comment | None
+def add_comment(pdf, selection, text, color, *, kind="highlight", opacity=1.0) -> list[AnnotRef]
+def add_reply(pdf, page, xref, text) -> int; edit_reply(pdf, page, xref, text); delete_reply(pdf, page, xref)
+def set_status(pdf, page, xref, status); set_resolved(pdf, page, xref, resolved)
+def add_insert_text(pdf, page, rect, text, color) -> int                   # Caret
+def add_replace_text(pdf, page, line_rects, replacement, color, caret=None) -> int   # StrikeOut + grouped Caret
+def caret_rect(pt, caret) -> Rect | None
+def summary_pdf(doc, title="") -> bytes                                    # "Opsummér kommentarer"
+
+# identity.py
+def current_author() -> str                  # Windows display name (GetUserNameExW), fallback login name
+def set_author(name | None); pdf_date(when=None) -> str; parse_pdf_date(s) -> datetime | None
+
+# replace.py
+@dataclass class Match: page; block; start; end; text; rects   # block = index into text_blocks
+def find_matches(doc, query, *, case_sensitive=False, whole_words=False, pages=None) -> list[Match]
+def replace_matches(pdf, matches, replacement) -> int          # one undo step, keeps each block's style
+def replace_all(pdf, query, replacement, **opts) -> int
+
+# recovery.py   (%LOCALAPPDATA%\Folio PDF\Gendannelse – local only)
+class RecoveryStore(folder=None): new_id(); write(id, data, *, original_path, title, protected);
+    remove(id); orphans() -> list[RecoveryEntry]; adopt(entry); discard(entry); close()
+
+# optimize.py
+QUALITY = {"high": (300 dpi, q), "medium": (150, q), "low": (96, q)}
+@dataclass class ReduceOptions: images: str | None = "medium"; strip_metadata=False; strip_authors=False
+def reduce_size(pdf, options=None) -> ReduceResult   # .data, .before, .after, .saved_fraction; doc unchanged
+
+# document.py – saving
+@dataclass class Security: user_pw=""; owner_pw=""; permissions=ALL_PERMISSIONS   # AES-256 on save
+PdfDocument.security / set_security(sec | None)      # set on open from the file's encryption
+PdfDocument.revision                                  # bumps on every change
+prepare_save() -> SaveJob (UI thread, fast) ; finish_save(path, job) (after write_atomic in a worker)
+save(path=None) / save_copy(path) / recovery_bytes() / to_bytes() (unprotected)
+changed_on_disk() -> bool ; has_signatures() -> bool
+def write_atomic(path, data) -> str ; def check_writable(path) -> str | None (error text)
+def write_bytes(doc, **tobytes_opts) -> bytes        # use instead of doc.tobytes(): same bytes, ~10x faster
 
 # fonts.py
 @dataclass class SpanStyle: font: str; size: float; color: tuple; bold: bool; italic: bool; serif: bool; mono: bool
+                           underline: bool = False; strike: bool = False
 @dataclass class FontChoice: font: pymupdf.Font; name: str; source: str   # "embedded"|"system"|"builtin"
 def resolve_font(doc, page_index, style: SpanStyle, text: str) -> FontChoice   # must cover all glyphs of text
 def available_families() -> list[str]                    # for the font picker (base14 + local system fonts)
@@ -126,12 +198,114 @@ def qt_family_hint(style: SpanStyle) -> str              # good on-screen family
     text -> str (lines joined by "\n")
 def text_blocks(doc, page) -> list[TextBlock]
 def block_at(doc, page, point) -> TextBlock | None
-def replace_block_text(pdf, block, new_text, style: SpanStyle | None = None) -> None   # removes old text only (keeps images/vector art), writes new text in the same font/size/color at the same positions
+def replace_block_text(pdf, block, new_text, style: SpanStyle | None = None, *,
+                       formats=None, align=None, line_spacing=None, reflow=True) -> EditResult
+    # removes old text only (keeps images/vector art), writes new text in the same font/size/color at the same
+    # positions. formats = [(start, end, {"bold"|"italic"|"underline"|"strike"|"color"|"size"|"font": v})];
+    # align "left"|"center"|"right"|"justify"; line_spacing = baseline distance / size; reflow moves text below
+@dataclass class EditResult: moved: int; overflow: float; substitutions: list   # overflow pt > 0 → overlaps
+def layout_info(doc, block, *, align=None, line_spacing=None) -> LayoutInfo  # align, wrap_width, justified, soft_breaks, line_spacing, frame
+def fit_scale(doc, block, new_text, style=None, **same) -> float             # size factor that fits ("Formindsk")
+def is_list_bullet(block) -> bool ; marker_end(text) -> int                  # list markers "•", "1.", "a)"
+# text_blocks is cached per page content hash – never mutate returned blocks
+def warm_page(doc, page) -> None                     # precompute blocks + font proofs (UI calls it when idle)
+
+# flow.py  (a page = stories: body columns "flow" + standalone "single" texts; display coords)
+@dataclass class Piece: block; text; soft; layout; cont_prev; cont_next; bullet   # one paragraph
+@dataclass class Story: page; kind "flow"|"single"; pieces; lo; hi; dir; rect; role  # role body|header|footer|cell|caption|box|figure|rotated|wide
+@dataclass class Edit: piece (index | None = new); text; like; formats; align; line_spacing; style
+def page_stories(doc, page) -> list[Story]; story_at(doc, page, point) -> (Story, piece) | None   # cached per page content
+def apply_story(pdf, story, edits, *, merge=None) -> FlowResult   # one undo step (merge token joins a session)
+    # lays the column out line by line into frames on this and the next pages (type area from the
+    # neighbour pages, around images/figures/tables, chapter starts keep their page, widow/orphan control),
+    # new pages after the last one (header/footer copied, page numbers renumbered), pulls text back and
+    # removes empty Folio pages; only changed/moved lines are rewritten
+@dataclass class FlowResult: pages; inserted; removed; renumbered; overflow; substitutions; locate(edit, offset) -> (page, (x, y))
+def column_limits(doc, story) -> Limits(area, obstacles)     # where the column's text may go on its page
+def render_without(doc, story, zoom, *, clip=None, alpha=False) -> Pixmap ; prepare_without(doc, story)  # backdrop
+# markers in page /PieceInfo/FolioPDF/Private: /Cont [x y ...] continued pieces, /Inserted, /Running [rects]
+
+# running.py
+def copy_running(doc, src, dst, lines) -> list[Rect]       # header/footer lines, rules, logos onto a new page
+def number_lines(doc, page) -> list[NumberLine]            # page numbers in the top/bottom band
+def renumber(doc, origin, old_count, *, template=None) -> list[int]   # inside pdf.edit; origin[p] = old index | None
 
 # insert.py
 def document_text_style(doc) -> SpanStyle                # dominant body style – default for new text
-def add_text_box(pdf, page, rect, text, style: SpanStyle, align="left") -> None
+def add_text_box(pdf, page, rect, text, style: SpanStyle, align="left", *, formats=None) -> None
 def add_image(pdf, page, rect, image: str | bytes, keep_aspect=True) -> None
+
+# graphics.py  (painted paths edited in the content stream: a move inserts/rewrites ONE cm; scale rewrites
+#  coordinates so stroke widths stay; everything else byte-identical, except that the FIRST edit of an object
+#  wraps its paths in /FolioGroup <</G n>> BDC … EMC – a fixed group that never absorbs or joins neighbours.
+#  Pasted content sits in /FolioPaste BMC … EMC (its own segment). Marked content survives MuPDF's filter.)
+KEEP                                                     # "leave unchanged" sentinel
+@dataclass class GraphicObject: page; index; paths: tuple; rect; kind "shape"|"line"|"background"|"template"|"table";
+                                stroke; fill; width; selectable; editable; in_form; items; key
+def list_graphics(doc, page, *, all_items=False) -> list[GraphicObject]   # selectable groups; all_items: + background/
+                                                         # template/table paths, each its own object (Alt). Cached
+def graphic_at(doc, page, point, *, alt=False, tolerance=2.0) -> GraphicObject | None   # topmost; alt = deep select:
+                                                         # the topmost single path (also out of a group), backgrounds too
+def graphics_in(doc, page, rect, *, alt=False) -> list[GraphicObject] ; find_graphic(doc, page, obj) -> GraphicObject | None
+def move_graphics(pdf, page, objs, dx, dy, *, merge=False) -> list[GraphicObject]
+def transform_graphics(pdf, page, objs, matrix, *, keep_stroke=True, label=None, merge=False) -> list[GraphicObject]
+def scale_graphics(pdf, page, objs, old_rect, new_rect) -> list[GraphicObject]   # stroke width kept (O8)
+def set_graphic_style(pdf, page, objs, *, stroke=KEEP, fill=KEEP, width=None) -> list[GraphicObject]  # None removes
+def restack_graphics(pdf, page, objs, *, front=True) -> list[GraphicObject]
+def delete_graphics(pdf, page, objs) ; delete_graphics_doc(doc, page, objs)   # _doc: no undo (throw-away copies)
+def render_without_graphics(doc, page, objs, zoom, *, clip=None) -> Pixmap
+def strip_page_except(doc, page, *, keep_paths=(), keep_images=())   # clipboard: remove every other path/image/form
+# objects.py (images) also has restack_image(pdf, page, target, *, front=True) -> ImageObject
+
+# textobjects.py  (one object per paragraph of a column / standalone text; moved = removed + rewritten glyph for
+#  glyph with the document's fonts; a moved block becomes a "free" single story (O17))
+@dataclass class TextObject: page; rect; lines; text; story_kind "flow"|"single"; role; free: bool; key  # .origin (raw)
+def list_text(doc, page) -> list[TextObject]             # cached per page content + markers
+def text_at(doc, page, point, *, tolerance=1.0) -> TextObject | None   # point on a line box
+def text_in(doc, page, rect) -> list[TextObject] ; find_text(doc, page, obj) -> TextObject | None
+def move_text(pdf, page, objs, dx, dy, *, merge=False) -> list[TextObject]   # kept on the page
+def delete_text(pdf, page, objs) ; delete_text_doc(doc, page, objs) ; strip_text_except(doc, page, keep)
+def set_text_width(pdf, page, obj, width) -> TextObject  # O9: re-wrapped, start edge kept
+def restack_text(pdf, page, objs, *, front=True) -> list[TextObject]
+
+# pageobjects.py  (facade for "Markér objekt": every mutation = ONE pdf.edit wrapping the engines' calls;
+#  returns the objects re-found, in input order)
+KEEP                                                     # re-exported from graphics
+@dataclass class PageObject: kind "image"|"text"|"graphic"; page; rect; ref; key   # key = (kind,) + ref.key
+def page_objects(doc, page, *, alt=False) -> list[PageObject]   # reading order; editable only; text underline
+                                                         # strokes belong to their text
+def object_at(doc, page, point, *, alt=False) -> PageObject | None   # text line boxes first, then the smallest
+                                                         # graphic/image under the point; alt: + background, deep select
+def objects_in(doc, page, rect, *, alt=False) -> list[PageObject]    # completely inside (rubber band)
+def contents_of(doc, page, box) -> list[PageObject]      # O4: objects inside a box graphic
+def find_again(doc, page, obj) -> PageObject | None
+def move_objects(pdf, page, objs, dx, dy, *, merge=False) -> list[PageObject]   # graphics+images, then text
+def delete_objects(pdf, page, objs) -> None
+def scale_objects(pdf, page, objs, old_rect, new_rect) -> list[PageObject]      # graphics + images; text: ValueError
+def set_text_width(pdf, page, obj, width) -> PageObject
+def set_style(pdf, page, objs, *, stroke=KEEP, fill=KEEP, width=None) -> list[PageObject]   # graphics only
+def restack(pdf, page, objs, *, front=True) -> list[PageObject]   # within the selection: graphics < images < text
+def render_without(doc, page, objs, zoom, *, clip=None) -> Pixmap  # the page behind a dragged selection
+def render_only(doc, page, objs, zoom, *, clip=None) -> Pixmap     # the selection alone, transparent elsewhere
+@dataclass class Clip: data: bytes; rect: Rect; page_size: (w, h)  # a one-page PDF holding only the objects
+def copy_objects(doc, page, objs) -> Clip
+def paste_clip(pdf, page, clip, *, offset=(0, 0)) -> list[PageObject]   # at clip.rect + offset (target display space,
+                          # any page size / /Rotate / document); the form is flattened into the page content
+                          # (resources merged, names renamed); pasted text is "free"
+def duplicate_objects(pdf, page, objs, offset=(10, 10)) -> list[PageObject]
+
+# clipboard_pdf.py  (spec docs/kravspec-udklipsholder.md; priority folio > files > pdf > image > html > text)
+@dataclass class ClipContent: images: list[bytes]; files: list[str]; pdf: bytes | None; html: str | None;
+                              text: str | None; folio: Clip | None      # .kinds() .is_empty()
+@dataclass class ClipOptions: page_size="image"|"A4"|"Letter"|"match"; margin_mm=10.0; text_page=None;
+                              text_style: SpanStyle | None = None; prefer: str | None = None   # prefer "text" = use the text
+def content_to_pdf(content, options=None, *, passwords=None) -> ClipResult    # .data .kind .pages .skipped .alternative
+def insert_content(pdf, content, at, options=None, *, passwords=None) -> ClipInsert   # ONE pdf.edit; "match" = neighbour
+                          # page's paper size, orientation follows the image; text in the document's body style
+def text_to_pdf(text, *, page_size=A4, margin_mm=20.0, style=None) -> bytes   # Story + embedded local font
+def html_to_pdf(html, *, page_size=A4, margin_mm=20.0, style=None) -> bytes   # CF_HTML aware, sanitized, nothing fetched
+def usable_files(paths) -> (usable, skipped) ; chosen_kind(content, prefer=None) -> str | None
+# PNGs are embedded pixel for pixel (own embedder: no premultiplied alpha); "image" = 96 dpi page, no margin
 ```
 
 ## UI contract
@@ -151,8 +325,40 @@ def add_image(pdf, page, rect, image: str | bytes, keep_aspect=True) -> None
   `add_overlay(index, item)` (item in display coords, auto-scaled),
   `set_search_hits(hits)`, signals `currentPageChanged(int)`, `zoomChanged(float)`.
   Renders lazily (only visible pages) with an LRU pixmap cache, crisp on HiDPI.
+* `ui/viewer/text_selection.py` – `TextSelection` (character-precise drag/double/triple click, Shift-extend)
+  + `SelectionBar` (floating mini bar); `tools/_text_actions.py` – `SelectionUI.run(key)` for comment,
+  highlight/underline/strikeout, replace/insert text, copy. Tools get `context_menu(ev, global_pos)`.
+* `ui/viewer/tools/edit_text.py` – `EditTextTool` edits a whole text surface (`flow.Story`) in ONE
+  transparent `InlineTextEditor` over a text-free backdrop (`flow.render_without`): one click puts the caret,
+  one QTextBlock per piece (tag `_PIECE`, geometry `_GEOM`), Enter/Backspace split/join paragraphs, arrows
+  past the end / Tab go to the next surface (`leave`), Esc/click-out commits (`apply_story`, one undo step per
+  session via a merge token). Typing pauses (`FLOW_PAUSE_MS`) let overflowing text flow on (`flow_now`), the
+  caret follows. Idle time prepares the visible pages (`_warm_step`). `AddTextTool` reuses the editor.
+* `ui/viewer/tools/edit_object.py` – `EditObjectTool` ("Markér objekt", `O`) works on `pageobjects.PageObject`s
+  only (never PyMuPDF): `selection()`, `primary`, `selection_kind()` ("none"|"image"|"text"|"graphic"|"multi"),
+  signal `selectionChanged`; hover outline, click / Shift/Ctrl+click / rubber band, Alt = deep select; drag =
+  `render_without` backdrop + `render_only` ghost + snapping (`snap_delta`, Alt off), one `move_objects` on
+  release; arrows nudge with `merge=True`; corner handles `scale_objects`, text side handles `set_text_width`;
+  Delete / Ctrl+X/C/V/D / Ctrl+Shift+]/[ are claimed from the window by an event filter on the view
+  (`_object_clipboard.py` holds the in-app `Clip`, across tabs); double-click on text → `edit_text_at`.
+  Inspector panels per selection kind in `EditObjectTool.PANELS`, built once as `cls(tool)` with `refresh()`
+  (`tools/_object_panels.py`: text, graphic, multi, image + Arrangér); "Medtag indhold" (O4) =
+  `set_include_contents`, remembered in QSettings `objects/include_contents`. Idle time warms the page's
+  objects (`_warm`) so hover/click stay < 100 ms.
+* `ui/saving.py` – `SaveController` on the window: `save/save_as/save_copy`, background writing (QThread),
+  autosave every `save/autosave_minutes` (default 2) to the recovery store, recovery prompt at start.
+* Clipboard: `ui/clipboard_source.py` – `read_clipboard()`, `clipboard_available()` (formats only; actions
+  refresh on `QClipboard.dataChanged`), `describe()`, `clip_options(settings, "new"|"insert")` (QSettings
+  `clipboard/new_page_size`, `clipboard/insert_page_size`, `clipboard/margin_mm`). Actions
+  `file.new_from_clipboard` (Ctrl+Shift+N, home card; new unsaved tab "Udklipsholder ÅÅÅÅ-MM-DD TT.MM.pdf") and
+  `pages.insert_clipboard` (`ws.insert_from_clipboard(before=False)`; Ctrl+V and the context menu in
+  `ThumbnailView`); toasts offer "Brug teksten i stedet" when `alternative == "text"` (only while
+  `pdf.revision` is unchanged).
 * `DocumentWorkspace` (one per tab) owns the `PdfDocument`, `PageView`, side
-  panels, current tool, and subscribes to `pdf.listen` to refresh.
+  panels, current tool, and subscribes to `pdf.listen` to refresh. The right-hand
+  `Inspector` has two tabs, "Egenskaber" and "Kommentarer" (`ws.comments`,
+  `ws.show_comments(page, xref, edit)`, `ws.comment_selection()` = Ctrl+Alt+M,
+  `ws.step_comment(±1)` = F8 / Shift+F8).
 
 ## Design language
 Neutral graphite/slate surfaces, one accent (indigo `#5B5BD6`), 8 px grid,

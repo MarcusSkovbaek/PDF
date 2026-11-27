@@ -6,3 +6,6 @@ dist/
 *.egg-info/
 .venv/
 screenshots/
+
+# local sub-agent worktrees
+.claude/worktrees/

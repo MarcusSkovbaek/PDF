@@ -9,8 +9,8 @@ STRINGS: dict[str, str] = {
     "core.undo.delete_pages": "Slet sider",
     "core.undo.move_page": "Flyt side",
     "core.undo.move_pages": "Flyt sider",
-    "core.undo.duplicate_page": "Dupliker side",
-    "core.undo.duplicate_pages": "Dupliker sider",
+    "core.undo.duplicate_page": "Duplikér side",
+    "core.undo.duplicate_pages": "Duplikér sider",
     "core.undo.insert_blank": "Indsæt tom side",
     "core.undo.insert_pages": "Indsæt sider",
     # -- undo labels: annotations --------------------------------------------

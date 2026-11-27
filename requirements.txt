@@ -1,3 +1,5 @@
-PySide6>=6.7
-pymupdf>=1.24
-qtawesome>=1.3
+# Exact versions the program is tested with (reproducible, small Windows build).
+# PyMuPDF 2.x pulls in numpy/onnxruntime/pymupdf4llm and changes font handling: not yet supported.
+PySide6==6.12.0
+pymupdf==1.28.2
+qtawesome==1.4.2

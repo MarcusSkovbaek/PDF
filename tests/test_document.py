@@ -79,3 +79,65 @@ def test_open_image_as_pdf(png_path):
     pdf = PdfDocument.open(png_path)
     assert pdf.page_count == 1
     assert pdf.path is None and pdf.display_name.endswith(".pdf")
+
+
+def test_undo_history_shares_unchanged_objects(sample_pdf):
+    """Snapshots are deduplicated per PDF object: many small edits of a big
+    document take far less memory than whole copies."""
+    from pdfstudio.core import annotations as A
+
+    raw = len(sample_pdf._serialize())
+    for i in range(30):
+        A.add_note(sample_pdf, i % 3, (50 + i, 50), f"note {i}", (1, 1, 0))
+    assert len(sample_pdf.history._undo) == 30
+    assert sample_pdf.history.memory < 3 * raw          # 30 whole copies would be ~30x
+    for _ in range(30):
+        assert sample_pdf.undo()
+    assert sample_pdf.history.memory > 0 and not sample_pdf.history.can_undo
+    for _ in range(30):
+        assert sample_pdf.redo()
+    assert len(list(sample_pdf.page(0).annots())) == 10
+    sample_pdf.history.clear()
+    assert sample_pdf.history.memory == 0
+
+
+def _without_id(data: bytes) -> bytes:
+    import re
+    # /ID entries are random – hex strings or (on Windows) literal ones
+    return re.sub(rb"/ID\s*\[.*?\]>>", b">>", data, flags=re.S)
+
+
+def test_write_bytes_matches_tobytes(monkeypatch):
+    from pdfstudio.core.document import write_bytes
+    doc = pymupdf.open()
+    for i in range(3):
+        doc.new_page().insert_text((72, 72), f"Side {i + 1} æøå", fontname="helv", fontsize=12)
+    doc = pymupdf.open("pdf", doc.tobytes())
+    for kw in ({}, {"garbage": 3, "deflate": True}):
+        assert _without_id(write_bytes(doc, **kw)) == _without_id(doc.tobytes(**kw))
+    locked = write_bytes(doc, garbage=3, deflate=True, encryption=pymupdf.PDF_ENCRYPT_AES_256,
+                         user_pw="hemmelig", owner_pw="ejer", permissions=pymupdf.PDF_PERM_PRINT)
+    reopened = pymupdf.open("pdf", locked)
+    assert reopened.needs_pass and reopened.authenticate("hemmelig") and "Side 2" in reopened[1].get_text()
+    monkeypatch.setattr("pdfstudio.core.document.NATIVE_WRITE", False)   # the plain fallback
+    assert _without_id(write_bytes(doc)) == _without_id(doc.tobytes())
+
+
+def test_edits_with_one_merge_token_are_one_undo_step(sample_pdf):
+    pdf = sample_pdf
+    original = pdf.page(0).get_text()
+    session = object()
+    for k in range(3):
+        with pdf.edit("Redigér tekst", merge=session) as doc:
+            doc[0].insert_text((72, 700 + 12 * k), f"linje {k}", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 1
+    with pdf.edit("Andet") as doc:                       # another step after the session
+        doc[0].insert_text((72, 760), "andet", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 2
+    assert pdf.undo() and "andet" not in pdf.page(0).get_text() and "linje 2" in pdf.page(0).get_text()
+    assert pdf.undo() and pdf.page(0).get_text() == original
+    # after an undo the old session cannot grow the redone step
+    assert pdf.redo()
+    with pdf.edit("Redigér tekst", merge=session) as doc:
+        doc[0].insert_text((72, 780), "ny", fontname="helv", fontsize=10)
+    assert len(pdf.history._undo) == 2

@@ -211,7 +211,7 @@ def test_duplicate_pages():
     pdf = make_lettered(4)
     assert duplicate_pages(pdf, [2, 0]) == [1, 4]
     assert letters(pdf) == "AABCCD"
-    assert pdf.history.undo_label == "Dupliker sider"
+    assert pdf.history.undo_label == "Duplikér sider"
     pdf.undo()
     assert duplicate_pages(pdf, [3]) == [4]  # last page
     assert letters(pdf) == "ABCDD"
